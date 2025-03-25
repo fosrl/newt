@@ -125,6 +125,16 @@ Make sure to have Go 1.23.1 installed.
 make local
 ```
 
+### Nix Flake
+
+```bash
+nix build
+```
+
+Binary will be at `./result/bin/newt`
+
+Development shell available with `nix develop`
+
 ## Licensing
 
 Newt is dual licensed under the AGPLv3 and the Fossorial Commercial license. For inquiries about commercial licensing, please contact us.
