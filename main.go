@@ -473,8 +473,6 @@ func main() {
 		if err != nil {
 			logger.Error("Failed to start WireGuard tester server: %v", err)
 		} else {
-			logger.Info("WireGuard connection testing server started on port %d", wgService.Port)
-
 			// Make sure to stop the server on exit
 			defer wgTesterServer.Stop()
 		}
