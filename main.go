@@ -358,6 +358,8 @@ var (
 	updownScript         string
 	interfaceName        string
 	generateAndSaveKeyTo string
+	rm                   bool
+	acceptClients        bool
 )
 
 func main() {
@@ -371,6 +373,8 @@ func main() {
 	updownScript = os.Getenv("UPDOWN_SCRIPT")
 	interfaceName = os.Getenv("INTERFACE")
 	generateAndSaveKeyTo = os.Getenv("GENERATE_AND_SAVE_KEY_TO")
+	rm = os.Getenv("RM") == "true"
+	acceptClients = os.Getenv("ACCEPT_CLIENTS") == "true"
 
 	if endpoint == "" {
 		flag.StringVar(&endpoint, "endpoint", "", "Endpoint of your pangolin server")
@@ -397,8 +401,10 @@ func main() {
 		flag.StringVar(&interfaceName, "interface", "wg1", "Name of the WireGuard interface")
 	}
 	if generateAndSaveKeyTo == "" {
-		flag.StringVar(&generateAndSaveKeyTo, "generateAndSaveKeyTo", "", "Path to save generated private key")
+		flag.StringVar(&generateAndSaveKeyTo, "generateAndSaveKeyTo", "/tmp/newtkey", "Path to save generated private key")
 	}
+	flag.BoolVar(&rm, "rm", true, "Remove the WireGuard interface")
+	flag.BoolVar(&acceptClients, "accept-clients", false, "Accept clients on the WireGuard interface")
 
 	// do a --version check
 	version := flag.Bool("version", false, "Print the version")
@@ -445,7 +451,7 @@ func main() {
 	var wgData WgData
 	var wgTesterServer *wgtester.Server
 
-	if generateAndSaveKeyTo != "" {
+	if acceptClients {
 		// make sure we are running on linux
 		if runtime.GOOS != "linux" {
 			logger.Fatal("Tunnel management is only supported on Linux right now!")
@@ -466,7 +472,7 @@ func main() {
 		if err != nil {
 			logger.Fatal("Failed to create WireGuard service: %v", err)
 		}
-		defer wgService.Close()
+		defer wgService.Close(rm)
 
 		wgTesterServer = wgtester.NewServer("0.0.0.0", wgService.Port, id) // TODO: maybe make this the same ip of the wg server?
 		err := wgTesterServer.Start()
@@ -719,7 +725,7 @@ persistent_keepalive_interval=5`, fixKey(fmt.Sprintf("%s", privateKey)), fixKey(
 	dev.Close()
 
 	if wgService != nil {
-		wgService.Close()
+		wgService.Close(rm)
 	}
 
 	if wgTesterServer != nil {

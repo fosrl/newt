@@ -196,11 +196,13 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 	return service, nil
 }
 
-func (s *WireGuardService) Close() {
+func (s *WireGuardService) Close(rm bool) {
 	s.wgClient.Close()
 	// Remove the WireGuard interface
-	if err := s.removeInterface(); err != nil {
-		logger.Error("Failed to remove WireGuard interface: %v", err)
+	if rm {
+		if err := s.removeInterface(); err != nil {
+			logger.Error("Failed to remove WireGuard interface: %v", err)
+		}
 	}
 }
 
@@ -772,7 +774,8 @@ func (s *WireGuardService) reportPeerBandwidth() error {
 func (s *WireGuardService) sendUDPHolePunch(serverAddr string) error {
 
 	if s.serverPubKey == "" || s.token == "" {
-		return fmt.Errorf("server public key or token is not set")
+		logger.Debug("Server public key or token not set, skipping UDP hole punch")
+		return nil
 	}
 
 	// Parse server address
