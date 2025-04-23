@@ -403,7 +403,7 @@ func main() {
 	if generateAndSaveKeyTo == "" {
 		flag.StringVar(&generateAndSaveKeyTo, "generateAndSaveKeyTo", "/tmp/newtkey", "Path to save generated private key")
 	}
-	flag.BoolVar(&rm, "rm", true, "Remove the WireGuard interface")
+	flag.BoolVar(&rm, "rm", false, "Remove the WireGuard interface")
 	flag.BoolVar(&acceptClients, "accept-clients", false, "Accept clients on the WireGuard interface")
 
 	// do a --version check
