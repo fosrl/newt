@@ -655,8 +655,10 @@ func (s *WireGuardService) handleUpdatePeer(msg websocket.WSMessage) {
 			peerConfig.Endpoint = endpoint
 			logger.Info("Updating Endpoint for peer %s to %s", request.PublicKey, request.Endpoint)
 		} else {
-			// Request contained endpoint field but it was empty/null - remove endpoint
-			peerConfig.Endpoint = nil
+			// specify any address to listen for any incoming packets
+			peerConfig.Endpoint = &net.UDPAddr{
+				IP: net.IPv4(127, 0, 0, 1),
+			}
 			logger.Info("Removing Endpoint for peer %s", request.PublicKey)
 		}
 	}
