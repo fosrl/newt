@@ -38,6 +38,7 @@ When Newt receives WireGuard control messages, it will use the information encod
 - `updown` (optional): A script to be called when targets are added or removed.
 - `tls-client-cert` (optional): Client certificate (p12 or pfx) for mTLS. See [mTLS](#mtls)
 - `docker-socket` (optional): Set the Docker socket to use the container discovery integration
+- `docker-label-enable` (optional): Enable functionality to opt-in containers by label that are sent to Pangolin
 
 - Example:
 
@@ -130,6 +131,36 @@ services:
       - NEWT_ID=2ix2t8xk22ubpfy 
       - NEWT_SECRET=nnisrfsdfc7prqsp9ewo1dvtvci50j5uiqotez00dgap0ii2 
       - TLS_CLIENT_CERT=./client.p12 
+```
+
+### Docker Label Enable
+When exposing docker containers, the containers which are provided to pangolin can be limited by 
+setting an environment variable `DOCKER_LABEL_ENABLE` to `true`. 
+
+Omission of this variable will send all containers to Pangolin.
+
+This feature is enabled on Newt like so:
+```yaml
+services:
+  newt:
+    image: fosrl/newt
+    container_name: newt
+    restart: unless-stopped
+    environment:
+      - PANGOLIN_ENDPOINT=https://example.com
+      - NEWT_ID=2ix2t8xk22ubpfy 
+      - NEWT_SECRET=nnisrfsdfc7prqsp9ewo1dvtvci50j5uiqotez00dgap0ii2 
+      - DOCKER_LABEL_ENABLE=true
+```
+
+Then any container that you want to be viewable in Newt is marked with a label:
+```yaml
+services:
+  nginx-example:
+    image: nginx:latest
+    container_name: nginx-example
+    labels:
+      - newt.docker.enable=true
 ```
 
 ## Build

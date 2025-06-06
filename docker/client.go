@@ -68,7 +68,7 @@ func CheckSocket(socketPath string) bool {
 }
 
 // ListContainers lists all Docker containers with their network information
-func ListContainers(socketPath string) ([]Container, error) {
+func ListContainers(socketPath string, labelEnable bool) ([]Container, error) {
 	// Use the provided socket path or default to standard location
 	if socketPath == "" {
 		socketPath = "/var/run/docker.sock"
@@ -96,6 +96,23 @@ func ListContainers(socketPath string) ([]Container, error) {
 
 	var dockerContainers []Container
 	for _, c := range containers {
+		// Get container name (remove leading slash)
+		name := ""
+		if len(c.Names) > 0 {
+			name = strings.TrimPrefix(c.Names[0], "/")
+		}
+
+		// If label enable functionality is on, if no label found with a "true" value, then we skip that one
+		if labelEnable {
+			labelEnableValue, ok := c.Labels["newt.docker.enable"]
+			if !ok || !strings.Contains(strings.ToLower(labelEnableValue), "true") {
+				logger.Debug("Container %s does not have required label to be used by pangolin", name)
+				continue
+			} else {
+				logger.Debug("Container %s has required label to be used by pangolin", name)
+			}
+		}
+
 		// Convert ports
 		var ports []Port
 		for _, port := range c.Ports {
@@ -110,12 +127,6 @@ func ListContainers(socketPath string) ([]Container, error) {
 				dockerPort.IP = port.IP
 			}
 			ports = append(ports, dockerPort)
-		}
-
-		// Get container name (remove leading slash)
-		name := ""
-		if len(c.Names) > 0 {
-			name = strings.TrimPrefix(c.Names[0], "/")
 		}
 
 		// Get network information by inspecting the container
