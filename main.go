@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fosrl/newt/docker"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/websocket"
@@ -58,7 +59,7 @@ func fixKey(key string) string {
 	// Decode from base64
 	decoded, err := base64.StdEncoding.DecodeString(key)
 	if err != nil {
-		logger.Fatal("Error decoding base64")
+		logger.Fatal("Error decoding base64: %v", err)
 	}
 
 	// Convert to hex
@@ -197,7 +198,7 @@ func monitorConnectionStatus(tnet *netstack.Net, serverIP string, client *websoc
 
 				// Tell the server we're back
 				err := client.SendMessage("newt/wg/register", map[string]interface{}{
-					"publicKey": fmt.Sprintf("%s", privateKey.PublicKey()),
+					"publicKey": privateKey.PublicKey().String(),
 				})
 
 				if err != nil {
@@ -360,6 +361,9 @@ var (
 	generateAndSaveKeyTo string
 	rm                   bool
 	acceptClients        bool
+	updownScript         string
+	tlsPrivateKey        string
+	dockerSocket         string
 )
 
 func main() {
@@ -375,6 +379,8 @@ func main() {
 	generateAndSaveKeyTo = os.Getenv("GENERATE_AND_SAVE_KEY_TO")
 	rm = os.Getenv("RM") == "true"
 	acceptClients = os.Getenv("ACCEPT_CLIENTS") == "true"
+	tlsPrivateKey = os.Getenv("TLS_CLIENT_CERT")
+	dockerSocket = os.Getenv("DOCKER_SOCKET")
 
 	if endpoint == "" {
 		flag.StringVar(&endpoint, "endpoint", "", "Endpoint of your pangolin server")
@@ -405,15 +411,24 @@ func main() {
 	}
 	flag.BoolVar(&rm, "rm", false, "Remove the WireGuard interface")
 	flag.BoolVar(&acceptClients, "accept-clients", false, "Accept clients on the WireGuard interface")
+	if tlsPrivateKey == "" {
+		flag.StringVar(&tlsPrivateKey, "tls-client-cert", "", "Path to client certificate used for mTLS")
+	}
+	if dockerSocket == "" {
+		flag.StringVar(&dockerSocket, "docker-socket", "", "Path to Docker socket (typically /var/run/docker.sock)")
+	}
 
 	// do a --version check
 	version := flag.Bool("version", false, "Print the version")
 
 	flag.Parse()
 
+	newtVersion := "Newt version replaceme"
 	if *version {
-		fmt.Println("Newt version replaceme")
+		fmt.Println(newtVersion)
 		os.Exit(0)
+	} else {
+		logger.Info(newtVersion)
 	}
 
 	logger.Init()
@@ -430,12 +445,16 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to generate private key: %v", err)
 	}
-
+	var opt websocket.ClientOption
+	if tlsPrivateKey != "" {
+		opt = websocket.WithTLSConfig(tlsPrivateKey)
+	}
 	// Create a new client
 	client, err := websocket.NewClient(
 		id,     // CLI arg takes precedence
 		secret, // CLI arg takes precedence
 		endpoint,
+		opt,
 	)
 	if err != nil {
 		logger.Fatal("Failed to create client: %v", err)
@@ -550,7 +569,7 @@ func main() {
 public_key=%s
 allowed_ip=%s/32
 endpoint=%s
-persistent_keepalive_interval=5`, fixKey(fmt.Sprintf("%s", privateKey)), fixKey(wgData.PublicKey), wgData.ServerIP, endpoint)
+persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.PublicKey), wgData.ServerIP, endpoint)
 
 		err = dev.IpcSet(config)
 		if err != nil {
@@ -685,12 +704,70 @@ persistent_keepalive_interval=5`, fixKey(fmt.Sprintf("%s", privateKey)), fixKey(
 		}
 	})
 
+	// Register handler for Docker socket check
+	client.RegisterHandler("newt/socket/check", func(msg websocket.WSMessage) {
+		logger.Info("Received Docker socket check request")
+
+		if dockerSocket == "" {
+			logger.Info("Docker socket path is not set")
+			err := client.SendMessage("newt/socket/status", map[string]interface{}{
+				"available":  false,
+				"socketPath": dockerSocket,
+			})
+			if err != nil {
+				logger.Error("Failed to send Docker socket check response: %v", err)
+			}
+			return
+		}
+
+		// Check if Docker socket is available
+		isAvailable := docker.CheckSocket(dockerSocket)
+
+		// Send response back to server
+		err := client.SendMessage("newt/socket/status", map[string]interface{}{
+			"available":  isAvailable,
+			"socketPath": dockerSocket,
+		})
+		if err != nil {
+			logger.Error("Failed to send Docker socket check response: %v", err)
+		} else {
+			logger.Info("Docker socket check response sent: available=%t", isAvailable)
+		}
+	})
+
+	// Register handler for Docker container listing
+	client.RegisterHandler("newt/socket/fetch", func(msg websocket.WSMessage) {
+		logger.Info("Received Docker container fetch request")
+
+		if dockerSocket == "" {
+			logger.Info("Docker socket path is not set")
+			return
+		}
+
+		// List Docker containers
+		containers, err := docker.ListContainers(dockerSocket)
+		if err != nil {
+			logger.Error("Failed to list Docker containers: %v", err)
+			return
+		}
+
+		// Send container list back to server
+		err = client.SendMessage("newt/socket/containers", map[string]interface{}{
+			"containers": containers,
+		})
+		if err != nil {
+			logger.Error("Failed to send Docker container list: %v", err)
+		} else {
+			logger.Info("Docker container list sent, count: %d", len(containers))
+		}
+	})
+
 	client.OnConnect(func() error {
 		publicKey := privateKey.PublicKey()
 		logger.Debug("Public key: %s", publicKey)
 
 		err := client.SendMessage("newt/wg/register", map[string]interface{}{
-			"publicKey": fmt.Sprintf("%s", publicKey),
+			"publicKey": publicKey.String(),
 		})
 		if err != nil {
 			logger.Error("Failed to send registration message: %v", err)
@@ -720,7 +797,7 @@ persistent_keepalive_interval=5`, fixKey(fmt.Sprintf("%s", privateKey)), fixKey(
 	// Wait for interrupt signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	sigReceived := <-sigCh
 
 	dev.Close()
 

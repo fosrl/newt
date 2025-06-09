@@ -1,4 +1,4 @@
-FROM golang:1.23.1-alpine AS builder
+FROM golang:1.24.4-alpine AS builder
 
 # Set the working directory inside the container
 WORKDIR /app
@@ -15,9 +15,9 @@ COPY . .
 # Build the application
 RUN CGO_ENABLED=0 GOOS=linux go build -o /newt
 
-FROM alpine:3.19 AS runner
+FROM alpine:3.22 AS runner
 
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates tzdata
 
 COPY --from=builder /newt /usr/local/bin/
 COPY entrypoint.sh /

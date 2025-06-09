@@ -2,27 +2,29 @@ package websocket
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"software.sslmate.com/src/go-pkcs12"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/fosrl/newt/logger"
-
 	"github.com/gorilla/websocket"
 )
 
 type Client struct {
-	conn        *websocket.Conn
-	config      *Config
-	baseURL     string
-	handlers    map[string]MessageHandler
-	done        chan struct{}
-	handlersMux sync.RWMutex
-
+	conn              *websocket.Conn
+	config            *Config
+	baseURL           string
+	handlers          map[string]MessageHandler
+	done              chan struct{}
+	handlersMux       sync.RWMutex
 	reconnectInterval time.Duration
 	isConnected       bool
 	reconnectMux      sync.RWMutex
@@ -39,6 +41,12 @@ type MessageHandler func(message WSMessage)
 func WithBaseURL(url string) ClientOption {
 	return func(c *Client) {
 		c.baseURL = url
+	}
+}
+
+func WithTLSConfig(tlsClientCertPath string) ClientOption {
+	return func(c *Client) {
+		c.config.TlsClientCert = tlsClientCertPath
 	}
 }
 
@@ -68,8 +76,13 @@ func NewClient(newtID, secret string, endpoint string, opts ...ClientOption) (*C
 	}
 
 	// Apply options before loading config
-	for _, opt := range opts {
-		opt(client)
+	if opts != nil {
+		for _, opt := range opts {
+			if opt == nil {
+				continue
+			}
+			opt(client)
+		}
 	}
 
 	// Load existing config if available
@@ -154,6 +167,14 @@ func (c *Client) getToken() (string, error) {
 	// Ensure we have the base URL without trailing slashes
 	baseEndpoint := strings.TrimRight(baseURL.String(), "/")
 
+	var tlsConfig *tls.Config = nil
+	if c.config.TlsClientCert != "" {
+		tlsConfig, err = loadClientCertificate(c.config.TlsClientCert)
+		if err != nil {
+			return "", fmt.Errorf("failed to load certificate %s: %w", c.config.TlsClientCert, err)
+		}
+	}
+
 	// If we already have a token, try to use it
 	if c.config.Token != "" {
 		tokenCheckData := map[string]interface{}{
@@ -182,6 +203,11 @@ func (c *Client) getToken() (string, error) {
 
 		// Make the request
 		client := &http.Client{}
+		if tlsConfig != nil {
+			client.Transport = &http.Transport{
+				TLSClientConfig: tlsConfig,
+			}
+		}
 		resp, err := client.Do(req)
 		if err != nil {
 			return "", fmt.Errorf("failed to check token validity: %w", err)
@@ -225,6 +251,11 @@ func (c *Client) getToken() (string, error) {
 
 	// Make the request
 	client := &http.Client{}
+	if tlsConfig != nil {
+		client.Transport = &http.Transport{
+			TLSClientConfig: tlsConfig,
+		}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to request new token: %w", err)
@@ -303,7 +334,16 @@ func (c *Client) establishConnection() error {
 	u.RawQuery = q.Encode()
 
 	// Connect to WebSocket
-	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	dialer := websocket.DefaultDialer
+	if c.config.TlsClientCert != "" {
+		logger.Info("Adding tls to req")
+		tlsConfig, err := loadClientCertificate(c.config.TlsClientCert)
+		if err != nil {
+			return fmt.Errorf("failed to load certificate %s: %w", c.config.TlsClientCert, err)
+		}
+		dialer.TLSClientConfig = tlsConfig
+	}
+	conn, _, err := dialer.Dial(u.String(), nil)
 	if err != nil {
 		return fmt.Errorf("failed to connect to WebSocket: %w", err)
 	}
@@ -360,4 +400,43 @@ func (c *Client) setConnected(status bool) {
 	c.reconnectMux.Lock()
 	defer c.reconnectMux.Unlock()
 	c.isConnected = status
+}
+
+// LoadClientCertificate Helper method to load client certificates
+func loadClientCertificate(p12Path string) (*tls.Config, error) {
+	logger.Info("Loading tls-client-cert %s", p12Path)
+	// Read the PKCS12 file
+	p12Data, err := os.ReadFile(p12Path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read PKCS12 file: %w", err)
+	}
+
+	// Parse PKCS12 with empty password for non-encrypted files
+	privateKey, certificate, caCerts, err := pkcs12.DecodeChain(p12Data, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode PKCS12: %w", err)
+	}
+
+	// Create certificate
+	cert := tls.Certificate{
+		Certificate: [][]byte{certificate.Raw},
+		PrivateKey:  privateKey,
+	}
+
+	// Optional: Add CA certificates if present
+	rootCAs, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load system cert pool: %w", err)
+	}
+	if len(caCerts) > 0 {
+		for _, caCert := range caCerts {
+			rootCAs.AddCert(caCert)
+		}
+	}
+
+	// Create TLS configuration
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      rootCAs,
+	}, nil
 }

@@ -6,7 +6,6 @@ Newt is a fully user space [WireGuard](https://www.wireguard.com/) tunnel client
 
 Newt is used with Pangolin and Gerbil as part of the larger system. See documentation below:
 
--   [Installation Instructions](https://docs.fossorial.io)
 -   [Full Documentation](https://docs.fossorial.io)
 
 ## Preview
@@ -37,8 +36,10 @@ When Newt receives WireGuard control messages, it will use the information encod
 - `dns`: DNS server to use to resolve the endpoint
 - `log-level` (optional): The log level to use. Default: INFO
 - `updown` (optional): A script to be called when targets are added or removed.
- 
-Example:
+- `tls-client-cert` (optional): Client certificate (p12 or pfx) for mTLS. See [mTLS](#mtls)
+- `docker-socket` (optional): Set the Docker socket to use the container discovery integration
+
+- Example:
 
 ```bash
 ./newt \
@@ -75,23 +76,15 @@ services:
         - --endpoint https://example.com
 ```
 
-Finally a basic systemd service:
+### Docker Socket Integration
 
-```
-[Unit]
-Description=Newt VPN Client
-After=network.target
+Newt can integrate with the Docker socket to provide remote inspection of Docker containers. This allows Pangolin to query and retrieve detailed information about containers running on the Newt client, including metadata, network configuration, port mappings, and more.
 
-[Service]
-ExecStart=/usr/local/bin/newt --id 31frd0uzbjvp721 --secret h51mmlknrvrwv8s4r1i210azhumt6isgbpyavxodibx1k2d6 --endpoint https://example.com
-Restart=always
-User=root
+**Configuration:**
 
-[Install]
-WantedBy=multi-user.target
-```
+You can specify the Docker socket path using the `--docker-socket` CLI argument or by setting the `DOCKER_SOCKET` environment variable. On most linux systems the socket is `/var/run/docker.sock`
 
-Make sure to `mv ./newt /usr/local/bin/newt`!
+If the Docker socket is not available or accessible, Newt will gracefully disable Docker integration and continue normal operation.
 
 ### Updown
 
@@ -106,6 +99,38 @@ It will get called with args when a target is added:
 Returning a string from the script in the format of a target (`ip:dst` so `10.0.0.1:8080`) it will override the target and use this value instead to proxy.
 
 You can look at updown.py as a reference script to get started!
+
+### mTLS
+Newt supports mutual TLS (mTLS) authentication, if the server has been configured to request a client certificate.
+* Only PKCS12 (.p12 or .pfx) file format is accepted
+* The PKCS12 file must contain: 
+  * Private key
+  * Public certificate
+  * CA certificate
+* Encrypted PKCS12 files are currently not supported
+
+Examples:
+
+```bash
+./newt \
+--id 31frd0uzbjvp721 \
+--secret h51mmlknrvrwv8s4r1i210azhumt6isgbpyavxodibx1k2d6 \
+--endpoint https://example.com \
+--tls-client-cert ./client.p12
+```
+
+```yaml
+services:
+  newt:
+    image: fosrl/newt
+    container_name: newt
+    restart: unless-stopped
+    environment:
+      - PANGOLIN_ENDPOINT=https://example.com
+      - NEWT_ID=2ix2t8xk22ubpfy 
+      - NEWT_SECRET=nnisrfsdfc7prqsp9ewo1dvtvci50j5uiqotez00dgap0ii2 
+      - TLS_CLIENT_CERT=./client.p12 
+```
 
 ## Build
 
@@ -124,6 +149,16 @@ Make sure to have Go 1.23.1 installed.
 ```bash
 make local
 ```
+
+### Nix Flake
+
+```bash
+nix build
+```
+
+Binary will be at `./result/bin/newt`
+
+Development shell available with `nix develop`
 
 ## Licensing
 

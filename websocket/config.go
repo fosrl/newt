@@ -54,6 +54,9 @@ func (c *Client) loadConfig() error {
 	if c.config.Secret == "" {
 		c.config.Secret = config.Secret
 	}
+	if c.config.TlsClientCert == "" {
+		c.config.TlsClientCert = config.TlsClientCert
+	}
 	if c.config.Endpoint == "" {
 		c.config.Endpoint = config.Endpoint
 		c.baseURL = config.Endpoint
