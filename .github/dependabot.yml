@@ -13,10 +13,6 @@ updates:
         dependency-type: "development"
         update-types:
           - "minor"
-      dev-major-updates:
-        dependency-type: "development"
-        update-types:
-          - "major"
       prod-patch-updates:
         dependency-type: "production"
         update-types:
@@ -25,10 +21,6 @@ updates:
         dependency-type: "production"
         update-types:
           - "minor"
-      prod-major-updates:
-        dependency-type: "production"
-        update-types:
-          - "major"
 
   - package-ecosystem: "docker"
     directory: "/"
@@ -41,6 +33,3 @@ updates:
       minor-updates:
         update-types:
           - "minor"
-      major-updates:
-        update-types:
-          - "major"

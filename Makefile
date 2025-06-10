@@ -3,7 +3,7 @@ all: build push
 
 docker-build-release:
 	@if [ -z "$(tag)" ]; then \
-		echo "Error: tag is required. Usage: make build-all tag=<tag>"; \
+		echo "Error: tag is required. Usage: make docker-build-release tag=<tag>"; \
 		exit 1; \
 	fi
 	docker buildx build --platform linux/arm/v7,linux/arm64,linux/amd64 -t fosrl/newt:latest -f Dockerfile --push .
