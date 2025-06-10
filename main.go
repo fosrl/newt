@@ -356,7 +356,6 @@ var (
 	privateKey           wgtypes.Key
 	err                  error
 	logLevel             string
-	updownScript         string
 	interfaceName        string
 	generateAndSaveKeyTo string
 	rm                   bool
@@ -797,7 +796,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	// Wait for interrupt signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	sigReceived := <-sigCh
+	<-sigCh
 
 	dev.Close()
 
