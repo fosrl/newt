@@ -53,9 +53,13 @@ type TargetData struct {
 	Targets []string `json:"targets"`
 }
 
+type ExitNodeData struct {
+	ExitNodes []ExitNode `json:"exitNodes"`
+}
+
 // ExitNode represents an exit node with an ID, endpoint, and weight.
 type ExitNode struct {
-	ID       string  `json:"id"`
+	ID       string  `json:"exitNodeId"`
 	Endpoint string  `json:"endpoint"`
 	Weight   float64 `json:"weight"`
 }
@@ -75,7 +79,7 @@ func fixKey(key string) string {
 }
 
 func ping(tnet *netstack.Net, dst string) error {
-	logger.Info("Pinging %s", dst)
+	logger.Debug("Pinging %s", dst)
 	socket, err := tnet.Dial("ping4", dst)
 	if err != nil {
 		return fmt.Errorf("failed to create ICMP socket: %w", err)
@@ -122,7 +126,7 @@ func ping(tnet *netstack.Net, dst string) error {
 			replyPing.Seq, replyPing.Data, requestPing.Seq, requestPing.Data)
 	}
 
-	logger.Info("Ping latency: %v", time.Since(start))
+	logger.Debug("Ping latency: %v", time.Since(start))
 	return nil
 }
 
@@ -636,16 +640,20 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		logger.Info("Received ping message")
 
 		// Parse the incoming list of exit nodes
-		var exitNodes []ExitNode
+		// Exit nodes is a json
+		var exitNodeData ExitNodeData
+
 		jsonData, err := json.Marshal(msg.Data)
 		if err != nil {
 			logger.Info("Error marshaling data: %v", err)
 			return
 		}
-		if err := json.Unmarshal(jsonData, &exitNodes); err != nil {
+		if err := json.Unmarshal(jsonData, &exitNodeData); err != nil {
 			logger.Info("Error unmarshaling exit node data: %v", err)
 			return
 		}
+		exitNodes := exitNodeData.ExitNodes
+
 		if len(exitNodes) == 0 {
 			logger.Info("No exit nodes provided")
 			return
@@ -705,8 +713,8 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		logger.Info("Selected exit node: %s (%s)", bestNode.ID, bestNode.Endpoint)
 
 		err = client.SendMessage("newt/wg/register", map[string]interface{}{
-			"publicKey": publicKey.String(),
-			"exitNode":  bestNode.ID,
+			"publicKey":  publicKey.String(),
+			"exitNodeId": bestNode.ID,
 		})
 		if err != nil {
 			logger.Error("Failed to send registration message: %v", err)
