@@ -82,9 +82,7 @@ Newt can integrate with the Docker socket to provide remote inspection of Docker
 
 **Configuration:**
 
-You can specify the Docker socket path using the `--docker-socket` CLI argument or by setting the `DOCKER_SOCKET` environment variable. On most linux systems the socket is `/var/run/docker.sock`. You need to mount the host socket as a volume for the newt container to access it.
-
-If the Docker socket is not available or accessible, Newt will gracefully disable Docker integration and continue normal operation.
+You can specify the Docker socket path using the `--docker-socket` CLI argument or by setting the `DOCKER_SOCKET` environment variable. On most linux systems the socket is `/var/run/docker.sock`. When deploying newt as a container, you need to mount the host socket as a volume for the newt container to access it. If the Docker socket is not available or accessible, Newt will gracefully disable Docker integration and continue normal operation.
 
 ```yaml
 services:
