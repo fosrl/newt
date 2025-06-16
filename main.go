@@ -690,17 +690,25 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			logger.Info("Exit node %s latency: %v", node.ID, latency)
 		}
 
-		// Select the best node based on weighted score (latency * (1/weight))
+		// Select the best node based on weighted score 
+		// weight / latency
+		// choose highest score
+		// if same score, choose lowest latency
 		var bestNode *ExitNode
-		var bestScore float64 = 1e12 // large initial value
+		var bestScore float64 = -1e12 //  small value
+		var bestLatency time.Duration = 1e12 // large value
 		for _, res := range results {
 			if res.Err != nil || res.Node.Weight <= 0 {
 				continue
 			}
-			score := float64(res.Latency.Milliseconds()) / res.Node.Weight
+			score := res.Node.Weight / float64(res.Latency.Milliseconds())
 			logger.Info("Exit node %s score: %.2f (latency: %dms, weight: %.2f)", res.Node.ID, score, res.Latency.Milliseconds(), res.Node.Weight)
 			if score < bestScore {
 				bestScore = score
+				bestLatency = res.Latency
+				bestNode = &res.Node
+			} else if score == bestScore && res.Latency < bestLatency {
+				bestLatency = res.Latency
 				bestNode = &res.Node
 			}
 		}
