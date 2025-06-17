@@ -59,7 +59,8 @@ type ExitNodeData struct {
 
 // ExitNode represents an exit node with an ID, endpoint, and weight.
 type ExitNode struct {
-	ID       string  `json:"exitNodeId"`
+	ID       int     `json:"exitNodeId"`
+	Name     string  `json:"exitNodeName"`
 	Endpoint string  `json:"endpoint"`
 	Weight   float64 `json:"weight"`
 }
@@ -687,23 +688,23 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			}
 			resp.Body.Close()
 			results[i] = nodeResult{Node: node, Latency: latency, Err: nil}
-			logger.Info("Exit node %s latency: %v", node.ID, latency)
+			// logger.Info("Exit node %s latency: %v", node.Name, latency)
 		}
 
-		// Select the best node based on weighted score 
+		// Select the best node based on weighted score
 		// weight / latency
 		// choose highest score
 		// if same score, choose lowest latency
 		var bestNode *ExitNode
-		var bestScore float64 = -1e12 //  small value
+		var bestScore float64 = -1e12        //  small value
 		var bestLatency time.Duration = 1e12 // large value
 		for _, res := range results {
 			if res.Err != nil || res.Node.Weight <= 0 {
 				continue
 			}
-			score := res.Node.Weight / float64(res.Latency.Milliseconds())
-			logger.Info("Exit node %s score: %.2f (latency: %dms, weight: %.2f)", res.Node.ID, score, res.Latency.Milliseconds(), res.Node.Weight)
-			if score < bestScore {
+			score := (res.Node.Weight / float64(res.Latency.Milliseconds())) * 1000
+			logger.Info("Exit node %s with score: %.2f (latency: %dms, weight: %.2f)", res.Node.Name, score, res.Latency.Milliseconds(), res.Node.Weight)
+			if score > bestScore {
 				bestScore = score
 				bestLatency = res.Latency
 				bestNode = &res.Node
@@ -718,7 +719,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			return
 		}
 
-		logger.Info("Selected exit node: %s (%s)", bestNode.ID, bestNode.Endpoint)
+		logger.Info("Selected exit node: %s (%s)", bestNode.Name, bestNode.Endpoint)
 
 		err = client.SendMessage("newt/wg/register", map[string]interface{}{
 			"publicKey":  publicKey.String(),
