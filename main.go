@@ -341,18 +341,20 @@ func resolveDomain(domain string) (string, error) {
 }
 
 var (
-	endpoint      string
-	id            string
-	secret        string
-	mtu           string
-	mtuInt        int
-	dns           string
-	privateKey    wgtypes.Key
-	err           error
-	logLevel      string
-	updownScript  string
-	tlsPrivateKey string
-	dockerSocket  string
+	endpoint                           string
+	id                                 string
+	secret                             string
+	mtu                                string
+	mtuInt                             int
+	dns                                string
+	privateKey                         wgtypes.Key
+	err                                error
+	logLevel                           string
+	updownScript                       string
+	tlsPrivateKey                      string
+	dockerSocket                       string
+	dockerEnforceNetworkValidation     string
+	dockerEnforceNetworkValidationBool bool
 )
 
 func main() {
@@ -366,6 +368,7 @@ func main() {
 	updownScript = os.Getenv("UPDOWN_SCRIPT")
 	tlsPrivateKey = os.Getenv("TLS_CLIENT_CERT")
 	dockerSocket = os.Getenv("DOCKER_SOCKET")
+	dockerEnforceNetworkValidation = os.Getenv("DOCKER_ENFORCE_NETWORK_VALIDATION")
 
 	if endpoint == "" {
 		flag.StringVar(&endpoint, "endpoint", "", "Endpoint of your pangolin server")
@@ -394,6 +397,9 @@ func main() {
 	if dockerSocket == "" {
 		flag.StringVar(&dockerSocket, "docker-socket", "", "Path to Docker socket (typically /var/run/docker.sock)")
 	}
+	if dockerEnforceNetworkValidation == "" {
+		flag.StringVar(&dockerEnforceNetworkValidation, "docker-enforce-network-validation", "false", "Enforce validation of container on newt network (true or false)")
+	}
 
 	// do a --version check
 	version := flag.Bool("version", false, "Print the version")
@@ -418,6 +424,13 @@ func main() {
 		logger.Fatal("Failed to parse MTU: %v", err)
 	}
 
+	// parse if we want to enforce container network validation
+	dockerEnforceNetworkValidationBool, err = strconv.ParseBool(dockerEnforceNetworkValidation)
+	if err != nil {
+		logger.Info("Docker enforce network validation cannot be parsed. Defaulting to 'false'")
+		dockerEnforceNetworkValidationBool = false
+	}
+
 	privateKey, err = wgtypes.GeneratePrivateKey()
 	if err != nil {
 		logger.Fatal("Failed to generate private key: %v", err)
@@ -435,6 +448,24 @@ func main() {
 	)
 	if err != nil {
 		logger.Fatal("Failed to create client: %v", err)
+	}
+
+	// output env var values if set
+	logger.Debug("Endpoint: %v", endpoint)
+	logger.Debug("Log Level: %v", logLevel)
+	logger.Debug("Docker Network Validation Enabled: %v", dockerEnforceNetworkValidationBool)
+	logger.Debug("TLS Private Key Set: %v", tlsPrivateKey != "")
+	if dns != "" {
+		logger.Debug("Dns: %v", dns)
+	}
+	if dockerSocket != "" {
+		logger.Debug("Docker Socket: %v", dockerSocket)
+	}
+	if mtu != "" {
+		logger.Debug("MTU: %v", mtu)
+	}
+	if updownScript != "" {
+		logger.Debug("Up Down Script: %v", updownScript)
 	}
 
 	// Create TUN device and network stack
@@ -676,7 +707,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		// List Docker containers
-		containers, err := docker.ListContainers(dockerSocket)
+		containers, err := docker.ListContainers(dockerSocket, dockerEnforceNetworkValidationBool)
 		if err != nil {
 			logger.Error("Failed to list Docker containers: %v", err)
 			return
@@ -760,12 +791,14 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 		}
 
 		if action == "add" {
-			target := parts[1] + ":" + parts[2]
+			targetAddress := parts[1]
+			targetPort, _ := strconv.Atoi(parts[2])
+			combinedAddress := targetAddress + ":" + parts[2]
 
 			// Call updown script if provided
-			processedTarget := target
+			processedTarget := combinedAddress
 			if updownScript != "" {
-				newTarget, err := executeUpdownScript(action, proto, target)
+				newTarget, err := executeUpdownScript(action, proto, combinedAddress)
 				if err != nil {
 					logger.Warn("Updown script error: %v", err)
 				} else if newTarget != "" {
@@ -782,9 +815,19 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 				}
 			}
 
-			// Add the new target
-			pm.AddTarget(proto, tunnelIP, port, processedTarget)
-
+			// If docker network validation is enabled
+			if dockerEnforceNetworkValidationBool {
+				// If the target address is within the host container network, the target will be added
+				isWithinHostContainerNetwork, err := docker.IsWithinHostNetwork(dockerSocket, targetAddress, targetPort)
+				if !isWithinHostContainerNetwork {
+					logger.Warn("Not adding target address: %v", err)
+				} else {
+					pm.AddTarget(proto, tunnelIP, port, processedTarget)
+				}
+			} else {
+				// If we're not enforcing network validation, just proceed with adding the target
+				pm.AddTarget(proto, tunnelIP, port, processedTarget)
+			}
 		} else if action == "remove" {
 			logger.Info("Removing target with port %d", port)
 

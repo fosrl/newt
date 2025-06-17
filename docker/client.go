@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/fosrl/newt/logger"
 )
@@ -67,12 +70,60 @@ func CheckSocket(socketPath string) bool {
 	return true
 }
 
+// IsWithinHostNetwork checks if a provided target is within the host container network
+func IsWithinHostNetwork(socketPath string, targetAddress string, targetPort int) (bool, error) {
+	// Always enforce network validation
+	containers, err := ListContainers(socketPath, true)
+	if err != nil {
+
+		return false, err
+	}
+
+	// Determine if given an IP address
+	var parsedTargetAddressIp = net.ParseIP(targetAddress)
+
+	// If we can find the passed hostname/IP address in the networks or as the container name, it is valid and can add it
+	for _, c := range containers {
+		for _, network := range c.Networks {
+			// If the target address is not an IP address, use the container name
+			if parsedTargetAddressIp == nil {
+				if c.Name == targetAddress {
+					for _, port := range c.Ports {
+						if port.PublicPort == targetPort || port.PrivatePort == targetPort {
+							return true, nil
+						}
+					}
+				}
+			} else {
+				//If the IP address matches, check the ports being mapped too
+				if network.IPAddress == targetAddress {
+					for _, port := range c.Ports {
+						if port.PublicPort == targetPort || port.PrivatePort == targetPort {
+							return true, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	combinedTargetAddress := targetAddress + ":" + strconv.Itoa(targetPort)
+	return false, fmt.Errorf("target address not within host container network: %s", combinedTargetAddress)
+}
+
 // ListContainers lists all Docker containers with their network information
-func ListContainers(socketPath string) ([]Container, error) {
+func ListContainers(socketPath string, enforceNetworkValidation bool) ([]Container, error) {
 	// Use the provided socket path or default to standard location
 	if socketPath == "" {
 		socketPath = "/var/run/docker.sock"
 	}
+
+	// Used to filter down containers returned to Pangolin
+	containerFilters := filters.NewArgs()
+
+	// Used to determine if we will send IP addresses or hostnames to Pangolin
+	useContainerIpAddresses := true
+	hostContainerId := ""
 
 	// Create a new Docker client
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -86,16 +137,54 @@ func ListContainers(socketPath string) ([]Container, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Docker client: %v", err)
 	}
+
 	defer cli.Close()
 
+	hostContainer, err := getHostContainer(ctx, cli)
+	if enforceNetworkValidation && err != nil {
+		return nil, fmt.Errorf("network validation enforced, cannot validate due to: %v", err)
+	}
+
+	// We may not be able to get back host container in scenarios like running the container in network mode 'host'
+	if hostContainer != nil {
+		// We can use the host container to filter out the list of returned containers
+		hostContainerId = hostContainer.ID
+
+		for hostContainerNetworkName := range hostContainer.NetworkSettings.Networks {
+			// If we're enforcing network validation, we'll filter on the host containers networks
+			if enforceNetworkValidation {
+				containerFilters.Add("network", hostContainerNetworkName)
+			}
+
+			// If the container is on the docker bridge network, we will use IP addresses over hostnames
+			if useContainerIpAddresses && hostContainerNetworkName != "bridge" {
+				useContainerIpAddresses = false
+			}
+		}
+	}
+
 	// List containers
-	containers, err := cli.ContainerList(ctx, container.ListOptions{All: true})
+	containers, err := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: containerFilters})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list containers: %v", err)
 	}
 
 	var dockerContainers []Container
 	for _, c := range containers {
+		// Short ID like docker ps
+		shortId := c.ID[:12]
+
+		// Skip host container if set
+		if hostContainerId != "" && c.ID == hostContainerId {
+			continue
+		}
+
+		// Get container name (remove leading slash)
+		name := ""
+		if len(c.Names) > 0 {
+			name = strings.TrimPrefix(c.Names[0], "/")
+		}
+
 		// Convert ports
 		var ports []Port
 		for _, port := range c.Ports {
@@ -112,44 +201,36 @@ func ListContainers(socketPath string) ([]Container, error) {
 			ports = append(ports, dockerPort)
 		}
 
-		// Get container name (remove leading slash)
-		name := ""
-		if len(c.Names) > 0 {
-			name = strings.TrimPrefix(c.Names[0], "/")
-		}
-
 		// Get network information by inspecting the container
 		networks := make(map[string]Network)
 
-		// Inspect container to get detailed network information
-		containerInfo, err := cli.ContainerInspect(ctx, c.ID)
-		if err != nil {
-			logger.Debug("Failed to inspect container %s for network info: %v", c.ID[:12], err)
-			// Continue without network info if inspection fails
-		} else {
-			// Extract network information from inspection
-			if containerInfo.NetworkSettings != nil && containerInfo.NetworkSettings.Networks != nil {
-				for networkName, endpoint := range containerInfo.NetworkSettings.Networks {
-					dockerNetwork := Network{
-						NetworkID:           endpoint.NetworkID,
-						EndpointID:          endpoint.EndpointID,
-						Gateway:             endpoint.Gateway,
-						IPAddress:           endpoint.IPAddress,
-						IPPrefixLen:         endpoint.IPPrefixLen,
-						IPv6Gateway:         endpoint.IPv6Gateway,
-						GlobalIPv6Address:   endpoint.GlobalIPv6Address,
-						GlobalIPv6PrefixLen: endpoint.GlobalIPv6PrefixLen,
-						MacAddress:          endpoint.MacAddress,
-						Aliases:             endpoint.Aliases,
-						DNSNames:            endpoint.DNSNames,
-					}
-					networks[networkName] = dockerNetwork
+		// Extract network information from inspection
+		if c.NetworkSettings != nil && c.NetworkSettings.Networks != nil {
+			for networkName, endpoint := range c.NetworkSettings.Networks {
+				dockerNetwork := Network{
+					NetworkID:           endpoint.NetworkID,
+					EndpointID:          endpoint.EndpointID,
+					Gateway:             endpoint.Gateway,
+					IPPrefixLen:         endpoint.IPPrefixLen,
+					IPv6Gateway:         endpoint.IPv6Gateway,
+					GlobalIPv6Address:   endpoint.GlobalIPv6Address,
+					GlobalIPv6PrefixLen: endpoint.GlobalIPv6PrefixLen,
+					MacAddress:          endpoint.MacAddress,
+					Aliases:             endpoint.Aliases,
+					DNSNames:            endpoint.DNSNames,
 				}
+
+				// Use IPs over hostnames/containers as we're on the bridge network
+				if useContainerIpAddresses {
+					dockerNetwork.IPAddress = endpoint.IPAddress
+				}
+
+				networks[networkName] = dockerNetwork
 			}
 		}
 
 		dockerContainer := Container{
-			ID:       c.ID[:12], // Show short ID like docker ps
+			ID:       shortId,
 			Name:     name,
 			Image:    c.Image,
 			State:    c.State,
@@ -159,8 +240,26 @@ func ListContainers(socketPath string) ([]Container, error) {
 			Created:  c.Created,
 			Networks: networks,
 		}
+
 		dockerContainers = append(dockerContainers, dockerContainer)
 	}
 
 	return dockerContainers, nil
+}
+
+// getHostContainer gets the current container for the current host if possible
+func getHostContainer(dockerContext context.Context, dockerClient *client.Client) (*container.InspectResponse, error) {
+	// Get hostname from the os
+	hostContainerName, err := os.Hostname()
+	if err != nil {
+		return nil, fmt.Errorf("failed to find hostname for container")
+	}
+
+	// Get host container from the docker socket
+	hostContainer, err := dockerClient.ContainerInspect(dockerContext, hostContainerName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find host container")
+	}
+
+	return &hostContainer, nil
 }
