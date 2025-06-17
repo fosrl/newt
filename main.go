@@ -79,11 +79,11 @@ func fixKey(key string) string {
 	return hex.EncodeToString(decoded)
 }
 
-func ping(tnet *netstack.Net, dst string) error {
+func ping(tnet *netstack.Net, dst string) (time.Duration, error) {
 	logger.Debug("Pinging %s", dst)
 	socket, err := tnet.Dial("ping4", dst)
 	if err != nil {
-		return fmt.Errorf("failed to create ICMP socket: %w", err)
+		return 0, fmt.Errorf("failed to create ICMP socket: %w", err)
 	}
 	defer socket.Close()
 
@@ -94,41 +94,42 @@ func ping(tnet *netstack.Net, dst string) error {
 
 	icmpBytes, err := (&icmp.Message{Type: ipv4.ICMPTypeEcho, Code: 0, Body: &requestPing}).Marshal(nil)
 	if err != nil {
-		return fmt.Errorf("failed to marshal ICMP message: %w", err)
+		return 0, fmt.Errorf("failed to marshal ICMP message: %w", err)
 	}
 
 	if err := socket.SetReadDeadline(time.Now().Add(time.Second * 10)); err != nil {
-		return fmt.Errorf("failed to set read deadline: %w", err)
+		return 0, fmt.Errorf("failed to set read deadline: %w", err)
 	}
 
 	start := time.Now()
 	_, err = socket.Write(icmpBytes)
 	if err != nil {
-		return fmt.Errorf("failed to write ICMP packet: %w", err)
+		return 0, fmt.Errorf("failed to write ICMP packet: %w", err)
 	}
 
 	n, err := socket.Read(icmpBytes[:])
 	if err != nil {
-		return fmt.Errorf("failed to read ICMP packet: %w", err)
+		return 0, fmt.Errorf("failed to read ICMP packet: %w", err)
 	}
 
 	replyPacket, err := icmp.ParseMessage(1, icmpBytes[:n])
 	if err != nil {
-		return fmt.Errorf("failed to parse ICMP packet: %w", err)
+		return 0, fmt.Errorf("failed to parse ICMP packet: %w", err)
 	}
 
 	replyPing, ok := replyPacket.Body.(*icmp.Echo)
 	if !ok {
-		return fmt.Errorf("invalid reply type: got %T, want *icmp.Echo", replyPacket.Body)
+		return 0, fmt.Errorf("invalid reply type: got %T, want *icmp.Echo", replyPacket.Body)
 	}
 
 	if !bytes.Equal(replyPing.Data, requestPing.Data) || replyPing.Seq != requestPing.Seq {
-		return fmt.Errorf("invalid ping reply: got seq=%d data=%q, want seq=%d data=%q",
+		return 0, fmt.Errorf("invalid ping reply: got seq=%d data=%q, want seq=%d data=%q",
 			replyPing.Seq, replyPing.Data, requestPing.Seq, requestPing.Data)
 	}
 
-	logger.Debug("Ping latency: %v", time.Since(start))
-	return nil
+	latency := time.Since(start)
+
+	return latency, nil
 }
 
 func startPingCheck(tnet *netstack.Net, serverIP string, stopChan chan struct{}) {
@@ -144,7 +145,7 @@ func startPingCheck(tnet *netstack.Net, serverIP string, stopChan chan struct{})
 		for {
 			select {
 			case <-ticker.C:
-				err := ping(tnet, serverIP)
+				_, err := ping(tnet, serverIP)
 				if err != nil {
 					consecutiveFailures++
 					logger.Warn("Periodic ping failed (%d consecutive failures): %v",
@@ -194,7 +195,7 @@ func monitorConnectionStatus(tnet *netstack.Net, serverIP string, client *websoc
 		select {
 		case <-ticker.C:
 			// Try a ping to see if connection is alive
-			err := ping(tnet, serverIP)
+			_, err := ping(tnet, serverIP)
 
 			if err != nil && !connectionLost {
 				// We just lost connection
@@ -236,8 +237,11 @@ func pingWithRetry(tnet *netstack.Net, dst string) error {
 
 	// First try with the initial parameters
 	logger.Info("Ping attempt %d", attempt)
-	if err := ping(tnet, dst); err == nil {
+	if latency, err := ping(tnet, dst); err == nil {
 		// Successful ping
+		logger.Info("Ping latency: %v", latency)
+
+		logger.Info("Tunnel connection to server established successfully!")
 		return nil
 	} else {
 		logger.Warn("Ping attempt %d failed: %v", attempt, err)
@@ -250,7 +254,7 @@ func pingWithRetry(tnet *netstack.Net, dst string) error {
 		for {
 			logger.Info("Ping attempt %d", attempt)
 
-			if err := ping(tnet, dst); err != nil {
+			if latency, err := ping(tnet, dst); err != nil {
 				logger.Warn("Ping attempt %d failed: %v", attempt, err)
 
 				// Increase delay after certain thresholds but cap it
@@ -267,6 +271,8 @@ func pingWithRetry(tnet *netstack.Net, dst string) error {
 			} else {
 				// Successful ping
 				logger.Info("Ping succeeded after %d attempts", attempt)
+				logger.Info("Ping latency: %v", latency)
+				logger.Info("Tunnel connection to server established successfully!")
 				return
 			}
 		}
