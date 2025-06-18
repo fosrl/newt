@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -59,10 +60,11 @@ type ExitNodeData struct {
 
 // ExitNode represents an exit node with an ID, endpoint, and weight.
 type ExitNode struct {
-	ID       int     `json:"exitNodeId"`
-	Name     string  `json:"exitNodeName"`
-	Endpoint string  `json:"endpoint"`
-	Weight   float64 `json:"weight"`
+	ID               int     `json:"exitNodeId"`
+	Name             string  `json:"exitNodeName"`
+	Endpoint         string  `json:"endpoint"`
+	Weight           float64 `json:"weight"`
+	WasPreviouslyConnected bool    `json:"wasPreviouslyConnected"`
 }
 
 func fixKey(key string) string {
@@ -697,19 +699,41 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			// logger.Info("Exit node %s latency: %v", node.Name, latency)
 		}
 
-		// Select the best node based on weighted score
-		// weight / latency
-		// choose highest score
-		// if same score, choose lowest latency
+		// we will need to tweak these
+		const (
+			latencyPenaltyExponent = 1.5  // make latency matter more
+			lastNodeScoreBoost     = 1.10 // 10% preference for the last used node
+			scoreTolerancePercent  = 5.0  // allow last node if within 5% of best score
+		)
+
 		var bestNode *ExitNode
-		var bestScore float64 = -1e12        //  small value
-		var bestLatency time.Duration = 1e12 // large value
+		var bestScore float64 = -1e12
+		var bestLatency time.Duration = 1e12
+
+		type ExitNodeScore struct {
+			Node    ExitNode
+			Score   float64
+			Latency time.Duration
+		}
+		var candidateNodes []ExitNodeScore
+
 		for _, res := range results {
 			if res.Err != nil || res.Node.Weight <= 0 {
 				continue
 			}
-			score := (res.Node.Weight / float64(res.Latency.Milliseconds())) * 1000
+
+			latencyMs := float64(res.Latency.Milliseconds())
+			score := res.Node.Weight / math.Pow(latencyMs, latencyPenaltyExponent)
+
+			// slight boost if this is the last used node
+			if res.Node.WasPreviouslyConnected == true {
+				score *= lastNodeScoreBoost
+			}
+
 			logger.Info("Exit node %s with score: %.2f (latency: %dms, weight: %.2f)", res.Node.Name, score, res.Latency.Milliseconds(), res.Node.Weight)
+
+			candidateNodes = append(candidateNodes, ExitNodeScore{Node: res.Node, Score: score, Latency: res.Latency})
+
 			if score > bestScore {
 				bestScore = score
 				bestLatency = res.Latency
@@ -717,6 +741,17 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			} else if score == bestScore && res.Latency < bestLatency {
 				bestLatency = res.Latency
 				bestNode = &res.Node
+			}
+		}
+
+		// check if last used node is close enough in score
+		for _, cand := range candidateNodes {
+			if cand.Node.WasPreviouslyConnected {
+				if bestScore - cand.Score <= bestScore*(scoreTolerancePercent/100.0) {
+					logger.Info("Sticking with last used exit node: %s (%s), score close enough to best", cand.Node.Name, cand.Node.Endpoint)
+					bestNode = &cand.Node
+				}
+				break
 			}
 		}
 
