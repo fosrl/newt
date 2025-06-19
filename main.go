@@ -387,8 +387,8 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 	})
 
-	client.RegisterHandler("newt/wg/terminate", func(msg websocket.WSMessage) {
-		logger.Info("Received disconnect message")
+	client.RegisterHandler("newt/wg/reconnect", func(msg websocket.WSMessage) {
+		logger.Info("Received reconnect message")
 
 		if pingStopChan != nil {
 			// Stop the ping check
@@ -418,6 +418,15 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 		// Mark as disconnected
 		connected = false
+
+		// start asking for the exit nodes again
+		if stopFunc != nil {
+			stopFunc()     // stop the ws from sending more requests
+			stopFunc = nil // reset stopFunc to nil to avoid double stopping
+		}
+
+		// Request exit nodes from the server
+		stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
 
 		logger.Info("Tunnel destroyed, ready for reconnection")
 	})
