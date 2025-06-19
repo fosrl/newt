@@ -86,6 +86,7 @@ var (
 	tlsPrivateKey        string
 	dockerSocket         string
 	pingInterval         = 1 * time.Second
+	pingTimeout          = 2 * time.Second
 	publicKey            wgtypes.Key
 	pingStopChan         chan struct{}
 	stopFunc             func()
@@ -107,6 +108,7 @@ func main() {
 	tlsPrivateKey = os.Getenv("TLS_CLIENT_CERT")
 	dockerSocket = os.Getenv("DOCKER_SOCKET")
 	pingIntervalStr := os.Getenv("PING_INTERVAL")
+	pingTimeoutStr := os.Getenv("PING_TIMEOUT")
 
 	if endpoint == "" {
 		flag.StringVar(&endpoint, "endpoint", "", "Endpoint of your pangolin server")
@@ -146,12 +148,23 @@ func main() {
 	if pingIntervalStr == "" {
 		flag.StringVar(&pingIntervalStr, "ping-interval", "1s", "Interval for pinging the server (default 1s)")
 	}
+	if pingTimeoutStr == "" {
+		flag.StringVar(&pingTimeoutStr, "ping-timeout", "2s", "	Timeout for each ping (default 2s)")
+	}
 
 	if pingIntervalStr != "" {
 		pingInterval, err = time.ParseDuration(pingIntervalStr)
 		if err != nil {
 			fmt.Printf("Invalid PING_INTERVAL value: %s, using default 1 second\n", pingIntervalStr)
 			pingInterval = 1 * time.Second
+		}
+	}
+
+	if pingTimeoutStr != "" {
+		pingTimeout, err = time.ParseDuration(pingTimeoutStr)
+		if err != nil {
+			fmt.Printf("Invalid PING_TIMEOUT value: %s, using default 2 seconds\n", pingTimeoutStr)
+			pingTimeout = 2 * time.Second
 		}
 	}
 
@@ -336,7 +349,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		logger.Info("WireGuard device created. Lets ping the server now...")
 
 		// Even if pingWithRetry returns an error, it will continue trying in the background
-		_ = pingWithRetry(tnet, wgData.ServerIP)
+		_ = pingWithRetry(tnet, wgData.ServerIP, pingTimeout)
 
 		// Always mark as connected and start the proxy manager regardless of initial ping result
 		// as the pings will continue in the background
@@ -694,61 +707,4 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	}
 	logger.Info("Exiting...")
 	os.Exit(0)
-}
-
-func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Client) chan struct{} {
-	initialInterval := pingInterval
-	maxInterval := 3 * time.Second
-	currentInterval := initialInterval
-	consecutiveFailures := 0
-	connectionLost := false
-
-	pingStopChan := make(chan struct{})
-
-	go func() {
-		ticker := time.NewTicker(currentInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				_, err := ping(tnet, serverIP)
-				if err != nil {
-					consecutiveFailures++
-					logger.Warn("Periodic ping failed (%d consecutive failures): %v", consecutiveFailures, err)
-					if consecutiveFailures >= 3 && currentInterval < maxInterval {
-						if !connectionLost {
-							connectionLost = true
-							logger.Warn("Connection to server lost. Continuous reconnection attempts will be made.")
-							stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
-						}
-						currentInterval = time.Duration(float64(currentInterval) * 1.5)
-						if currentInterval > maxInterval {
-							currentInterval = maxInterval
-						}
-						ticker.Reset(currentInterval)
-						logger.Debug("Increased ping check interval to %v due to consecutive failures", currentInterval)
-					}
-				} else {
-					if connectionLost {
-						connectionLost = false
-						logger.Info("Connection to server restored!")
-					}
-					if currentInterval > initialInterval {
-						currentInterval = time.Duration(float64(currentInterval) * 0.8)
-						if currentInterval < initialInterval {
-							currentInterval = initialInterval
-						}
-						ticker.Reset(currentInterval)
-						logger.Info("Decreased ping check interval to %v after successful ping", currentInterval)
-					}
-					consecutiveFailures = 0
-				}
-			case <-pingStopChan:
-				logger.Info("Stopping ping check")
-				return
-			}
-		}
-	}()
-
-	return pingStopChan
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/proxy"
+	"github.com/fosrl/newt/websocket"
 	"golang.org/x/exp/rand"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
@@ -34,7 +35,7 @@ func fixKey(key string) string {
 	return hex.EncodeToString(decoded)
 }
 
-func ping(tnet *netstack.Net, dst string) (time.Duration, error) {
+func ping(tnet *netstack.Net, dst string, timeout time.Duration) (time.Duration, error) {
 	logger.Debug("Pinging %s", dst)
 	socket, err := tnet.Dial("ping4", dst)
 	if err != nil {
@@ -52,7 +53,7 @@ func ping(tnet *netstack.Net, dst string) (time.Duration, error) {
 		return 0, fmt.Errorf("failed to marshal ICMP message: %w", err)
 	}
 
-	if err := socket.SetReadDeadline(time.Now().Add(time.Second * 2)); err != nil {
+	if err := socket.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 		return 0, fmt.Errorf("failed to set read deadline: %w", err)
 	}
 
@@ -89,7 +90,7 @@ func ping(tnet *netstack.Net, dst string) (time.Duration, error) {
 	return latency, nil
 }
 
-func pingWithRetry(tnet *netstack.Net, dst string) error {
+func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) error {
 	const (
 		initialMaxAttempts = 5
 		initialRetryDelay  = 2 * time.Second
@@ -101,7 +102,7 @@ func pingWithRetry(tnet *netstack.Net, dst string) error {
 
 	// First try with the initial parameters
 	logger.Info("Ping attempt %d", attempt)
-	if latency, err := ping(tnet, dst); err == nil {
+	if latency, err := ping(tnet, dst, timeout); err == nil {
 		// Successful ping
 		logger.Info("Ping latency: %v", latency)
 
@@ -118,7 +119,7 @@ func pingWithRetry(tnet *netstack.Net, dst string) error {
 		for {
 			logger.Info("Ping attempt %d", attempt)
 
-			if latency, err := ping(tnet, dst); err != nil {
+			if latency, err := ping(tnet, dst, timeout); err != nil {
 				logger.Warn("Ping attempt %d failed: %v", attempt, err)
 
 				// Increase delay after certain thresholds but cap it
@@ -144,6 +145,63 @@ func pingWithRetry(tnet *netstack.Net, dst string) error {
 
 	// Return an error for the first batch of attempts (to maintain compatibility with existing code)
 	return fmt.Errorf("initial ping attempts failed, continuing in background")
+}
+
+func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Client) chan struct{} {
+	initialInterval := pingInterval
+	maxInterval := 3 * time.Second
+	currentInterval := initialInterval
+	consecutiveFailures := 0
+	connectionLost := false
+
+	pingStopChan := make(chan struct{})
+
+	go func() {
+		ticker := time.NewTicker(currentInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_, err := ping(tnet, serverIP, pingTimeout)
+				if err != nil {
+					consecutiveFailures++
+					logger.Warn("Periodic ping failed (%d consecutive failures): %v", consecutiveFailures, err)
+					if consecutiveFailures >= 3 && currentInterval < maxInterval {
+						if !connectionLost {
+							connectionLost = true
+							logger.Warn("Connection to server lost. Continuous reconnection attempts will be made.")
+							stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
+						}
+						currentInterval = time.Duration(float64(currentInterval) * 1.5)
+						if currentInterval > maxInterval {
+							currentInterval = maxInterval
+						}
+						ticker.Reset(currentInterval)
+						logger.Debug("Increased ping check interval to %v due to consecutive failures", currentInterval)
+					}
+				} else {
+					if connectionLost {
+						connectionLost = false
+						logger.Info("Connection to server restored!")
+					}
+					if currentInterval > initialInterval {
+						currentInterval = time.Duration(float64(currentInterval) * 0.8)
+						if currentInterval < initialInterval {
+							currentInterval = initialInterval
+						}
+						ticker.Reset(currentInterval)
+						logger.Info("Decreased ping check interval to %v after successful ping", currentInterval)
+					}
+					consecutiveFailures = 0
+				}
+			case <-pingStopChan:
+				logger.Info("Stopping ping check")
+				return
+			}
+		}
+	}()
+
+	return pingStopChan
 }
 
 func parseLogLevel(level string) logger.LogLevel {
