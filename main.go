@@ -525,6 +525,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		stopFunc = client.SendMessageInterval("newt/wg/register", map[string]interface{}{
 			"publicKey":   publicKey.String(),
 			"pingResults": pingResults,
+			"newtVersion": newtVersion,
 		}, 1*time.Second)
 		logger.Info("Sent exit node ping results to cloud for selection")
 	})
@@ -678,6 +679,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			// Send registration message to the server for backward compatibility
 			err := client.SendMessage("newt/wg/register", map[string]interface{}{
 				"publicKey":           publicKey.String(),
+				"newtVersion":         newtVersion,
 				"backwardsCompatible": true,
 			})
 			if err != nil {
