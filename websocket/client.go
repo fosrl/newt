@@ -9,10 +9,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"software.sslmate.com/src/go-pkcs12"
 	"strings"
 	"sync"
 	"time"
+
+	"software.sslmate.com/src/go-pkcs12"
 
 	"github.com/fosrl/newt/logger"
 	"github.com/gorilla/websocket"
@@ -124,6 +125,32 @@ func (c *Client) SendMessage(messageType string, data interface{}) error {
 	}
 
 	return c.conn.WriteJSON(msg)
+}
+
+func (c *Client) SendMessageInterval(messageType string, data interface{}, interval time.Duration) (stop func()) {
+	stopChan := make(chan struct{})
+	go func() {
+		err := c.SendMessage(messageType, data) // Send immediately
+		if err != nil {
+			logger.Error("Failed to send initial message: %v", err)
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				err = c.SendMessage(messageType, data)
+				if err != nil {
+					logger.Error("Failed to send message: %v", err)
+				}
+			case <-stopChan:
+				return
+			}
+		}
+	}()
+	return func() {
+		close(stopChan)
+	}
 }
 
 // RegisterHandler registers a handler for a specific message type

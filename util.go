@@ -44,7 +44,7 @@ func ping(tnet *netstack.Net, dst string) (time.Duration, error) {
 
 	requestPing := icmp.Echo{
 		Seq:  rand.Intn(1 << 16),
-		Data: []byte("gopher burrow"),
+		Data: []byte("f"),
 	}
 
 	icmpBytes, err := (&icmp.Message{Type: ipv4.ICMPTypeEcho, Code: 0, Body: &requestPing}).Marshal(nil)
@@ -52,7 +52,7 @@ func ping(tnet *netstack.Net, dst string) (time.Duration, error) {
 		return 0, fmt.Errorf("failed to marshal ICMP message: %w", err)
 	}
 
-	if err := socket.SetReadDeadline(time.Now().Add(time.Second * 10)); err != nil {
+	if err := socket.SetReadDeadline(time.Now().Add(time.Second * 2)); err != nil {
 		return 0, fmt.Errorf("failed to set read deadline: %w", err)
 	}
 
@@ -84,12 +84,14 @@ func ping(tnet *netstack.Net, dst string) (time.Duration, error) {
 
 	latency := time.Since(start)
 
+	logger.Debug("Ping to %s successful, latency: %v", dst, latency)
+
 	return latency, nil
 }
 
 func pingWithRetry(tnet *netstack.Net, dst string) error {
 	const (
-		initialMaxAttempts = 15
+		initialMaxAttempts = 5
 		initialRetryDelay  = 2 * time.Second
 		maxRetryDelay      = 60 * time.Second // Cap the maximum delay
 	)
