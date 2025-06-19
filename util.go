@@ -1,0 +1,352 @@
+package main
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os/exec"
+	"strings"
+	"time"
+
+	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/proxy"
+	"golang.org/x/exp/rand"
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
+	"golang.zx2c4.com/wireguard/device"
+	"golang.zx2c4.com/wireguard/tun/netstack"
+)
+
+func fixKey(key string) string {
+	// Remove any whitespace
+	key = strings.TrimSpace(key)
+
+	// Decode from base64
+	decoded, err := base64.StdEncoding.DecodeString(key)
+	if err != nil {
+		logger.Fatal("Error decoding base64: %v", err)
+	}
+
+	// Convert to hex
+	return hex.EncodeToString(decoded)
+}
+
+func ping(tnet *netstack.Net, dst string) (time.Duration, error) {
+	logger.Debug("Pinging %s", dst)
+	socket, err := tnet.Dial("ping4", dst)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create ICMP socket: %w", err)
+	}
+	defer socket.Close()
+
+	requestPing := icmp.Echo{
+		Seq:  rand.Intn(1 << 16),
+		Data: []byte("gopher burrow"),
+	}
+
+	icmpBytes, err := (&icmp.Message{Type: ipv4.ICMPTypeEcho, Code: 0, Body: &requestPing}).Marshal(nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal ICMP message: %w", err)
+	}
+
+	if err := socket.SetReadDeadline(time.Now().Add(time.Second * 10)); err != nil {
+		return 0, fmt.Errorf("failed to set read deadline: %w", err)
+	}
+
+	start := time.Now()
+	_, err = socket.Write(icmpBytes)
+	if err != nil {
+		return 0, fmt.Errorf("failed to write ICMP packet: %w", err)
+	}
+
+	n, err := socket.Read(icmpBytes[:])
+	if err != nil {
+		return 0, fmt.Errorf("failed to read ICMP packet: %w", err)
+	}
+
+	replyPacket, err := icmp.ParseMessage(1, icmpBytes[:n])
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse ICMP packet: %w", err)
+	}
+
+	replyPing, ok := replyPacket.Body.(*icmp.Echo)
+	if !ok {
+		return 0, fmt.Errorf("invalid reply type: got %T, want *icmp.Echo", replyPacket.Body)
+	}
+
+	if !bytes.Equal(replyPing.Data, requestPing.Data) || replyPing.Seq != requestPing.Seq {
+		return 0, fmt.Errorf("invalid ping reply: got seq=%d data=%q, want seq=%d data=%q",
+			replyPing.Seq, replyPing.Data, requestPing.Seq, requestPing.Data)
+	}
+
+	latency := time.Since(start)
+
+	return latency, nil
+}
+
+func pingWithRetry(tnet *netstack.Net, dst string) error {
+	const (
+		initialMaxAttempts = 15
+		initialRetryDelay  = 2 * time.Second
+		maxRetryDelay      = 60 * time.Second // Cap the maximum delay
+	)
+
+	attempt := 1
+	retryDelay := initialRetryDelay
+
+	// First try with the initial parameters
+	logger.Info("Ping attempt %d", attempt)
+	if latency, err := ping(tnet, dst); err == nil {
+		// Successful ping
+		logger.Info("Ping latency: %v", latency)
+
+		logger.Info("Tunnel connection to server established successfully!")
+		return nil
+	} else {
+		logger.Warn("Ping attempt %d failed: %v", attempt, err)
+	}
+
+	// Start a goroutine that will attempt pings indefinitely with increasing delays
+	go func() {
+		attempt = 2 // Continue from attempt 2
+
+		for {
+			logger.Info("Ping attempt %d", attempt)
+
+			if latency, err := ping(tnet, dst); err != nil {
+				logger.Warn("Ping attempt %d failed: %v", attempt, err)
+
+				// Increase delay after certain thresholds but cap it
+				if attempt%5 == 0 && retryDelay < maxRetryDelay {
+					retryDelay = time.Duration(float64(retryDelay) * 1.5)
+					if retryDelay > maxRetryDelay {
+						retryDelay = maxRetryDelay
+					}
+					logger.Info("Increasing ping retry delay to %v", retryDelay)
+				}
+
+				time.Sleep(retryDelay)
+				attempt++
+			} else {
+				// Successful ping
+				logger.Info("Ping succeeded after %d attempts", attempt)
+				logger.Info("Ping latency: %v", latency)
+				logger.Info("Tunnel connection to server established successfully!")
+				return
+			}
+		}
+	}()
+
+	// Return an error for the first batch of attempts (to maintain compatibility with existing code)
+	return fmt.Errorf("initial ping attempts failed, continuing in background")
+}
+
+func parseLogLevel(level string) logger.LogLevel {
+	switch strings.ToUpper(level) {
+	case "DEBUG":
+		return logger.DEBUG
+	case "INFO":
+		return logger.INFO
+	case "WARN":
+		return logger.WARN
+	case "ERROR":
+		return logger.ERROR
+	case "FATAL":
+		return logger.FATAL
+	default:
+		return logger.INFO // default to INFO if invalid level provided
+	}
+}
+
+func mapToWireGuardLogLevel(level logger.LogLevel) int {
+	switch level {
+	case logger.DEBUG:
+		return device.LogLevelVerbose
+	// case logger.INFO:
+	// return device.LogLevel
+	case logger.WARN:
+		return device.LogLevelError
+	case logger.ERROR, logger.FATAL:
+		return device.LogLevelSilent
+	default:
+		return device.LogLevelSilent
+	}
+}
+
+func resolveDomain(domain string) (string, error) {
+	// Check if there's a port in the domain
+	host, port, err := net.SplitHostPort(domain)
+	if err != nil {
+		// No port found, use the domain as is
+		host = domain
+		port = ""
+	}
+
+	// Remove any protocol prefix if present
+	if strings.HasPrefix(host, "http://") {
+		host = strings.TrimPrefix(host, "http://")
+	} else if strings.HasPrefix(host, "https://") {
+		host = strings.TrimPrefix(host, "https://")
+	}
+
+	// if there are any trailing slashes, remove them
+	host = strings.TrimSuffix(host, "/")
+
+	// Lookup IP addresses
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return "", fmt.Errorf("DNS lookup failed: %v", err)
+	}
+
+	if len(ips) == 0 {
+		return "", fmt.Errorf("no IP addresses found for domain %s", host)
+	}
+
+	// Get the first IPv4 address if available
+	var ipAddr string
+	for _, ip := range ips {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			ipAddr = ipv4.String()
+			break
+		}
+	}
+
+	// If no IPv4 found, use the first IP (might be IPv6)
+	if ipAddr == "" {
+		ipAddr = ips[0].String()
+	}
+
+	// Add port back if it existed
+	if port != "" {
+		ipAddr = net.JoinHostPort(ipAddr, port)
+	}
+
+	return ipAddr, nil
+}
+
+func parseTargetData(data interface{}) (TargetData, error) {
+	var targetData TargetData
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		logger.Info("Error marshaling data: %v", err)
+		return targetData, err
+	}
+
+	if err := json.Unmarshal(jsonData, &targetData); err != nil {
+		logger.Info("Error unmarshaling target data: %v", err)
+		return targetData, err
+	}
+	return targetData, nil
+}
+
+func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto string, targetData TargetData) error {
+	for _, t := range targetData.Targets {
+		// Split the first number off of the target with : separator and use as the port
+		parts := strings.Split(t, ":")
+		if len(parts) != 3 {
+			logger.Info("Invalid target format: %s", t)
+			continue
+		}
+
+		// Get the port as an int
+		port := 0
+		_, err := fmt.Sscanf(parts[0], "%d", &port)
+		if err != nil {
+			logger.Info("Invalid port: %s", parts[0])
+			continue
+		}
+
+		if action == "add" {
+			target := parts[1] + ":" + parts[2]
+
+			// Call updown script if provided
+			processedTarget := target
+			if updownScript != "" {
+				newTarget, err := executeUpdownScript(action, proto, target)
+				if err != nil {
+					logger.Warn("Updown script error: %v", err)
+				} else if newTarget != "" {
+					processedTarget = newTarget
+				}
+			}
+
+			// Only remove the specific target if it exists
+			err := pm.RemoveTarget(proto, tunnelIP, port)
+			if err != nil {
+				// Ignore "target not found" errors as this is expected for new targets
+				if !strings.Contains(err.Error(), "target not found") {
+					logger.Error("Failed to remove existing target: %v", err)
+				}
+			}
+
+			// Add the new target
+			pm.AddTarget(proto, tunnelIP, port, processedTarget)
+
+		} else if action == "remove" {
+			logger.Info("Removing target with port %d", port)
+
+			target := parts[1] + ":" + parts[2]
+
+			// Call updown script if provided
+			if updownScript != "" {
+				_, err := executeUpdownScript(action, proto, target)
+				if err != nil {
+					logger.Warn("Updown script error: %v", err)
+				}
+			}
+
+			err := pm.RemoveTarget(proto, tunnelIP, port)
+			if err != nil {
+				logger.Error("Failed to remove target: %v", err)
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func executeUpdownScript(action, proto, target string) (string, error) {
+	if updownScript == "" {
+		return target, nil
+	}
+
+	// Split the updownScript in case it contains spaces (like "/usr/bin/python3 script.py")
+	parts := strings.Fields(updownScript)
+	if len(parts) == 0 {
+		return target, fmt.Errorf("invalid updown script command")
+	}
+
+	var cmd *exec.Cmd
+	if len(parts) == 1 {
+		// If it's a single executable
+		logger.Info("Executing updown script: %s %s %s %s", updownScript, action, proto, target)
+		cmd = exec.Command(parts[0], action, proto, target)
+	} else {
+		// If it includes interpreter and script
+		args := append(parts[1:], action, proto, target)
+		logger.Info("Executing updown script: %s %s %s %s %s", parts[0], strings.Join(parts[1:], " "), action, proto, target)
+		cmd = exec.Command(parts[0], args...)
+	}
+
+	output, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("updown script execution failed (exit code %d): %s",
+				exitErr.ExitCode(), string(exitErr.Stderr))
+		}
+		return "", fmt.Errorf("updown script execution failed: %v", err)
+	}
+
+	// If the script returns a new target, use it
+	newTarget := strings.TrimSpace(string(output))
+	if newTarget != "" {
+		logger.Info("Updown script returned new target: %s", newTarget)
+		return newTarget, nil
+	}
+
+	return target, nil
+}
