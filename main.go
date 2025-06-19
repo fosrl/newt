@@ -173,17 +173,21 @@ func main() {
 
 	flag.Parse()
 
-	newtVersion := "Newt version replaceme"
-	if *version {
-		fmt.Println(newtVersion)
-		os.Exit(0)
-	} else {
-		logger.Info(newtVersion)
-	}
-
 	logger.Init()
 	loggerLevel := parseLogLevel(logLevel)
 	logger.GetLogger().SetLevel(parseLogLevel(logLevel))
+
+	newtVersion := "version_replaceme"
+	if *version {
+		fmt.Println("Newt version " + newtVersion)
+		os.Exit(0)
+	} else {
+		logger.Info("Newt version " + newtVersion)
+	}
+
+	if err := CheckForUpdate("fosrl", "newt", newtVersion); err != nil {
+		logger.Error("Error checking for updates: %v\n", err)
+	}
 
 	// parse the mtu string into an int
 	mtuInt, err = strconv.Atoi(mtu)
@@ -466,6 +470,11 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		results := make([]nodeResult, len(exitNodes))
 		const pingAttempts = 3
 		for i, node := range exitNodes {
+			if connected && node.WasPreviouslyConnected {
+				logger.Info("Skipping ping for previously connected exit node so we pick another %d (%s)", node.ID, node.Endpoint)
+				continue
+			}
+
 			var totalLatency time.Duration
 			var lastErr error
 			successes := 0

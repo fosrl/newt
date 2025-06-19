@@ -33,6 +33,7 @@ type Client struct {
 	pingTimeout       time.Duration
 	onConnect         func() error
 	onTokenUpdate     func(token string)
+	writeMux          sync.Mutex
 }
 
 type ClientOption func(*Client)
@@ -73,7 +74,7 @@ func NewClient(newtID, secret string, endpoint string, pingInterval time.Duratio
 		baseURL:           endpoint, // default value
 		handlers:          make(map[string]MessageHandler),
 		done:              make(chan struct{}),
-		reconnectInterval: 10 * time.Second,
+		reconnectInterval: 3 * time.Second,
 		isConnected:       false,
 		pingInterval:      pingInterval,
 		pingTimeout:       pingTimeout,
@@ -125,6 +126,8 @@ func (c *Client) SendMessage(messageType string, data interface{}) error {
 		Data: data,
 	}
 
+	c.writeMux.Lock()
+	defer c.writeMux.Unlock()
 	return c.conn.WriteJSON(msg)
 }
 
@@ -220,6 +223,7 @@ func (c *Client) getToken() (string, error) {
 
 		var tokenResp TokenResponse
 		if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+			logger.Error("Failed to decode token check response. Raw response: %s", resp.Body)
 			return "", fmt.Errorf("failed to decode token check response: %w", err)
 		}
 
@@ -268,10 +272,7 @@ func (c *Client) getToken() (string, error) {
 
 	var tokenResp TokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		// print out the token response for debugging
-		buf := new(bytes.Buffer)
-		buf.ReadFrom(resp.Body)
-		logger.Info("Token response: %s", buf.String())
+		logger.Error("Failed to decode token response. Raw response: %s", resp.Body)
 		return "", fmt.Errorf("failed to decode token response: %w", err)
 	}
 
@@ -386,7 +387,10 @@ func (c *Client) pingMonitor() {
 			if c.conn == nil {
 				return
 			}
-			if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(c.pingTimeout)); err != nil {
+			c.writeMux.Lock()
+			err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(c.pingTimeout))
+			c.writeMux.Unlock()
+			if err != nil {
 				logger.Error("Ping failed: %v", err)
 				c.reconnect()
 				return
