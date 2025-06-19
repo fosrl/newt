@@ -204,6 +204,8 @@ func main() {
 		id,     // CLI arg takes precedence
 		secret, // CLI arg takes precedence
 		endpoint,
+		pingInterval,
+		pingTimeout,
 		opt,
 	)
 	if err != nil {
@@ -660,14 +662,26 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		publicKey = privateKey.PublicKey()
 		logger.Debug("Public key: %s", publicKey)
 
-		// request from the server the list of nodes to ping at newt/ping/request
-		stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
+		if !connected {
+			// request from the server the list of nodes to ping at newt/ping/request
+			stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
 
-		if wgService != nil {
-			wgService.LoadRemoteConfig()
+			// Send registration message to the server for backward compatibility
+			err := client.SendMessage("newt/wg/register", map[string]interface{}{
+				"publicKey":           publicKey.String(),
+				"backwardsCompatible": true,
+			})
+			if err != nil {
+				logger.Error("Failed to send registration message: %v", err)
+				return err
+			}
+			logger.Info("Sent registration message")
+
+			if wgService != nil {
+				wgService.LoadRemoteConfig()
+			}
 		}
 
-		logger.Info("Sent registration message")
 		return nil
 	})
 

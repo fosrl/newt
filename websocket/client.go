@@ -29,9 +29,10 @@ type Client struct {
 	reconnectInterval time.Duration
 	isConnected       bool
 	reconnectMux      sync.RWMutex
-
-	onConnect     func() error
-	onTokenUpdate func(token string)
+	pingInterval      time.Duration
+	pingTimeout       time.Duration
+	onConnect         func() error
+	onTokenUpdate     func(token string)
 }
 
 type ClientOption func(*Client)
@@ -60,7 +61,7 @@ func (c *Client) OnTokenUpdate(callback func(token string)) {
 }
 
 // NewClient creates a new Newt client
-func NewClient(newtID, secret string, endpoint string, opts ...ClientOption) (*Client, error) {
+func NewClient(newtID, secret string, endpoint string, pingInterval time.Duration, pingTimeout time.Duration, opts ...ClientOption) (*Client, error) {
 	config := &Config{
 		NewtID:   newtID,
 		Secret:   secret,
@@ -74,16 +75,16 @@ func NewClient(newtID, secret string, endpoint string, opts ...ClientOption) (*C
 		done:              make(chan struct{}),
 		reconnectInterval: 10 * time.Second,
 		isConnected:       false,
+		pingInterval:      pingInterval,
+		pingTimeout:       pingTimeout,
 	}
 
 	// Apply options before loading config
-	if opts != nil {
-		for _, opt := range opts {
-			if opt == nil {
-				continue
-			}
-			opt(client)
+	for _, opt := range opts {
+		if opt == nil {
+			continue
 		}
+		opt(client)
 	}
 
 	// Load existing config if available
@@ -158,30 +159,6 @@ func (c *Client) RegisterHandler(messageType string, handler MessageHandler) {
 	c.handlersMux.Lock()
 	defer c.handlersMux.Unlock()
 	c.handlers[messageType] = handler
-}
-
-// readPump pumps messages from the WebSocket connection
-func (c *Client) readPump() {
-	defer c.conn.Close()
-
-	for {
-		select {
-		case <-c.done:
-			return
-		default:
-			var msg WSMessage
-			err := c.conn.ReadJSON(&msg)
-			if err != nil {
-				return
-			}
-
-			c.handlersMux.RLock()
-			if handler, ok := c.handlers[msg.Type]; ok {
-				handler(msg)
-			}
-			c.handlersMux.RUnlock()
-		}
-	}
 }
 
 func (c *Client) getToken() (string, error) {
@@ -380,8 +357,8 @@ func (c *Client) establishConnection() error {
 
 	// Start the ping monitor
 	go c.pingMonitor()
-	// Start the read pump
-	go c.readPump()
+	// Start the read pump with disconnect detection
+	go c.readPumpWithDisconnectDetection()
 
 	if c.onConnect != nil {
 		err := c.saveConfig()
@@ -396,8 +373,9 @@ func (c *Client) establishConnection() error {
 	return nil
 }
 
+// pingMonitor sends pings at a short interval and triggers reconnect on failure
 func (c *Client) pingMonitor() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(c.pingInterval)
 	defer ticker.Stop()
 
 	for {
@@ -405,7 +383,10 @@ func (c *Client) pingMonitor() {
 		case <-c.done:
 			return
 		case <-ticker.C:
-			if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second)); err != nil {
+			if c.conn == nil {
+				return
+			}
+			if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(c.pingTimeout)); err != nil {
 				logger.Error("Ping failed: %v", err)
 				c.reconnect()
 				return
@@ -414,10 +395,41 @@ func (c *Client) pingMonitor() {
 	}
 }
 
+// readPumpWithDisconnectDetection reads messages and triggers reconnect on error
+func (c *Client) readPumpWithDisconnectDetection() {
+	defer func() {
+		if c.conn != nil {
+			c.conn.Close()
+		}
+		c.reconnect()
+	}()
+
+	for {
+		select {
+		case <-c.done:
+			return
+		default:
+			var msg WSMessage
+			err := c.conn.ReadJSON(&msg)
+			if err != nil {
+				logger.Error("WebSocket read error: %v", err)
+				return // triggers reconnect via defer
+			}
+
+			c.handlersMux.RLock()
+			if handler, ok := c.handlers[msg.Type]; ok {
+				handler(msg)
+			}
+			c.handlersMux.RUnlock()
+		}
+	}
+}
+
 func (c *Client) reconnect() {
 	c.setConnected(false)
 	if c.conn != nil {
 		c.conn.Close()
+		c.conn = nil
 	}
 
 	go c.connectWithRetry()
