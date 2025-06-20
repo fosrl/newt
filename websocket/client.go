@@ -221,9 +221,14 @@ func (c *Client) getToken() (string, error) {
 		}
 		defer resp.Body.Close()
 
+		if resp.StatusCode != http.StatusOK {
+			logger.Error("Token check failed with status code: %d", resp.StatusCode)
+			return "", fmt.Errorf("token check failed with status code: %d", resp.StatusCode)
+		}
+
 		var tokenResp TokenResponse
 		if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-			logger.Error("Failed to decode token check response. Raw response: %s", resp.Body)
+			logger.Error("Failed to decode token check response.")
 			return "", fmt.Errorf("failed to decode token check response: %w", err)
 		}
 
@@ -270,9 +275,14 @@ func (c *Client) getToken() (string, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		logger.Error("Failed to get token with status code: %d", resp.StatusCode)
+		return "", fmt.Errorf("failed to get token with status code: %d", resp.StatusCode)
+	}
+
 	var tokenResp TokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		logger.Error("Failed to decode token response. Raw response: %s", resp.Body)
+		logger.Error("Failed to decode token response.")
 		return "", fmt.Errorf("failed to decode token response: %w", err)
 	}
 
