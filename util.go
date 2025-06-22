@@ -119,7 +119,6 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 		for {
 			select {
 			case <-stopChan:
-				logger.Info("Stopping pingWithRetry goroutine")
 				return
 			default:
 				logger.Info("Ping attempt %d", attempt)
