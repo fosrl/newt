@@ -1,4 +1,4 @@
-package main
+package util
 
 import (
 	"bytes"
@@ -369,7 +369,7 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 	return nil
 }
 
-func executeUpdownScript(action, proto, target string) (string, error) {
+func executeUpdownScript(action, proto, target string, updownScript string) (string, error) {
 	if updownScript == "" {
 		return target, nil
 	}

@@ -17,6 +17,7 @@ import (
 	"github.com/fosrl/newt/docker"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/proxy"
+	"github.com/fosrl/newt/updates"
 	"github.com/fosrl/newt/websocket"
 	"github.com/fosrl/newt/wg"
 	"github.com/fosrl/newt/wgtester"
@@ -192,7 +193,7 @@ func main() {
 		logger.Info("Newt version " + newtVersion)
 	}
 
-	if err := CheckForUpdate("fosrl", "newt", newtVersion); err != nil {
+	if err := updates.CheckForUpdate("fosrl", "newt", newtVersion); err != nil {
 		logger.Error("Error checking for updates: %v\n", err)
 	}
 
