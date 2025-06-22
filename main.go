@@ -69,27 +69,29 @@ type ExitNodePingResult struct {
 }
 
 var (
-	endpoint             string
-	id                   string
-	secret               string
-	mtu                  string
-	mtuInt               int
-	dns                  string
-	privateKey           wgtypes.Key
-	err                  error
-	logLevel             string
-	interfaceName        string
-	generateAndSaveKeyTo string
-	rm                   bool
-	acceptClients        bool
-	updownScript         string
-	tlsPrivateKey        string
-	dockerSocket         string
-	pingInterval         = 1 * time.Second
-	pingTimeout          = 2 * time.Second
-	publicKey            wgtypes.Key
-	pingStopChan         chan struct{}
-	stopFunc             func()
+	endpoint                           string
+	id                                 string
+	secret                             string
+	mtu                                string
+	mtuInt                             int
+	dns                                string
+	privateKey                         wgtypes.Key
+	err                                error
+	logLevel                           string
+	interfaceName                      string
+	generateAndSaveKeyTo               string
+	rm                                 bool
+	acceptClients                      bool
+	updownScript                       string
+	tlsPrivateKey                      string
+	dockerSocket                       string
+	dockerEnforceNetworkValidation     string
+	dockerEnforceNetworkValidationBool bool
+	pingInterval                       = 1 * time.Second
+	pingTimeout                        = 2 * time.Second
+	publicKey                          wgtypes.Key
+	pingStopChan                       chan struct{}
+	stopFunc                           func()
 )
 
 func main() {
@@ -109,6 +111,7 @@ func main() {
 	dockerSocket = os.Getenv("DOCKER_SOCKET")
 	pingIntervalStr := os.Getenv("PING_INTERVAL")
 	pingTimeoutStr := os.Getenv("PING_TIMEOUT")
+	dockerEnforceNetworkValidation = os.Getenv("DOCKER_ENFORCE_NETWORK_VALIDATION")
 
 	if endpoint == "" {
 		flag.StringVar(&endpoint, "endpoint", "", "Endpoint of your pangolin server")
@@ -168,6 +171,10 @@ func main() {
 		}
 	}
 
+	if dockerEnforceNetworkValidation == "" {
+		flag.StringVar(&dockerEnforceNetworkValidation, "docker-enforce-network-validation", "false", "Enforce validation of container on newt network (true or false)")
+	}
+
 	// do a --version check
 	version := flag.Bool("version", false, "Print the version")
 
@@ -195,6 +202,13 @@ func main() {
 		logger.Fatal("Failed to parse MTU: %v", err)
 	}
 
+	// parse if we want to enforce container network validation
+	dockerEnforceNetworkValidationBool, err = strconv.ParseBool(dockerEnforceNetworkValidation)
+	if err != nil {
+		logger.Info("Docker enforce network validation cannot be parsed. Defaulting to 'false'")
+		dockerEnforceNetworkValidationBool = false
+	}
+
 	privateKey, err = wgtypes.GeneratePrivateKey()
 	if err != nil {
 		logger.Fatal("Failed to generate private key: %v", err)
@@ -216,8 +230,26 @@ func main() {
 		logger.Fatal("Failed to create client: %v", err)
 	}
 
-	var wgService *wg.WireGuardService
+	// output env var values if set
+	logger.Debug("Endpoint: %v", endpoint)
+	logger.Debug("Log Level: %v", logLevel)
+	logger.Debug("Docker Network Validation Enabled: %v", dockerEnforceNetworkValidationBool)
+	logger.Debug("TLS Private Key Set: %v", tlsPrivateKey != "")
+	if dns != "" {
+		logger.Debug("Dns: %v", dns)
+	}
+	if dockerSocket != "" {
+		logger.Debug("Docker Socket: %v", dockerSocket)
+	}
+	if mtu != "" {
+		logger.Debug("MTU: %v", mtu)
+	}
+	if updownScript != "" {
+		logger.Debug("Up Down Script: %v", updownScript)
+	}
+
 	// Create TUN device and network stack
+	var wgService *wg.WireGuardService
 	var tun tun.Device
 	var tnet *netstack.Net
 	var dev *device.Device
@@ -660,7 +692,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		// List Docker containers
-		containers, err := docker.ListContainers(dockerSocket)
+		containers, err := docker.ListContainers(dockerSocket, dockerEnforceNetworkValidationBool)
 		if err != nil {
 			logger.Error("Failed to list Docker containers: %v", err)
 			return
