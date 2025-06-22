@@ -292,6 +292,8 @@ func main() {
 		}
 	}
 
+	var pingWithRetryStopChan chan struct{}
+
 	// Register handlers for different message types
 	client.RegisterHandler("newt/wg/connect", func(msg websocket.WSMessage) {
 		logger.Info("Received registration message")
@@ -388,7 +390,12 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		logger.Info("WireGuard device created. Lets ping the server now...")
 
 		// Even if pingWithRetry returns an error, it will continue trying in the background
-		_ = pingWithRetry(tnet, wgData.ServerIP, pingTimeout)
+		if pingWithRetryStopChan != nil {
+			// Stop the previous pingWithRetry if it exists
+			close(pingWithRetryStopChan)
+			pingWithRetryStopChan = nil
+		}
+		pingWithRetryStopChan, _ = pingWithRetry(tnet, wgData.ServerIP, pingTimeout)
 
 		// Always mark as connected and start the proxy manager regardless of initial ping result
 		// as the pings will continue in the background
@@ -704,6 +711,10 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			"containers": containers,
 		})
 		if err != nil {
+			logger.Error("Failed to send registration message: %v", err)
+		}
+		logger.Info("Sent registration message")
+		if err != nil {
 			logger.Error("Failed to send Docker container list: %v", err)
 		} else {
 			logger.Info("Docker container list sent, count: %d", len(containers))
@@ -718,22 +729,23 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			// request from the server the list of nodes to ping at newt/ping/request
 			stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
 
-			// Send registration message to the server for backward compatibility
-			err := client.SendMessage("newt/wg/register", map[string]interface{}{
-				"publicKey":           publicKey.String(),
-				"newtVersion":         newtVersion,
-				"backwardsCompatible": true,
-			})
-			if err != nil {
-				logger.Error("Failed to send registration message: %v", err)
-				return err
-			}
-			logger.Info("Sent registration message")
-
 			if wgService != nil {
 				wgService.LoadRemoteConfig()
 			}
 		}
+
+		// Send registration message to the server for backward compatibility
+		err := client.SendMessage("newt/wg/register", map[string]interface{}{
+			"publicKey":           publicKey.String(),
+			"newtVersion":         newtVersion,
+			"backwardsCompatible": true,
+		})
+
+		if err != nil {
+			logger.Error("Failed to send registration message: %v", err)
+			return err
+		}
+		logger.Info("Sent registration message")
 
 		return nil
 	})

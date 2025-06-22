@@ -1,4 +1,4 @@
-package util
+package main
 
 import (
 	"bytes"
@@ -90,13 +90,14 @@ func ping(tnet *netstack.Net, dst string, timeout time.Duration) (time.Duration,
 	return latency, nil
 }
 
-func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) error {
+func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopChan chan struct{}, err error) {
 	const (
 		initialMaxAttempts = 5
 		initialRetryDelay  = 2 * time.Second
 		maxRetryDelay      = 60 * time.Second // Cap the maximum delay
 	)
 
+	stopChan = make(chan struct{})
 	attempt := 1
 	retryDelay := initialRetryDelay
 
@@ -105,9 +106,8 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) error 
 	if latency, err := ping(tnet, dst, timeout); err == nil {
 		// Successful ping
 		logger.Info("Ping latency: %v", latency)
-
 		logger.Info("Tunnel connection to server established successfully!")
-		return nil
+		return stopChan, nil
 	} else {
 		logger.Warn("Ping attempt %d failed: %v", attempt, err)
 	}
@@ -117,34 +117,40 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) error 
 		attempt = 2 // Continue from attempt 2
 
 		for {
-			logger.Info("Ping attempt %d", attempt)
-
-			if latency, err := ping(tnet, dst, timeout); err != nil {
-				logger.Warn("Ping attempt %d failed: %v", attempt, err)
-
-				// Increase delay after certain thresholds but cap it
-				if attempt%5 == 0 && retryDelay < maxRetryDelay {
-					retryDelay = time.Duration(float64(retryDelay) * 1.5)
-					if retryDelay > maxRetryDelay {
-						retryDelay = maxRetryDelay
-					}
-					logger.Info("Increasing ping retry delay to %v", retryDelay)
-				}
-
-				time.Sleep(retryDelay)
-				attempt++
-			} else {
-				// Successful ping
-				logger.Info("Ping succeeded after %d attempts", attempt)
-				logger.Info("Ping latency: %v", latency)
-				logger.Info("Tunnel connection to server established successfully!")
+			select {
+			case <-stopChan:
+				logger.Info("Stopping pingWithRetry goroutine")
 				return
+			default:
+				logger.Info("Ping attempt %d", attempt)
+
+				if latency, err := ping(tnet, dst, timeout); err != nil {
+					logger.Warn("Ping attempt %d failed: %v", attempt, err)
+
+					// Increase delay after certain thresholds but cap it
+					if attempt%5 == 0 && retryDelay < maxRetryDelay {
+						retryDelay = time.Duration(float64(retryDelay) * 1.5)
+						if retryDelay > maxRetryDelay {
+							retryDelay = maxRetryDelay
+						}
+						logger.Info("Increasing ping retry delay to %v", retryDelay)
+					}
+
+					time.Sleep(retryDelay)
+					attempt++
+				} else {
+					// Successful ping
+					logger.Info("Ping succeeded after %d attempts", attempt)
+					logger.Info("Ping latency: %v", latency)
+					logger.Info("Tunnel connection to server established successfully!")
+					return
+				}
 			}
 		}
 	}()
 
 	// Return an error for the first batch of attempts (to maintain compatibility with existing code)
-	return fmt.Errorf("initial ping attempts failed, continuing in background")
+	return stopChan, fmt.Errorf("initial ping attempts failed, continuing in background")
 }
 
 func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Client) chan struct{} {
@@ -171,6 +177,14 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 							connectionLost = true
 							logger.Warn("Connection to server lost. Continuous reconnection attempts will be made.")
 							stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
+							// Send registration message to the server for backward compatibility
+							err := client.SendMessage("newt/wg/register", map[string]interface{}{
+								"publicKey":           publicKey.String(),
+								"backwardsCompatible": true,
+							})
+							if err != nil {
+								logger.Error("Failed to send registration message: %v", err)
+							}
 						}
 						currentInterval = time.Duration(float64(currentInterval) * 1.5)
 						if currentInterval > maxInterval {
@@ -369,7 +383,7 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 	return nil
 }
 
-func executeUpdownScript(action, proto, target string, updownScript string) (string, error) {
+func executeUpdownScript(action, proto, target string) (string, error) {
 	if updownScript == "" {
 		return target, nil
 	}
