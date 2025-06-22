@@ -11,10 +11,11 @@ import (
 	"strings"
 	"time"
 
+	"math/rand"
+
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/websocket"
-	"golang.org/x/exp/rand"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.zx2c4.com/wireguard/device"
