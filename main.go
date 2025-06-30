@@ -93,6 +93,7 @@ var (
 	publicKey                          wgtypes.Key
 	pingStopChan                       chan struct{}
 	stopFunc                           func()
+	healthFile                         string
 )
 
 func main() {
@@ -113,6 +114,7 @@ func main() {
 	pingIntervalStr := os.Getenv("PING_INTERVAL")
 	pingTimeoutStr := os.Getenv("PING_TIMEOUT")
 	dockerEnforceNetworkValidation = os.Getenv("DOCKER_ENFORCE_NETWORK_VALIDATION")
+	healthFile = os.Getenv("HEALTH_FILE")
 
 	if endpoint == "" {
 		flag.StringVar(&endpoint, "endpoint", "", "Endpoint of your pangolin server")
@@ -174,6 +176,9 @@ func main() {
 
 	if dockerEnforceNetworkValidation == "" {
 		flag.StringVar(&dockerEnforceNetworkValidation, "docker-enforce-network-validation", "false", "Enforce validation of container on newt network (true or false)")
+	}
+	if healthFile == "" {
+		flag.StringVar(&healthFile, "health-file", "", "Path to health file (if unset, health file won’t be written)")
 	}
 
 	// do a --version check

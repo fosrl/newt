@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -92,6 +93,14 @@ func ping(tnet *netstack.Net, dst string, timeout time.Duration) (time.Duration,
 }
 
 func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopChan chan struct{}, err error) {
+
+	if healthFile != "" {
+		err = os.Remove(healthFile)
+		if err != nil {
+			logger.Error("Failed to remove health file: %v", err)
+		}
+	}
+
 	const (
 		initialMaxAttempts = 5
 		initialRetryDelay  = 2 * time.Second
@@ -108,6 +117,12 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 		// Successful ping
 		logger.Info("Ping latency: %v", latency)
 		logger.Info("Tunnel connection to server established successfully!")
+		if healthFile != "" {
+			err := os.WriteFile(healthFile, []byte("ok"), 0644)
+			if err != nil {
+				logger.Warn("Failed to write health file: %v", err)
+			}
+		}
 		return stopChan, nil
 	} else {
 		logger.Warn("Ping attempt %d failed: %v", attempt, err)
@@ -143,6 +158,12 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 					logger.Info("Ping succeeded after %d attempts", attempt)
 					logger.Info("Ping latency: %v", latency)
 					logger.Info("Tunnel connection to server established successfully!")
+					if healthFile != "" {
+						err := os.WriteFile(healthFile, []byte("ok"), 0644)
+						if err != nil {
+							logger.Warn("Failed to write health file: %v", err)
+						}
+					}
 					return
 				}
 			}
@@ -185,6 +206,12 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 							if err != nil {
 								logger.Error("Failed to send registration message: %v", err)
 							}
+							if healthFile != "" {
+								err = os.Remove(healthFile)
+								if err != nil {
+									logger.Error("Failed to remove health file: %v", err)
+								}
+							}
 						}
 						currentInterval = time.Duration(float64(currentInterval) * 1.5)
 						if currentInterval > maxInterval {
@@ -197,6 +224,12 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 					if connectionLost {
 						connectionLost = false
 						logger.Info("Connection to server restored!")
+						if healthFile != "" {
+							err := os.WriteFile(healthFile, []byte("ok"), 0644)
+							if err != nil {
+								logger.Warn("Failed to write health file: %v", err)
+							}
+						}
 					}
 					if currentInterval > initialInterval {
 						currentInterval = time.Duration(float64(currentInterval) * 0.8)
