@@ -13,7 +13,7 @@ require (
 	golang.org/x/exp v0.0.0-20250218142911-aa4b98e5adaa
 	golang.org/x/net v0.41.0
 	golang.zx2c4.com/wireguard v0.0.0-20231211153847-12269c276173
-	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
+	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20231211153847-12269c276173
 	gvisor.dev/gvisor v0.0.0-20230927004350-cbd86285d259
 	software.sslmate.com/src/go-pkcs12 v0.5.0
 )
