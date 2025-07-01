@@ -26,6 +26,8 @@ type Container struct {
 	Labels   map[string]string  `json:"labels"`
 	Created  int64              `json:"created"`
 	Networks map[string]Network `json:"networks"`
+	Hostname string             `json:"hostname"` // added to use hostname if available instead of network address
+
 }
 
 // Port represents a port mapping for a Docker container
@@ -173,6 +175,14 @@ func ListContainers(socketPath string, enforceNetworkValidation bool) ([]Contain
 		// Short ID like docker ps
 		shortId := c.ID[:12]
 
+		// Inspect container to get hostname
+		hostname := ""
+		containerInfo, err := cli.ContainerInspect(ctx, c.ID)
+		if err == nil && containerInfo.Config != nil {
+			hostname = containerInfo.Config.Hostname
+		}
+
+
 		// Skip host container if set
 		if hostContainerId != "" && c.ID == hostContainerId {
 			continue
@@ -238,6 +248,7 @@ func ListContainers(socketPath string, enforceNetworkValidation bool) ([]Contain
 			Labels:   c.Labels,
 			Created:  c.Created,
 			Networks: networks,
+			Hostname: hostname, // added
 		}
 
 		dockerContainers = append(dockerContainers, dockerContainer)
