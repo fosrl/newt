@@ -5,7 +5,7 @@ go 1.23.1
 toolchain go1.23.2
 
 require (
-	github.com/docker/docker v28.3.0+incompatible
+	github.com/docker/docker v28.3.1+incompatible
 	github.com/google/gopacket v1.1.19
 	github.com/gorilla/websocket v1.5.3
 	github.com/vishvananda/netlink v1.3.0
