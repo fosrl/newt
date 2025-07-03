@@ -19,8 +19,6 @@ import (
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/updates"
 	"github.com/fosrl/newt/websocket"
-	"github.com/fosrl/newt/wg"
-	"github.com/fosrl/newt/wgtester"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
@@ -255,14 +253,12 @@ func main() {
 	}
 
 	// Create TUN device and network stack
-	var wgService *wg.WireGuardService
 	var tun tun.Device
 	var tnet *netstack.Net
 	var dev *device.Device
 	var pm *proxy.ProxyManager
 	var connected bool
 	var wgData WgData
-	var wgTesterServer *wgtester.Server
 
 	if acceptClients {
 		// make sure we are running on linux
@@ -271,30 +267,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		var host = endpoint
-		if strings.HasPrefix(host, "http://") {
-			host = strings.TrimPrefix(host, "http://")
-		} else if strings.HasPrefix(host, "https://") {
-			host = strings.TrimPrefix(host, "https://")
-		}
-
-		host = strings.TrimSuffix(host, "/")
-
-		// Create WireGuard service
-		wgService, err = wg.NewWireGuardService(interfaceName, mtuInt, generateAndSaveKeyTo, host, id, client)
-		if err != nil {
-			logger.Fatal("Failed to create WireGuard service: %v", err)
-		}
-		defer wgService.Close(rm)
-
-		wgTesterServer = wgtester.NewServer("0.0.0.0", wgService.Port, id) // TODO: maybe make this the same ip of the wg server?
-		err := wgTesterServer.Start()
-		if err != nil {
-			logger.Error("Failed to start WireGuard tester server: %v", err)
-		} else {
-			// Make sure to stop the server on exit
-			defer wgTesterServer.Stop()
-		}
+		setupClients(client)
 	}
 
 	var pingWithRetryStopChan chan struct{}
@@ -349,9 +322,7 @@ func main() {
 			return
 		}
 
-		if wgService != nil {
-			wgService.SetServerPubKey(wgData.PublicKey)
-		}
+		clientsHandleNewtConnection(wgData.PublicKey)
 
 		logger.Info("Received: %+v", msg)
 		tun, tnet, err = netstack.CreateNetTUN(
@@ -423,12 +394,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			updateTargets(pm, "add", wgData.TunnelIP, "udp", TargetData{Targets: wgData.Targets.UDP})
 		}
 
-		// first make sure the wpgService has a port
-		if wgService != nil {
-			// add a udp proxy for localost and the wgService port
-			// TODO: make sure this port is not used in a target
-			pm.AddTarget("udp", wgData.TunnelIP, int(wgService.Port), fmt.Sprintf("127.0.0.1:%d", wgService.Port))
-		}
+		clientsAddProxyTarget(pm, wgData.TunnelIP)
 
 		err = pm.Start()
 		if err != nil {
@@ -734,9 +700,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			// request from the server the list of nodes to ping at newt/ping/request
 			stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
 
-			if wgService != nil {
-				wgService.LoadRemoteConfig()
-			}
+			clientsOnConnect()
 		}
 
 		// Send registration message to the server for backward compatibility
@@ -755,12 +719,6 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		return nil
 	})
 
-	client.OnTokenUpdate(func(token string) {
-		if wgService != nil {
-			wgService.SetToken(token)
-		}
-	})
-
 	// Connect to the WebSocket server
 	if err := client.Connect(); err != nil {
 		logger.Fatal("Failed to connect to server: %v", err)
@@ -774,13 +732,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 	dev.Close()
 
-	if wgService != nil {
-		wgService.Close(rm)
-	}
-
-	if wgTesterServer != nil {
-		wgTesterServer.Stop()
-	}
+	closeClients()
 
 	if pm != nil {
 		pm.Stop()
