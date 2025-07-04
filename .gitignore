@@ -1,6 +1,8 @@
 newt
 .DS_Store
 bin/
+nohup.out
 .idea
 *.iml
 certs/
+newt_arm64
