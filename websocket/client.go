@@ -126,6 +126,8 @@ func (c *Client) SendMessage(messageType string, data interface{}) error {
 		Data: data,
 	}
 
+	logger.Debug("Sending message: %s, data: %+v", messageType, data)
+
 	c.writeMux.Lock()
 	defer c.writeMux.Unlock()
 	return c.conn.WriteJSON(msg)
@@ -179,62 +181,6 @@ func (c *Client) getToken() (string, error) {
 		tlsConfig, err = loadClientCertificate(c.config.TlsClientCert)
 		if err != nil {
 			return "", fmt.Errorf("failed to load certificate %s: %w", c.config.TlsClientCert, err)
-		}
-	}
-
-	// If we already have a token, try to use it
-	if c.config.Token != "" {
-		tokenCheckData := map[string]interface{}{
-			"newtId": c.config.NewtID,
-			"secret": c.config.Secret,
-			"token":  c.config.Token,
-		}
-		jsonData, err := json.Marshal(tokenCheckData)
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal token check data: %w", err)
-		}
-
-		// Create a new request
-		req, err := http.NewRequest(
-			"POST",
-			baseEndpoint+"/api/v1/auth/newt/get-token",
-			bytes.NewBuffer(jsonData),
-		)
-		if err != nil {
-			return "", fmt.Errorf("failed to create request: %w", err)
-		}
-
-		// Set headers
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-CSRF-Token", "x-csrf-protection")
-
-		// Make the request
-		client := &http.Client{}
-		if tlsConfig != nil {
-			client.Transport = &http.Transport{
-				TLSClientConfig: tlsConfig,
-			}
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("failed to check token validity: %w", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			logger.Error("Token check failed with status code: %d", resp.StatusCode)
-			return "", fmt.Errorf("token check failed with status code: %d", resp.StatusCode)
-		}
-
-		var tokenResp TokenResponse
-		if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-			logger.Error("Failed to decode token check response.")
-			return "", fmt.Errorf("failed to decode token check response: %w", err)
-		}
-
-		// If token is still valid, return it
-		if tokenResp.Success && tokenResp.Message == "Token session already valid" {
-			return c.config.Token, nil
 		}
 	}
 
@@ -294,6 +240,8 @@ func (c *Client) getToken() (string, error) {
 		return "", fmt.Errorf("received empty token from server")
 	}
 
+	logger.Debug("Received token: %s", tokenResp.Data.Token)
+
 	return tokenResp.Data.Token, nil
 }
 
@@ -321,7 +269,9 @@ func (c *Client) establishConnection() error {
 		return fmt.Errorf("failed to get token: %w", err)
 	}
 
-	c.onTokenUpdate(token)
+	if c.onTokenUpdate != nil {
+		c.onTokenUpdate(token)
+	}
 
 	// Parse the base URL to determine protocol and hostname
 	baseURL, err := url.Parse(c.baseURL)

@@ -60,20 +60,23 @@ func closeClients() {
 }
 
 func clientsHandleNewtConnection(publicKey string) {
-	if wgService != nil {
-		wgService.SetServerPubKey(publicKey)
-	} else {
-		logger.Error("WireGuard service is not initialized, cannot set server public key")
+	if wgService == nil {
+		return
 	}
+	wgService.SetServerPubKey(publicKey)
 }
 
 func clientsOnConnect() {
-	if wgService != nil {
-		wgService.LoadRemoteConfig()
+	if wgService == nil {
+		return
 	}
+	wgService.LoadRemoteConfig()
 }
 
 func clientsAddProxyTarget(pm *proxy.ProxyManager, tunnelIp string) {
+	if wgService == nil {
+		return
+	}
 	// add a udp proxy for localost and the wgService port
 	// TODO: make sure this port is not used in a target
 	pm.AddTarget("udp", tunnelIp, int(wgService.Port), fmt.Sprintf("127.0.0.1:%d", wgService.Port))

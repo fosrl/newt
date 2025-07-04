@@ -547,7 +547,8 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			"pingResults": pingResults,
 			"newtVersion": newtVersion,
 		}, 1*time.Second)
-		logger.Info("Sent exit node ping results to cloud for selection")
+
+		logger.Debug("Sent exit node ping results to cloud for selection: pingResults=%+v", pingResults)
 	})
 
 	client.RegisterHandler("newt/tcp/add", func(msg websocket.WSMessage) {
@@ -684,7 +685,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		if err != nil {
 			logger.Error("Failed to send registration message: %v", err)
 		}
-		logger.Info("Sent registration message")
+
 		if err != nil {
 			logger.Error("Failed to send Docker container list: %v", err)
 		} else {
@@ -714,6 +715,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			logger.Error("Failed to send registration message: %v", err)
 			return err
 		}
+
 		logger.Info("Sent registration message")
 
 		return nil
