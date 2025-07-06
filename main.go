@@ -272,6 +272,35 @@ func main() {
 
 	var pingWithRetryStopChan chan struct{}
 
+	closeWgTunnel := func() {
+		if pingStopChan != nil {
+			// Stop the ping check
+			close(pingStopChan)
+			pingStopChan = nil
+		}
+
+		// Stop proxy manager if running
+		if pm != nil {
+			pm.Stop()
+			pm = nil
+		}
+
+		// Close WireGuard device first - this will automatically close the TUN device
+		if dev != nil {
+			dev.Close()
+			dev = nil
+		}
+
+		// Clear references but don't manually close since dev.Close() already did it
+		if tnet != nil {
+			tnet = nil
+		}
+		if tun != nil {
+			tun = nil // Don't call tun.Close() here since dev.Close() already closed it
+		}
+
+	}
+
 	// Register handlers for different message types
 	client.RegisterHandler("newt/wg/connect", func(msg websocket.WSMessage) {
 		logger.Info("Received registration message")
@@ -281,33 +310,10 @@ func main() {
 		}
 
 		if connected {
-			if pingStopChan != nil {
-				// Stop the ping check
-				close(pingStopChan)
-				pingStopChan = nil
-			}
-
-			// Stop proxy manager if running
-			if pm != nil {
-				pm.Stop()
-				pm = nil
-			}
-
-			// Close WireGuard device first - this will automatically close the TUN device
-			if dev != nil {
-				dev.Close()
-				dev = nil
-			}
-
-			// Clear references but don't manually close since dev.Close() already did it
-			if tnet != nil {
-				tnet = nil
-			}
-			if tun != nil {
-				tun = nil // Don't call tun.Close() here since dev.Close() already closed it
-			}
-
 			// Mark as disconnected
+
+			closeWgTunnel()
+
 			connected = false
 		}
 
@@ -405,31 +411,8 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	client.RegisterHandler("newt/wg/reconnect", func(msg websocket.WSMessage) {
 		logger.Info("Received reconnect message")
 
-		if pingStopChan != nil {
-			// Stop the ping check
-			close(pingStopChan)
-			pingStopChan = nil
-		}
-
-		// Stop proxy manager if running
-		if pm != nil {
-			pm.Stop()
-			pm = nil
-		}
-
-		// Close WireGuard device first - this will automatically close the TUN device
-		if dev != nil {
-			dev.Close()
-			dev = nil
-		}
-
-		// Clear references but don't manually close since dev.Close() already did it
-		if tnet != nil {
-			tnet = nil
-		}
-		if tun != nil {
-			tun = nil // Don't call tun.Close() here since dev.Close() already closed it
-		}
+		// Close the WireGuard device and TUN
+		closeWgTunnel()
 
 		// Mark as disconnected
 		connected = false
@@ -442,6 +425,18 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 		// Request exit nodes from the server
 		stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
+
+		logger.Info("Tunnel destroyed, ready for reconnection")
+	})
+
+	client.RegisterHandler("newt/wg/terminate", func(msg websocket.WSMessage) {
+		logger.Info("Received termination message")
+
+		// Close the WireGuard device and TUN
+		closeWgTunnel()
+
+		// Mark as disconnected
+		connected = false
 
 		logger.Info("Tunnel destroyed, ready for reconnection")
 	})
