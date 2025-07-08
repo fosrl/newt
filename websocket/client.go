@@ -102,15 +102,30 @@ func (c *Client) Connect() error {
 	return nil
 }
 
-// Close closes the WebSocket connection
+// Close closes the WebSocket connection gracefully
 func (c *Client) Close() error {
-	close(c.done)
-	if c.conn != nil {
-		return c.conn.Close()
+	// Signal shutdown to all goroutines first
+	select {
+	case <-c.done:
+		// Already closed
+		return nil
+	default:
+		close(c.done)
 	}
 
-	// stop the ping monitor
+	// Set connection status to false
 	c.setConnected(false)
+
+	// Close the WebSocket connection gracefully
+	if c.conn != nil {
+		// Send close message
+		c.writeMux.Lock()
+		c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		c.writeMux.Unlock()
+
+		// Close the connection
+		return c.conn.Close()
+	}
 
 	return nil
 }
@@ -351,9 +366,16 @@ func (c *Client) pingMonitor() {
 			err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(c.pingTimeout))
 			c.writeMux.Unlock()
 			if err != nil {
-				logger.Error("Ping failed: %v", err)
-				c.reconnect()
-				return
+				// Check if we're shutting down before logging error and reconnecting
+				select {
+				case <-c.done:
+					// Expected during shutdown
+					return
+				default:
+					logger.Error("Ping failed: %v", err)
+					c.reconnect()
+					return
+				}
 			}
 		}
 	}
@@ -365,7 +387,14 @@ func (c *Client) readPumpWithDisconnectDetection() {
 		if c.conn != nil {
 			c.conn.Close()
 		}
-		c.reconnect()
+		// Only attempt reconnect if we're not shutting down
+		select {
+		case <-c.done:
+			// Shutting down, don't reconnect
+			return
+		default:
+			c.reconnect()
+		}
 	}()
 
 	for {
@@ -376,8 +405,21 @@ func (c *Client) readPumpWithDisconnectDetection() {
 			var msg WSMessage
 			err := c.conn.ReadJSON(&msg)
 			if err != nil {
-				logger.Error("WebSocket read error: %v", err)
-				return // triggers reconnect via defer
+				// Check if we're shutting down before logging error
+				select {
+				case <-c.done:
+					// Expected during shutdown, don't log as error
+					logger.Debug("WebSocket connection closed during shutdown")
+					return
+				default:
+					// Unexpected error during normal operation
+					if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
+						logger.Error("WebSocket read error: %v", err)
+					} else {
+						logger.Debug("WebSocket connection closed: %v", err)
+					}
+					return // triggers reconnect via defer
+				}
 			}
 
 			c.handlersMux.RLock()
@@ -396,7 +438,13 @@ func (c *Client) reconnect() {
 		c.conn = nil
 	}
 
-	go c.connectWithRetry()
+	// Only reconnect if we're not shutting down
+	select {
+	case <-c.done:
+		return
+	default:
+		go c.connectWithRetry()
+	}
 }
 
 func (c *Client) setConnected(status bool) {
