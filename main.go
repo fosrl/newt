@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -86,8 +87,8 @@ var (
 	dockerSocket                       string
 	dockerEnforceNetworkValidation     string
 	dockerEnforceNetworkValidationBool bool
-	pingInterval                       = 1 * time.Second
-	pingTimeout                        = 2 * time.Second
+	pingInterval                       = 2 * time.Second
+	pingTimeout                        = 3 * time.Second
 	publicKey                          wgtypes.Key
 	pingStopChan                       chan struct{}
 	stopFunc                           func()
@@ -330,7 +331,7 @@ func main() {
 
 		clientsHandleNewtConnection(wgData.PublicKey)
 
-		logger.Info("Received: %+v", msg)
+		logger.Debug("Received: %+v", msg)
 		tun, tnet, err = netstack.CreateNetTUN(
 			[]netip.Addr{netip.MustParseAddr(wgData.TunnelIP)},
 			[]netip.Addr{netip.MustParseAddr(dns)},
@@ -344,6 +345,14 @@ func main() {
 			mapToWireGuardLogLevel(loggerLevel),
 			"wireguard: ",
 		))
+
+		host, _, err := net.SplitHostPort(wgData.Endpoint)
+		if err != nil {
+			logger.Error("Failed to split endpoint: %v", err)
+			return
+		}
+
+		logger.Info("Connecting to endpoint: %s", host)
 
 		endpoint, err := resolveDomain(wgData.Endpoint)
 		if err != nil {
@@ -369,7 +378,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			logger.Error("Failed to bring up WireGuard device: %v", err)
 		}
 
-		logger.Info("WireGuard device created. Lets ping the server now...")
+		logger.Debug("WireGuard device created. Lets ping the server now...")
 
 		// Even if pingWithRetry returns an error, it will continue trying in the background
 		if pingWithRetryStopChan != nil {
@@ -382,7 +391,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		// Always mark as connected and start the proxy manager regardless of initial ping result
 		// as the pings will continue in the background
 		if !connected {
-			logger.Info("Starting ping check")
+			logger.Debug("Starting ping check")
 			pingStopChan = startPingCheck(tnet, wgData.ServerIP, client)
 		}
 
@@ -417,7 +426,6 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		// Mark as disconnected
 		connected = false
 
-		// start asking for the exit nodes again
 		if stopFunc != nil {
 			stopFunc()     // stop the ws from sending more requests
 			stopFunc = nil // reset stopFunc to nil to avoid double stopping
@@ -438,7 +446,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		// Mark as disconnected
 		connected = false
 
-		logger.Info("Tunnel destroyed, ready for reconnection")
+		logger.Info("Tunnel destroyed")
 	})
 
 	client.RegisterHandler("newt/ping/exitNodes", func(msg websocket.WSMessage) {
@@ -547,7 +555,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	})
 
 	client.RegisterHandler("newt/tcp/add", func(msg websocket.WSMessage) {
-		logger.Info("Received: %+v", msg)
+		logger.Debug("Received: %+v", msg)
 
 		// if there is no wgData or pm, we can't add targets
 		if wgData.TunnelIP == "" || pm == nil {

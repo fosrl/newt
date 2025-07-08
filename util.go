@@ -112,10 +112,10 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 	retryDelay := initialRetryDelay
 
 	// First try with the initial parameters
-	logger.Info("Ping attempt %d", attempt)
+	logger.Debug("Ping attempt %d", attempt)
 	if latency, err := ping(tnet, dst, timeout); err == nil {
 		// Successful ping
-		logger.Info("Ping latency: %v", latency)
+		logger.Debug("Ping latency: %v", latency)
 		logger.Info("Tunnel connection to server established successfully!")
 		if healthFile != "" {
 			err := os.WriteFile(healthFile, []byte("ok"), 0644)
@@ -137,7 +137,7 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 			case <-stopChan:
 				return
 			default:
-				logger.Info("Ping attempt %d", attempt)
+				logger.Debug("Ping attempt %d", attempt)
 
 				if latency, err := ping(tnet, dst, timeout); err != nil {
 					logger.Warn("Ping attempt %d failed: %v", attempt, err)
@@ -155,8 +155,8 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 					attempt++
 				} else {
 					// Successful ping
-					logger.Info("Ping succeeded after %d attempts", attempt)
-					logger.Info("Ping latency: %v", latency)
+					logger.Debug("Ping succeeded after %d attempts", attempt)
+					logger.Debug("Ping latency: %v", latency)
 					logger.Info("Tunnel connection to server established successfully!")
 					if healthFile != "" {
 						err := os.WriteFile(healthFile, []byte("ok"), 0644)
