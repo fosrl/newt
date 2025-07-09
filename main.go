@@ -699,11 +699,12 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	client.OnConnect(func() error {
 		publicKey = privateKey.PublicKey()
 		logger.Debug("Public key: %s", publicKey)
+		logger.Info("Websocket connected")
 
 		if !connected {
 			// request from the server the list of nodes to ping at newt/ping/request
 			stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
-
+			logger.Info("Requesting exit nodes from server")
 			clientsOnConnect()
 		}
 
@@ -718,8 +719,6 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			logger.Error("Failed to send registration message: %v", err)
 			return err
 		}
-
-		logger.Info("Sent registration message")
 
 		return nil
 	})
