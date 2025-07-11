@@ -175,9 +175,8 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 }
 
 func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Client) chan struct{} {
-	initialInterval := pingInterval
-	maxInterval := 3 * time.Second
-	currentInterval := initialInterval
+	maxInterval := 6 * time.Second
+	currentInterval := pingInterval
 	consecutiveFailures := 0
 	connectionLost := false
 
@@ -192,12 +191,12 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 				_, err := ping(tnet, serverIP, pingTimeout)
 				if err != nil {
 					consecutiveFailures++
-					if consecutiveFailures == 1 {
+					if consecutiveFailures < 4 {
 						logger.Debug("Periodic ping failed (%d consecutive failures): %v", consecutiveFailures, err)
 					} else {
 						logger.Warn("Periodic ping failed (%d consecutive failures): %v", consecutiveFailures, err)
 					}
-					if consecutiveFailures >= 3 && currentInterval < maxInterval {
+					if consecutiveFailures >= 8 && currentInterval < maxInterval {
 						if !connectionLost {
 							connectionLost = true
 							logger.Warn("Connection to server lost. Continuous reconnection attempts will be made.")
@@ -235,10 +234,10 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 							}
 						}
 					}
-					if currentInterval > initialInterval {
+					if currentInterval > pingInterval {
 						currentInterval = time.Duration(float64(currentInterval) * 0.8)
-						if currentInterval < initialInterval {
-							currentInterval = initialInterval
+						if currentInterval < pingInterval {
+							currentInterval = pingInterval
 						}
 						ticker.Reset(currentInterval)
 						logger.Info("Decreased ping check interval to %v after successful ping", currentInterval)

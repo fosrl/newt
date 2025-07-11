@@ -87,8 +87,8 @@ var (
 	dockerSocket                       string
 	dockerEnforceNetworkValidation     string
 	dockerEnforceNetworkValidationBool bool
-	pingInterval                       = 2 * time.Second
-	pingTimeout                        = 3 * time.Second
+	pingInterval                       time.Duration
+	pingTimeout                        time.Duration
 	publicKey                          wgtypes.Key
 	pingStopChan                       chan struct{}
 	stopFunc                           func()
@@ -151,17 +151,17 @@ func main() {
 		flag.StringVar(&dockerSocket, "docker-socket", "", "Path to Docker socket (typically /var/run/docker.sock)")
 	}
 	if pingIntervalStr == "" {
-		flag.StringVar(&pingIntervalStr, "ping-interval", "1s", "Interval for pinging the server (default 1s)")
+		flag.StringVar(&pingIntervalStr, "ping-interval", "3s", "Interval for pinging the server (default 3s)")
 	}
 	if pingTimeoutStr == "" {
-		flag.StringVar(&pingTimeoutStr, "ping-timeout", "2s", "	Timeout for each ping (default 2s)")
+		flag.StringVar(&pingTimeoutStr, "ping-timeout", "3s", "	Timeout for each ping (default 3s)")
 	}
 
 	if pingIntervalStr != "" {
 		pingInterval, err = time.ParseDuration(pingIntervalStr)
 		if err != nil {
 			fmt.Printf("Invalid PING_INTERVAL value: %s, using default 1 second\n", pingIntervalStr)
-			pingInterval = 1 * time.Second
+			pingInterval = 3 * time.Second
 		}
 	}
 
@@ -169,7 +169,7 @@ func main() {
 		pingTimeout, err = time.ParseDuration(pingTimeoutStr)
 		if err != nil {
 			fmt.Printf("Invalid PING_TIMEOUT value: %s, using default 2 seconds\n", pingTimeoutStr)
-			pingTimeout = 2 * time.Second
+			pingTimeout = 3 * time.Second
 		}
 	}
 
