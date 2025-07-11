@@ -9,10 +9,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"software.sslmate.com/src/go-pkcs12"
 	"strings"
 	"sync"
 	"time"
+
+	"software.sslmate.com/src/go-pkcs12"
 
 	"github.com/fosrl/newt/logger"
 	"github.com/gorilla/websocket"
@@ -28,8 +29,11 @@ type Client struct {
 	reconnectInterval time.Duration
 	isConnected       bool
 	reconnectMux      sync.RWMutex
-
-	onConnect func() error
+	pingInterval      time.Duration
+	pingTimeout       time.Duration
+	onConnect         func() error
+	onTokenUpdate     func(token string)
+	writeMux          sync.Mutex
 }
 
 type ClientOption func(*Client)
@@ -53,8 +57,12 @@ func (c *Client) OnConnect(callback func() error) {
 	c.onConnect = callback
 }
 
+func (c *Client) OnTokenUpdate(callback func(token string)) {
+	c.onTokenUpdate = callback
+}
+
 // NewClient creates a new Newt client
-func NewClient(newtID, secret string, endpoint string, opts ...ClientOption) (*Client, error) {
+func NewClient(newtID, secret string, endpoint string, pingInterval time.Duration, pingTimeout time.Duration, opts ...ClientOption) (*Client, error) {
 	config := &Config{
 		NewtID:   newtID,
 		Secret:   secret,
@@ -66,18 +74,18 @@ func NewClient(newtID, secret string, endpoint string, opts ...ClientOption) (*C
 		baseURL:           endpoint, // default value
 		handlers:          make(map[string]MessageHandler),
 		done:              make(chan struct{}),
-		reconnectInterval: 10 * time.Second,
+		reconnectInterval: 3 * time.Second,
 		isConnected:       false,
+		pingInterval:      pingInterval,
+		pingTimeout:       pingTimeout,
 	}
 
 	// Apply options before loading config
-	if opts != nil {
-		for _, opt := range opts {
-			if opt == nil {
-				continue
-			}
-			opt(client)
+	for _, opt := range opts {
+		if opt == nil {
+			continue
 		}
+		opt(client)
 	}
 
 	// Load existing config if available
@@ -94,15 +102,30 @@ func (c *Client) Connect() error {
 	return nil
 }
 
-// Close closes the WebSocket connection
+// Close closes the WebSocket connection gracefully
 func (c *Client) Close() error {
-	close(c.done)
-	if c.conn != nil {
-		return c.conn.Close()
+	// Signal shutdown to all goroutines first
+	select {
+	case <-c.done:
+		// Already closed
+		return nil
+	default:
+		close(c.done)
 	}
 
-	// stop the ping monitor
+	// Set connection status to false
 	c.setConnected(false)
+
+	// Close the WebSocket connection gracefully
+	if c.conn != nil {
+		// Send close message
+		c.writeMux.Lock()
+		c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		c.writeMux.Unlock()
+
+		// Close the connection
+		return c.conn.Close()
+	}
 
 	return nil
 }
@@ -118,7 +141,37 @@ func (c *Client) SendMessage(messageType string, data interface{}) error {
 		Data: data,
 	}
 
+	logger.Debug("Sending message: %s, data: %+v", messageType, data)
+
+	c.writeMux.Lock()
+	defer c.writeMux.Unlock()
 	return c.conn.WriteJSON(msg)
+}
+
+func (c *Client) SendMessageInterval(messageType string, data interface{}, interval time.Duration) (stop func()) {
+	stopChan := make(chan struct{})
+	go func() {
+		err := c.SendMessage(messageType, data) // Send immediately
+		if err != nil {
+			logger.Error("Failed to send initial message: %v", err)
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				err = c.SendMessage(messageType, data)
+				if err != nil {
+					logger.Error("Failed to send message: %v", err)
+				}
+			case <-stopChan:
+				return
+			}
+		}
+	}()
+	return func() {
+		close(stopChan)
+	}
 }
 
 // RegisterHandler registers a handler for a specific message type
@@ -126,30 +179,6 @@ func (c *Client) RegisterHandler(messageType string, handler MessageHandler) {
 	c.handlersMux.Lock()
 	defer c.handlersMux.Unlock()
 	c.handlers[messageType] = handler
-}
-
-// readPump pumps messages from the WebSocket connection
-func (c *Client) readPump() {
-	defer c.conn.Close()
-
-	for {
-		select {
-		case <-c.done:
-			return
-		default:
-			var msg WSMessage
-			err := c.conn.ReadJSON(&msg)
-			if err != nil {
-				return
-			}
-
-			c.handlersMux.RLock()
-			if handler, ok := c.handlers[msg.Type]; ok {
-				handler(msg)
-			}
-			c.handlersMux.RUnlock()
-		}
-	}
 }
 
 func (c *Client) getToken() (string, error) {
@@ -167,56 +196,6 @@ func (c *Client) getToken() (string, error) {
 		tlsConfig, err = loadClientCertificate(c.config.TlsClientCert)
 		if err != nil {
 			return "", fmt.Errorf("failed to load certificate %s: %w", c.config.TlsClientCert, err)
-		}
-	}
-
-	// If we already have a token, try to use it
-	if c.config.Token != "" {
-		tokenCheckData := map[string]interface{}{
-			"newtId": c.config.NewtID,
-			"secret": c.config.Secret,
-			"token":  c.config.Token,
-		}
-		jsonData, err := json.Marshal(tokenCheckData)
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal token check data: %w", err)
-		}
-
-		// Create a new request
-		req, err := http.NewRequest(
-			"POST",
-			baseEndpoint+"/api/v1/auth/newt/get-token",
-			bytes.NewBuffer(jsonData),
-		)
-		if err != nil {
-			return "", fmt.Errorf("failed to create request: %w", err)
-		}
-
-		// Set headers
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-CSRF-Token", "x-csrf-protection")
-
-		// Make the request
-		client := &http.Client{}
-		if tlsConfig != nil {
-			client.Transport = &http.Transport{
-				TLSClientConfig: tlsConfig,
-			}
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("failed to check token validity: %w", err)
-		}
-		defer resp.Body.Close()
-
-		var tokenResp TokenResponse
-		if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-			return "", fmt.Errorf("failed to decode token check response: %w", err)
-		}
-
-		// If token is still valid, return it
-		if tokenResp.Success && tokenResp.Message == "Token session already valid" {
-			return c.config.Token, nil
 		}
 	}
 
@@ -257,12 +236,14 @@ func (c *Client) getToken() (string, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		logger.Error("Failed to get token with status code: %d", resp.StatusCode)
+		return "", fmt.Errorf("failed to get token with status code: %d", resp.StatusCode)
+	}
+
 	var tokenResp TokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		// print out the token response for debugging
-		buf := new(bytes.Buffer)
-		buf.ReadFrom(resp.Body)
-		logger.Info("Token response: %s", buf.String())
+		logger.Error("Failed to decode token response.")
 		return "", fmt.Errorf("failed to decode token response: %w", err)
 	}
 
@@ -273,6 +254,8 @@ func (c *Client) getToken() (string, error) {
 	if tokenResp.Data.Token == "" {
 		return "", fmt.Errorf("received empty token from server")
 	}
+
+	logger.Debug("Received token: %s", tokenResp.Data.Token)
 
 	return tokenResp.Data.Token, nil
 }
@@ -301,6 +284,10 @@ func (c *Client) establishConnection() error {
 		return fmt.Errorf("failed to get token: %w", err)
 	}
 
+	if c.onTokenUpdate != nil {
+		c.onTokenUpdate(token)
+	}
+
 	// Parse the base URL to determine protocol and hostname
 	baseURL, err := url.Parse(c.baseURL)
 	if err != nil {
@@ -323,6 +310,7 @@ func (c *Client) establishConnection() error {
 	// Add token to query parameters
 	q := u.Query()
 	q.Set("token", token)
+	q.Set("clientType", "newt")
 	u.RawQuery = q.Encode()
 
 	// Connect to WebSocket
@@ -345,8 +333,8 @@ func (c *Client) establishConnection() error {
 
 	// Start the ping monitor
 	go c.pingMonitor()
-	// Start the read pump
-	go c.readPump()
+	// Start the read pump with disconnect detection
+	go c.readPumpWithDisconnectDetection()
 
 	if c.onConnect != nil {
 		err := c.saveConfig()
@@ -361,8 +349,9 @@ func (c *Client) establishConnection() error {
 	return nil
 }
 
+// pingMonitor sends pings at a short interval and triggers reconnect on failure
 func (c *Client) pingMonitor() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(c.pingInterval)
 	defer ticker.Stop()
 
 	for {
@@ -370,11 +359,74 @@ func (c *Client) pingMonitor() {
 		case <-c.done:
 			return
 		case <-ticker.C:
-			if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second)); err != nil {
-				logger.Error("Ping failed: %v", err)
-				c.reconnect()
+			if c.conn == nil {
 				return
 			}
+			c.writeMux.Lock()
+			err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(c.pingTimeout))
+			c.writeMux.Unlock()
+			if err != nil {
+				// Check if we're shutting down before logging error and reconnecting
+				select {
+				case <-c.done:
+					// Expected during shutdown
+					return
+				default:
+					logger.Error("Ping failed: %v", err)
+					c.reconnect()
+					return
+				}
+			}
+		}
+	}
+}
+
+// readPumpWithDisconnectDetection reads messages and triggers reconnect on error
+func (c *Client) readPumpWithDisconnectDetection() {
+	defer func() {
+		if c.conn != nil {
+			c.conn.Close()
+		}
+		// Only attempt reconnect if we're not shutting down
+		select {
+		case <-c.done:
+			// Shutting down, don't reconnect
+			return
+		default:
+			c.reconnect()
+		}
+	}()
+
+	for {
+		select {
+		case <-c.done:
+			return
+		default:
+			var msg WSMessage
+			err := c.conn.ReadJSON(&msg)
+			if err != nil {
+				// Check if we're shutting down before logging error
+				select {
+				case <-c.done:
+					// Expected during shutdown, don't log as error
+					logger.Debug("WebSocket connection closed during shutdown")
+					return
+				default:
+					// Unexpected error during normal operation
+					if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
+						logger.Error("WebSocket read error: %v", err)
+					} else {
+						logger.Debug("WebSocket connection closed: %v", err)
+					}
+					return // triggers reconnect via defer
+				}
+			}
+
+			c.handlersMux.RLock()
+			if handler, ok := c.handlers[msg.Type]; ok {
+				handler(msg)
+			}
+			c.handlersMux.RUnlock()
 		}
 	}
 }
@@ -383,9 +435,16 @@ func (c *Client) reconnect() {
 	c.setConnected(false)
 	if c.conn != nil {
 		c.conn.Close()
+		c.conn = nil
 	}
 
-	go c.connectWithRetry()
+	// Only reconnect if we're not shutting down
+	select {
+	case <-c.done:
+		return
+	default:
+		go c.connectWithRetry()
+	}
 }
 
 func (c *Client) setConnected(status bool) {

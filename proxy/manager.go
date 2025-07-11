@@ -213,7 +213,8 @@ func (pm *ProxyManager) startTarget(proto, listenIP string, port int, targetAddr
 		return fmt.Errorf("unsupported protocol: %s", proto)
 	}
 
-	logger.Info("Started %s proxy from %s:%d to %s", proto, listenIP, port, targetAddr)
+	logger.Info("Started %s proxy to %s", proto, targetAddr)
+	logger.Debug("Started %s proxy from %s:%d to %s", proto, listenIP, port, targetAddr)
 
 	return nil
 }

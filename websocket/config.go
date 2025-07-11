@@ -48,9 +48,6 @@ func (c *Client) loadConfig() error {
 	if c.config.NewtID == "" {
 		c.config.NewtID = config.NewtID
 	}
-	if c.config.Token == "" {
-		c.config.Token = config.Token
-	}
 	if c.config.Secret == "" {
 		c.config.Secret = config.Secret
 	}

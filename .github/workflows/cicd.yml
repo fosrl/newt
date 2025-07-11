@@ -39,7 +39,7 @@ jobs:
               run: |
                   TAG=${{ env.TAG }}
                   if [ -f main.go ]; then
-                    sed -i 's/Newt version replaceme/Newt version '"$TAG"'/' main.go
+                    sed -i 's/version_replaceme/'"$TAG"'/' main.go
                     echo "Updated main.go with version $TAG"
                   else
                     echo "main.go not found"
