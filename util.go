@@ -192,7 +192,11 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 				_, err := ping(tnet, serverIP, pingTimeout)
 				if err != nil {
 					consecutiveFailures++
-					logger.Warn("Periodic ping failed (%d consecutive failures): %v", consecutiveFailures, err)
+					if consecutiveFailures == 1 {
+						logger.Debug("Periodic ping failed (%d consecutive failures): %v", consecutiveFailures, err)
+					} else {
+						logger.Warn("Periodic ping failed (%d consecutive failures): %v", consecutiveFailures, err)
+					}
 					if consecutiveFailures >= 3 && currentInterval < maxInterval {
 						if !connectionLost {
 							connectionLost = true
