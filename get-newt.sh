@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Get Newt - Cross-platform installation script
-# Usage: curl -fsSL https://raw.githubusercontent.com/fosrl/newt/get-newt.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/fosrl/newt/refs/heads/main/get-newt.sh | bash
 
 set -e
 
