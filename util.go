@@ -45,9 +45,17 @@ func ping(tnet *netstack.Net, dst string, timeout time.Duration) (time.Duration,
 	}
 	defer socket.Close()
 
+	// Set socket buffer sizes to handle high bandwidth scenarios
+	if tcpConn, ok := socket.(interface{ SetReadBuffer(int) error }); ok {
+		tcpConn.SetReadBuffer(64 * 1024)
+	}
+	if tcpConn, ok := socket.(interface{ SetWriteBuffer(int) error }); ok {
+		tcpConn.SetWriteBuffer(64 * 1024)
+	}
+
 	requestPing := icmp.Echo{
 		Seq:  rand.Intn(1 << 16),
-		Data: []byte("f"),
+		Data: []byte("newtping"),
 	}
 
 	icmpBytes, err := (&icmp.Message{Type: ipv4.ICMPTypeEcho, Code: 0, Body: &requestPing}).Marshal(nil)
@@ -65,12 +73,14 @@ func ping(tnet *netstack.Net, dst string, timeout time.Duration) (time.Duration,
 		return 0, fmt.Errorf("failed to write ICMP packet: %w", err)
 	}
 
-	n, err := socket.Read(icmpBytes[:])
+	// Use larger buffer for reading to handle potential network congestion
+	readBuffer := make([]byte, 1500)
+	n, err := socket.Read(readBuffer)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read ICMP packet: %w", err)
 	}
 
-	replyPacket, err := icmp.ParseMessage(1, icmpBytes[:n])
+	replyPacket, err := icmp.ParseMessage(1, readBuffer[:n])
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse ICMP packet: %w", err)
 	}
@@ -90,6 +100,51 @@ func ping(tnet *netstack.Net, dst string, timeout time.Duration) (time.Duration,
 	logger.Debug("Ping to %s successful, latency: %v", dst, latency)
 
 	return latency, nil
+}
+
+// reliablePing performs multiple ping attempts with adaptive timeout
+func reliablePing(tnet *netstack.Net, dst string, baseTimeout time.Duration, maxAttempts int) (time.Duration, error) {
+	var lastErr error
+	var totalLatency time.Duration
+	successCount := 0
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Adaptive timeout: increase timeout for later attempts
+		timeout := baseTimeout + time.Duration(attempt-1)*500*time.Millisecond
+
+		// Add jitter to prevent thundering herd
+		jitter := time.Duration(rand.Intn(100)) * time.Millisecond
+		timeout += jitter
+
+		latency, err := ping(tnet, dst, timeout)
+		if err != nil {
+			lastErr = err
+			logger.Debug("Ping attempt %d/%d failed: %v", attempt, maxAttempts, err)
+
+			// Brief pause between attempts with exponential backoff
+			if attempt < maxAttempts {
+				backoff := time.Duration(attempt) * 50 * time.Millisecond
+				time.Sleep(backoff)
+			}
+			continue
+		}
+
+		totalLatency += latency
+		successCount++
+
+		// If we get at least one success, we can return early for health checks
+		if successCount > 0 {
+			avgLatency := totalLatency / time.Duration(successCount)
+			logger.Debug("Reliable ping succeeded after %d attempts, avg latency: %v", attempt, avgLatency)
+			return avgLatency, nil
+		}
+	}
+
+	if successCount == 0 {
+		return 0, fmt.Errorf("all %d ping attempts failed, last error: %v", maxAttempts, lastErr)
+	}
+
+	return totalLatency / time.Duration(successCount), nil
 }
 
 func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopChan chan struct{}, err error) {
@@ -180,6 +235,9 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 	consecutiveFailures := 0
 	connectionLost := false
 
+	// Track recent latencies for adaptive timeout calculation
+	recentLatencies := make([]time.Duration, 0, 10)
+
 	pingStopChan := make(chan struct{})
 
 	go func() {
@@ -188,18 +246,52 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 		for {
 			select {
 			case <-ticker.C:
-				_, err := ping(tnet, serverIP, pingTimeout)
+				// Calculate adaptive timeout based on recent latencies
+				adaptiveTimeout := pingTimeout
+				if len(recentLatencies) > 0 {
+					var sum time.Duration
+					for _, lat := range recentLatencies {
+						sum += lat
+					}
+					avgLatency := sum / time.Duration(len(recentLatencies))
+					// Use 3x average latency as timeout, with minimum of pingTimeout
+					adaptiveTimeout = avgLatency * 3
+					if adaptiveTimeout < pingTimeout {
+						adaptiveTimeout = pingTimeout
+					}
+					if adaptiveTimeout > 15*time.Second {
+						adaptiveTimeout = 15 * time.Second
+					}
+				}
+
+				// Use reliable ping with multiple attempts
+				maxAttempts := 2
+				if consecutiveFailures > 4 {
+					maxAttempts = 4 // More attempts when connection is unstable
+				}
+
+				latency, err := reliablePing(tnet, serverIP, adaptiveTimeout, maxAttempts)
 				if err != nil {
 					consecutiveFailures++
-					if consecutiveFailures < 4 {
+
+					// Track recent latencies (add a high value for failures)
+					recentLatencies = append(recentLatencies, adaptiveTimeout)
+					if len(recentLatencies) > 10 {
+						recentLatencies = recentLatencies[1:]
+					}
+
+					if consecutiveFailures < 2 {
 						logger.Debug("Periodic ping failed (%d consecutive failures): %v", consecutiveFailures, err)
 					} else {
 						logger.Warn("Periodic ping failed (%d consecutive failures): %v", consecutiveFailures, err)
 					}
-					if consecutiveFailures >= 8 && currentInterval < maxInterval {
+
+					// More lenient threshold for declaring connection lost under load
+					failureThreshold := 4
+					if consecutiveFailures >= failureThreshold && currentInterval < maxInterval {
 						if !connectionLost {
 							connectionLost = true
-							logger.Warn("Connection to server lost. Continuous reconnection attempts will be made.")
+							logger.Warn("Connection to server lost after %d failures. Continuous reconnection attempts will be made.", consecutiveFailures)
 							stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
 							// Send registration message to the server for backward compatibility
 							err := client.SendMessage("newt/wg/register", map[string]interface{}{
@@ -216,7 +308,7 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 								}
 							}
 						}
-						currentInterval = time.Duration(float64(currentInterval) * 1.5)
+						currentInterval = time.Duration(float64(currentInterval) * 1.3) // Slower increase
 						if currentInterval > maxInterval {
 							currentInterval = maxInterval
 						}
@@ -224,9 +316,15 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 						logger.Debug("Increased ping check interval to %v due to consecutive failures", currentInterval)
 					}
 				} else {
+					// Track recent latencies
+					recentLatencies = append(recentLatencies, latency)
+					if len(recentLatencies) > 10 {
+						recentLatencies = recentLatencies[1:]
+					}
+
 					if connectionLost {
 						connectionLost = false
-						logger.Info("Connection to server restored!")
+						logger.Info("Connection to server restored after %d failures!", consecutiveFailures)
 						if healthFile != "" {
 							err := os.WriteFile(healthFile, []byte("ok"), 0644)
 							if err != nil {
@@ -235,12 +333,12 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 						}
 					}
 					if currentInterval > pingInterval {
-						currentInterval = time.Duration(float64(currentInterval) * 0.8)
+						currentInterval = time.Duration(float64(currentInterval) * 0.9) // Slower decrease
 						if currentInterval < pingInterval {
 							currentInterval = pingInterval
 						}
 						ticker.Reset(currentInterval)
-						logger.Info("Decreased ping check interval to %v after successful ping", currentInterval)
+						logger.Debug("Decreased ping check interval to %v after successful ping", currentInterval)
 					}
 					consecutiveFailures = 0
 				}
