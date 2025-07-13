@@ -40,6 +40,7 @@ When Newt receives WireGuard control messages, it will use the information encod
 - `tls-client-cert` (optional): Client certificate (p12 or pfx) for mTLS. See [mTLS](#mtls)
 - `docker-socket` (optional): Set the Docker socket to use the container discovery integration
 - `docker-enforce-network-validation` (optional): Validate the container target is on the same network as the newt process
+- `health-file` (optional): Check if connection to WG server (pangolin) is ok. creates a file if ok, removes it if not ok. Can be used with docker healtcheck to restart newt 
 
 - Example:
 
@@ -61,7 +62,8 @@ services:
     environment:
       - PANGOLIN_ENDPOINT=https://example.com
       - NEWT_ID=2ix2t8xk22ubpfy 
-      - NEWT_SECRET=nnisrfsdfc7prqsp9ewo1dvtvci50j5uiqotez00dgap0ii2 
+      - NEWT_SECRET=nnisrfsdfc7prqsp9ewo1dvtvci50j5uiqotez00dgap0ii2
+      - HEALTH_FILE=/tmp/healthy 
 ```
 
 You can also pass the CLI args to the container:
@@ -76,6 +78,7 @@ services:
         - --id 31frd0uzbjvp721
         - --secret h51mmlknrvrwv8s4r1i210azhumt6isgbpyavxodibx1k2d6
         - --endpoint https://example.com
+        - --health-file /tmp/healthy
 ```
 
 ### Docker Socket Integration

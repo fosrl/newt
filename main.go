@@ -154,23 +154,27 @@ func main() {
 		flag.StringVar(&pingIntervalStr, "ping-interval", "3s", "Interval for pinging the server (default 3s)")
 	}
 	if pingTimeoutStr == "" {
-		flag.StringVar(&pingTimeoutStr, "ping-timeout", "3s", "	Timeout for each ping (default 3s)")
+		flag.StringVar(&pingTimeoutStr, "ping-timeout", "5s", "	Timeout for each ping (default 3s)")
 	}
 
 	if pingIntervalStr != "" {
 		pingInterval, err = time.ParseDuration(pingIntervalStr)
 		if err != nil {
-			fmt.Printf("Invalid PING_INTERVAL value: %s, using default 1 second\n", pingIntervalStr)
+			fmt.Printf("Invalid PING_INTERVAL value: %s, using default 3 seconds\n", pingIntervalStr)
 			pingInterval = 3 * time.Second
 		}
+	} else {
+		pingInterval = 3 * time.Second
 	}
 
 	if pingTimeoutStr != "" {
 		pingTimeout, err = time.ParseDuration(pingTimeoutStr)
 		if err != nil {
-			fmt.Printf("Invalid PING_TIMEOUT value: %s, using default 2 seconds\n", pingTimeoutStr)
-			pingTimeout = 3 * time.Second
+			fmt.Printf("Invalid PING_TIMEOUT value: %s, using default 5 seconds\n", pingTimeoutStr)
+			pingTimeout = 5 * time.Second
 		}
+	} else {
+		pingTimeout = 5 * time.Second
 	}
 
 	if dockerEnforceNetworkValidation == "" {
@@ -386,6 +390,15 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			close(pingWithRetryStopChan)
 			pingWithRetryStopChan = nil
 		}
+		// Use reliable ping for initial connection test
+		logger.Debug("Testing initial connection with reliable ping...")
+		_, err = reliablePing(tnet, wgData.ServerIP, pingTimeout, 5)
+		if err != nil {
+			logger.Warn("Initial reliable ping failed, but continuing: %v", err)
+		} else {
+			logger.Info("Initial connection test successful!")
+		}
+
 		pingWithRetryStopChan, _ = pingWithRetry(tnet, wgData.ServerIP, pingTimeout)
 
 		// Always mark as connected and start the proxy manager regardless of initial ping result
