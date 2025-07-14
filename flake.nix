@@ -27,11 +27,11 @@
           default = self.packages.${system}.pangolin-newt;
           pangolin-newt = pkgs.buildGoModule {
             pname = "pangolin-newt";
-            version = "1.2.1";
+            version = "1.3.2";
 
             src = ./.;
 
-            vendorHash = "sha256-Yc5IXnShciek/bKkVezkAcaq47zGiZP8vUHFb9p09LI=";
+            vendorHash = "sha256-Y/f7GCO7Kf1iQiDR32DIEIGJdcN+PKS0OrhBvXiHvwo=";
 
             meta = with pkgs.lib; {
               description = "A tunneling client for Pangolin";
