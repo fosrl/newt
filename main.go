@@ -649,10 +649,10 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 	// Register handler for Docker socket check
 	client.RegisterHandler("newt/socket/check", func(msg websocket.WSMessage) {
-		logger.Info("Received Docker socket check request")
+		logger.Debug("Received Docker socket check request")
 
 		if dockerSocket == "" {
-			logger.Info("Docker socket path is not set")
+			logger.Debug("Docker socket path is not set")
 			err := client.SendMessage("newt/socket/status", map[string]interface{}{
 				"available":  false,
 				"socketPath": dockerSocket,
@@ -680,10 +680,10 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 	// Register handler for Docker container listing
 	client.RegisterHandler("newt/socket/fetch", func(msg websocket.WSMessage) {
-		logger.Info("Received Docker container fetch request")
+		logger.Debug("Received Docker container fetch request")
 
 		if dockerSocket == "" {
-			logger.Info("Docker socket path is not set")
+			logger.Debug("Docker socket path is not set")
 			return
 		}
 
