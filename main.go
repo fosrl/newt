@@ -497,11 +497,6 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		results := make([]nodeResult, len(exitNodes))
 		const pingAttempts = 3
 		for i, node := range exitNodes {
-			if connected && node.WasPreviouslyConnected {
-				logger.Info("Skipping ping for previously connected exit node so we pick another %d (%s)", node.ID, node.Endpoint)
-				continue
-			}
-
 			var totalLatency time.Duration
 			var lastErr error
 			successes := 0
@@ -555,6 +550,31 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 				Endpoint:               res.Node.Endpoint,
 				WasPreviouslyConnected: res.Node.WasPreviouslyConnected,
 			})
+		}
+		// If we were previously connected and there is at least one other good node,
+		// exclude the previously connected node from pingResults sent to the cloud.
+		var filteredPingResults []ExitNodePingResult
+		previouslyConnectedNodeIdx := -1
+		for i, res := range pingResults {
+			if res.WasPreviouslyConnected {
+				previouslyConnectedNodeIdx = i
+			}
+		}
+		// Count good nodes (latency > 0, no error, not previously connected)
+		goodNodeCount := 0
+		for i, res := range pingResults {
+			if i != previouslyConnectedNodeIdx && res.LatencyMs > 0 && res.Error == "" {
+				goodNodeCount++
+			}
+		}
+		if previouslyConnectedNodeIdx != -1 && goodNodeCount > 0 {
+			for i, res := range pingResults {
+				if i != previouslyConnectedNodeIdx {
+					filteredPingResults = append(filteredPingResults, res)
+				}
+			}
+			pingResults = filteredPingResults
+			logger.Info("Excluding previously connected exit node from ping results due to other available nodes")
 		}
 
 		// Send the ping results to the cloud for selection
