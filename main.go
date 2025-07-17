@@ -488,6 +488,32 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			return
 		}
 
+		// If there is just one exit node, we can skip pinging it and use it directly
+		if len(exitNodes) == 1 {
+			logger.Debug("Only one exit node available, using it directly: %s", exitNodes[0].Endpoint)
+
+			// Prepare data to send to the cloud for selection
+			pingResults := []ExitNodePingResult{
+				{
+					ExitNodeID:             exitNodes[0].ID,
+					LatencyMs:              0, // No ping latency since we are using it directly
+					Weight:                 exitNodes[0].Weight,
+					Error:                  "",
+					Name:                   exitNodes[0].Name,
+					Endpoint:               exitNodes[0].Endpoint,
+					WasPreviouslyConnected: exitNodes[0].WasPreviouslyConnected,
+				},
+			}
+
+			stopFunc = client.SendMessageInterval("newt/wg/register", map[string]interface{}{
+				"publicKey":   publicKey.String(),
+				"pingResults": pingResults,
+				"newtVersion": newtVersion,
+			}, 1*time.Second)
+
+			return
+		}
+
 		type nodeResult struct {
 			Node    ExitNode
 			Latency time.Duration
