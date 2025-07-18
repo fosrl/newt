@@ -1,7 +1,7 @@
 package websocket
 
 type Config struct {
-	NewtID        string `json:"newtId"`
+	ID            string `json:"id"`
 	Secret        string `json:"secret"`
 	Endpoint      string `json:"endpoint"`
 	TlsClientCert string `json:"tlsClientCert"`
