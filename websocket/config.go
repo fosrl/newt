@@ -27,7 +27,7 @@ func getConfigPath() string {
 }
 
 func (c *Client) loadConfig() error {
-	if c.config.NewtID != "" && c.config.Secret != "" && c.config.Endpoint != "" {
+	if c.config.ID != "" && c.config.Secret != "" && c.config.Endpoint != "" {
 		return nil
 	}
 
@@ -45,8 +45,8 @@ func (c *Client) loadConfig() error {
 		return err
 	}
 
-	if c.config.NewtID == "" {
-		c.config.NewtID = config.NewtID
+	if c.config.ID == "" {
+		c.config.ID = config.ID
 	}
 	if c.config.Secret == "" {
 		c.config.Secret = config.Secret

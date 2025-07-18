@@ -34,6 +34,7 @@ type Client struct {
 	onConnect         func() error
 	onTokenUpdate     func(token string)
 	writeMux          sync.Mutex
+	clientType        string // Type of client (e.g., "newt", "olm")
 }
 
 type ClientOption func(*Client)
@@ -61,10 +62,10 @@ func (c *Client) OnTokenUpdate(callback func(token string)) {
 	c.onTokenUpdate = callback
 }
 
-// NewClient creates a new Newt client
-func NewClient(newtID, secret string, endpoint string, pingInterval time.Duration, pingTimeout time.Duration, opts ...ClientOption) (*Client, error) {
+// NewClient creates a new websocket client
+func NewClient(clientType string, ID, secret string, endpoint string, pingInterval time.Duration, pingTimeout time.Duration, opts ...ClientOption) (*Client, error) {
 	config := &Config{
-		NewtID:   newtID,
+		ID:       ID,
 		Secret:   secret,
 		Endpoint: endpoint,
 	}
@@ -78,6 +79,7 @@ func NewClient(newtID, secret string, endpoint string, pingInterval time.Duratio
 		isConnected:       false,
 		pingInterval:      pingInterval,
 		pingTimeout:       pingTimeout,
+		clientType:        clientType,
 	}
 
 	// Apply options before loading config
@@ -199,12 +201,22 @@ func (c *Client) getToken() (string, error) {
 		}
 	}
 
+	var tokenData map[string]interface{}
+
 	// Get a new token
-	tokenData := map[string]interface{}{
-		"newtId": c.config.NewtID,
-		"secret": c.config.Secret,
+	if c.clientType == "newt" {
+		tokenData = map[string]interface{}{
+			"newtId": c.config.ID,
+			"secret": c.config.Secret,
+		}
+	} else if c.clientType == "olm" {
+		tokenData = map[string]interface{}{
+			"olmId":  c.config.ID,
+			"secret": c.config.Secret,
+		}
 	}
 	jsonData, err := json.Marshal(tokenData)
+
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal token request data: %w", err)
 	}
@@ -212,7 +224,7 @@ func (c *Client) getToken() (string, error) {
 	// Create a new request
 	req, err := http.NewRequest(
 		"POST",
-		baseEndpoint+"/api/v1/auth/newt/get-token",
+		baseEndpoint+"/api/v1/auth/"+c.clientType+"/get-token",
 		bytes.NewBuffer(jsonData),
 	)
 	if err != nil {
@@ -310,7 +322,7 @@ func (c *Client) establishConnection() error {
 	// Add token to query parameters
 	q := u.Query()
 	q.Set("token", token)
-	q.Set("clientType", "newt")
+	q.Set("clientType", c.clientType)
 	u.RawQuery = q.Encode()
 
 	// Connect to WebSocket
