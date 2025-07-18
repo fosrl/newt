@@ -31,15 +31,11 @@ func setupClients(client *websocket.Client) {
 	if err != nil {
 		logger.Fatal("Failed to create WireGuard service: %v", err)
 	}
-	defer wgService.Close(rm)
 
 	wgTesterServer = wgtester.NewServer("0.0.0.0", wgService.Port, id) // TODO: maybe make this the same ip of the wg server?
 	err := wgTesterServer.Start()
 	if err != nil {
 		logger.Error("Failed to start WireGuard tester server: %v", err)
-	} else {
-		// Make sure to stop the server on exit
-		defer wgTesterServer.Stop()
 	}
 
 	client.OnTokenUpdate(func(token string) {
