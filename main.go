@@ -228,6 +228,7 @@ func main() {
 	}
 	// Create a new client
 	client, err := websocket.NewClient(
+		"newt",
 		id,     // CLI arg takes precedence
 		secret, // CLI arg takes precedence
 		endpoint,
