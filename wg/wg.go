@@ -264,7 +264,8 @@ func (s *WireGuardService) LoadRemoteConfig() error {
 func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	var config WgConfig
 
-	logger.Info("Received message: %v", msg)
+	logger.Debug("Received message: %v", msg)
+	logger.Info("Received WireGuard clients configuration from remote server")
 
 	jsonData, err := json.Marshal(msg.Data)
 	if err != nil {
@@ -455,7 +456,7 @@ func (s *WireGuardService) ensureWireguardPeers(peers []Peer) error {
 }
 
 func (s *WireGuardService) handleAddPeer(msg websocket.WSMessage) {
-	logger.Info("Received message: %v", msg.Data)
+	logger.Debug("Received message: %v", msg.Data)
 	var peer Peer
 
 	jsonData, err := json.Marshal(msg.Data)
@@ -528,7 +529,7 @@ func (s *WireGuardService) addPeer(peer Peer) error {
 }
 
 func (s *WireGuardService) handleRemovePeer(msg websocket.WSMessage) {
-	logger.Info("Received message: %v", msg.Data)
+	logger.Debug("Received message: %v", msg.Data)
 	// parse the publicKey from the message which is json { "publicKey": "asdfasdfl;akjsdf" }
 	type RemoveRequest struct {
 		PublicKey string `json:"publicKey"`
@@ -576,7 +577,7 @@ func (s *WireGuardService) removePeer(publicKey string) error {
 }
 
 func (s *WireGuardService) handleUpdatePeer(msg websocket.WSMessage) {
-	logger.Info("Received message: %v", msg.Data)
+	logger.Debug("Received message: %v", msg.Data)
 	// Define a struct to match the incoming message structure with optional fields
 	type UpdatePeerRequest struct {
 		PublicKey  string   `json:"publicKey"`
