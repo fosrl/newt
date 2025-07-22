@@ -334,8 +334,6 @@ func main() {
 			return
 		}
 
-		clientsHandleNewtConnection(wgData.PublicKey)
-
 		logger.Debug("Received: %+v", msg)
 		tun, tnet, err = netstack.CreateNetTUN(
 			[]netip.Addr{netip.MustParseAddr(wgData.TunnelIP)},
@@ -364,6 +362,8 @@ func main() {
 			logger.Error("Failed to resolve endpoint: %v", err)
 			return
 		}
+
+		clientsHandleNewtConnection(wgData.PublicKey, endpoint)
 
 		// Configure WireGuard
 		config := fmt.Sprintf(`private_key=%s
@@ -578,30 +578,34 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 				WasPreviouslyConnected: res.Node.WasPreviouslyConnected,
 			})
 		}
+
 		// If we were previously connected and there is at least one other good node,
-		// exclude the previously connected node from pingResults sent to the cloud.
-		var filteredPingResults []ExitNodePingResult
-		previouslyConnectedNodeIdx := -1
-		for i, res := range pingResults {
-			if res.WasPreviouslyConnected {
-				previouslyConnectedNodeIdx = i
-			}
-		}
-		// Count good nodes (latency > 0, no error, not previously connected)
-		goodNodeCount := 0
-		for i, res := range pingResults {
-			if i != previouslyConnectedNodeIdx && res.LatencyMs > 0 && res.Error == "" {
-				goodNodeCount++
-			}
-		}
-		if previouslyConnectedNodeIdx != -1 && goodNodeCount > 0 {
+		// exclude the previously connected node from pingResults sent to the cloud so we don't try to reconnect to it
+		// This is to avoid issues where the previously connected node might be down or unreachable
+		if connected {
+			var filteredPingResults []ExitNodePingResult
+			previouslyConnectedNodeIdx := -1
 			for i, res := range pingResults {
-				if i != previouslyConnectedNodeIdx {
-					filteredPingResults = append(filteredPingResults, res)
+				if res.WasPreviouslyConnected {
+					previouslyConnectedNodeIdx = i
 				}
 			}
-			pingResults = filteredPingResults
-			logger.Info("Excluding previously connected exit node from ping results due to other available nodes")
+			// Count good nodes (latency > 0, no error, not previously connected)
+			goodNodeCount := 0
+			for i, res := range pingResults {
+				if i != previouslyConnectedNodeIdx && res.LatencyMs > 0 && res.Error == "" {
+					goodNodeCount++
+				}
+			}
+			if previouslyConnectedNodeIdx != -1 && goodNodeCount > 0 {
+				for i, res := range pingResults {
+					if i != previouslyConnectedNodeIdx {
+						filteredPingResults = append(filteredPingResults, res)
+					}
+				}
+				pingResults = filteredPingResults
+				logger.Info("Excluding previously connected exit node from ping results due to other available nodes")
+			}
 		}
 
 		// Send the ping results to the cloud for selection

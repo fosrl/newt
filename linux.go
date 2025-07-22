@@ -55,11 +55,20 @@ func closeClients() {
 	}
 }
 
-func clientsHandleNewtConnection(publicKey string) {
+func clientsHandleNewtConnection(publicKey string, endpoint string) {
 	if wgService == nil {
 		return
 	}
-	wgService.SetServerPubKey(publicKey)
+
+	// split off the port from the endpoint
+	parts := strings.Split(endpoint, ":")
+	if len(parts) < 2 {
+		logger.Error("Invalid endpoint format: %s", endpoint)
+		return
+	}
+	endpoint = strings.Join(parts[:len(parts)-1], ":")
+
+	wgService.StartHolepunch(publicKey, endpoint)
 }
 
 func clientsOnConnect() {

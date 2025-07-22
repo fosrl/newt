@@ -49,21 +49,22 @@ type PeerReading struct {
 }
 
 type WireGuardService struct {
-	interfaceName string
-	mtu           int
-	client        *websocket.Client
-	wgClient      *wgctrl.Client
-	config        WgConfig
-	key           wgtypes.Key
-	newtId        string
-	lastReadings  map[string]PeerReading
-	mu            sync.Mutex
-	Port          uint16
-	stopHolepunch chan struct{}
-	host          string
-	serverPubKey  string
-	token         string
-	stopGetConfig func()
+	interfaceName     string
+	mtu               int
+	client            *websocket.Client
+	wgClient          *wgctrl.Client
+	config            WgConfig
+	key               wgtypes.Key
+	newtId            string
+	lastReadings      map[string]PeerReading
+	mu                sync.Mutex
+	Port              uint16
+	stopHolepunch     chan struct{}
+	host              string
+	serverPubKey      string
+	holePunchEndpoint string
+	token             string
+	stopGetConfig     func()
 }
 
 // Add this type definition
@@ -211,13 +212,6 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 	wsClient.RegisterHandler("newt/wg/peer/remove", service.handleRemovePeer)
 	wsClient.RegisterHandler("newt/wg/peer/update", service.handleUpdatePeer)
 
-	if err := service.sendUDPHolePunch(service.host + ":21820"); err != nil {
-		logger.Error("Failed to send UDP hole punch: %v", err)
-	}
-
-	// start the UDP holepunch
-	go service.keepSendingUDPHolePunch(service.host)
-
 	return service, nil
 }
 
@@ -241,8 +235,14 @@ func (s *WireGuardService) Close(rm bool) {
 	}
 }
 
-func (s *WireGuardService) SetServerPubKey(serverPubKey string) {
+func (s *WireGuardService) StartHolepunch(serverPubKey string, endpoint string) {
 	s.serverPubKey = serverPubKey
+	s.holePunchEndpoint = endpoint
+
+	logger.Debug("Starting UDP hole punch to %s", s.holePunchEndpoint)
+
+	// start the UDP holepunch
+	go s.keepSendingUDPHolePunch(s.holePunchEndpoint)
 }
 
 func (s *WireGuardService) SetToken(token string) {
@@ -926,6 +926,11 @@ func (s *WireGuardService) encryptPayload(payload []byte) (interface{}, error) {
 }
 
 func (s *WireGuardService) keepSendingUDPHolePunch(host string) {
+	// send initial hole punch
+	if err := s.sendUDPHolePunch(host + ":21820"); err != nil {
+		logger.Error("Failed to send initial UDP hole punch: %v", err)
+	}
+
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
