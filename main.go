@@ -80,7 +80,7 @@ var (
 	logLevel                           string
 	interfaceName                      string
 	generateAndSaveKeyTo               string
-	rm                                 bool
+	keepInterface                      bool
 	acceptClients                      bool
 	updownScript                       string
 	tlsPrivateKey                      string
@@ -106,7 +106,7 @@ func main() {
 	updownScript = os.Getenv("UPDOWN_SCRIPT")
 	interfaceName = os.Getenv("INTERFACE")
 	generateAndSaveKeyTo = os.Getenv("GENERATE_AND_SAVE_KEY_TO")
-	rm = os.Getenv("RM") == "true"
+	keepInterface = os.Getenv("KEEP_INTERFACE") == "true"
 	acceptClients = os.Getenv("ACCEPT_CLIENTS") == "true"
 	tlsPrivateKey = os.Getenv("TLS_CLIENT_CERT")
 	dockerSocket = os.Getenv("DOCKER_SOCKET")
@@ -142,7 +142,7 @@ func main() {
 	if generateAndSaveKeyTo == "" {
 		flag.StringVar(&generateAndSaveKeyTo, "generateAndSaveKeyTo", "/tmp/newtkey", "Path to save generated private key")
 	}
-	flag.BoolVar(&rm, "rm", false, "Remove the WireGuard interface")
+	flag.BoolVar(&keepInterface, "keep-interface", false, "Keep the WireGuard interface")
 	flag.BoolVar(&acceptClients, "accept-clients", false, "Accept clients on the WireGuard interface")
 	if tlsPrivateKey == "" {
 		flag.StringVar(&tlsPrivateKey, "tls-client-cert", "", "Path to client certificate used for mTLS")

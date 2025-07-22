@@ -45,7 +45,7 @@ func setupClients(client *websocket.Client) {
 
 func closeClients() {
 	if wgService != nil {
-		wgService.Close(rm)
+		wgService.Close(!keepInterface)
 		wgService = nil
 	}
 
