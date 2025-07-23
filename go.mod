@@ -15,7 +15,7 @@ require (
 	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
 	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c
-	software.sslmate.com/src/go-pkcs12 v0.5.0
+	software.sslmate.com/src/go-pkcs12 v0.6.0
 )
 
 require (
