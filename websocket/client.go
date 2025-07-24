@@ -98,6 +98,10 @@ func NewClient(clientType string, ID, secret string, endpoint string, pingInterv
 	return client, nil
 }
 
+func (c *Client) GetConfig() *Config {
+	return c.config
+}
+
 // Connect establishes the WebSocket connection
 func (c *Client) Connect() error {
 	go c.connectWithRetry()
