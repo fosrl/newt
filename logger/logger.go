@@ -2,6 +2,7 @@ package logger
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"sync"
@@ -46,6 +47,11 @@ func GetLogger() *Logger {
 // SetLevel sets the minimum logging level
 func (l *Logger) SetLevel(level LogLevel) {
 	l.level = level
+}
+
+// SetOutput sets the output destination for the logger
+func (l *Logger) SetOutput(w io.Writer) {
+	l.logger.SetOutput(w)
 }
 
 // log handles the actual logging
@@ -119,4 +125,9 @@ func Error(format string, args ...interface{}) {
 
 func Fatal(format string, args ...interface{}) {
 	GetLogger().Fatal(format, args...)
+}
+
+// SetOutput sets the output destination for the default logger
+func SetOutput(w io.Writer) {
+	GetLogger().SetOutput(w)
 }

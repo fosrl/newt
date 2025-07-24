@@ -8,15 +8,16 @@ import (
 	"runtime"
 )
 
-func getConfigPath() string {
+func getConfigPath(clientType string) string {
 	var configDir string
 	switch runtime.GOOS {
 	case "darwin":
-		configDir = filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "newt-client")
+		configDir = filepath.Join(os.Getenv("HOME"), "Library", "Application Support", clientType+"-client")
 	case "windows":
-		configDir = filepath.Join(os.Getenv("APPDATA"), "newt-client")
+		logDir := filepath.Join(os.Getenv("PROGRAMDATA"), "olm")
+		configDir = filepath.Join(logDir, clientType+"-client")
 	default: // linux and others
-		configDir = filepath.Join(os.Getenv("HOME"), ".config", "newt-client")
+		configDir = filepath.Join(os.Getenv("HOME"), ".config", clientType+"-client")
 	}
 
 	if err := os.MkdirAll(configDir, 0755); err != nil {
@@ -31,7 +32,7 @@ func (c *Client) loadConfig() error {
 		return nil
 	}
 
-	configPath := getConfigPath()
+	configPath := getConfigPath(c.clientType)
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -63,7 +64,7 @@ func (c *Client) loadConfig() error {
 }
 
 func (c *Client) saveConfig() error {
-	configPath := getConfigPath()
+	configPath := getConfigPath(c.clientType)
 	data, err := json.MarshalIndent(c.config, "", "  ")
 	if err != nil {
 		return err
