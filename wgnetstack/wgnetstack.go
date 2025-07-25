@@ -72,6 +72,8 @@ type WireGuardService struct {
 	tnet   *netstack.Net
 	device *device.Device
 	dns    []netip.Addr
+	// Callback for when netstack is ready
+	onNetstackReady func(*netstack.Net)
 }
 
 // Add this type definition
@@ -257,6 +259,11 @@ func (s *WireGuardService) GetPublicKey() wgtypes.Key {
 	return s.key.PublicKey()
 }
 
+// SetOnNetstackReady sets a callback function to be called when the netstack interface is ready
+func (s *WireGuardService) SetOnNetstackReady(callback func(*netstack.Net)) {
+	s.onNetstackReady = callback
+}
+
 func (s *WireGuardService) LoadRemoteConfig() error {
 	s.stopGetConfig = s.client.SendMessageInterval("newt/wg/get-config", map[string]interface{}{
 		"publicKey": s.key.PublicKey().String(),
@@ -348,6 +355,12 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 	}
 
 	logger.Info("WireGuard netstack device created and configured")
+
+	// Call the callback if it's set to notify that netstack is ready
+	if s.onNetstackReady != nil {
+		s.onNetstackReady(s.tnet)
+	}
+
 	return nil
 }
 

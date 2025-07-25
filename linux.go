@@ -13,6 +13,7 @@ import (
 	// "github.com/fosrl/newt/wg"
 	"github.com/fosrl/newt/wgnetstack"
 	"github.com/fosrl/newt/wgtester"
+	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 var wgService *wgnetstack.WireGuardService
@@ -39,6 +40,16 @@ func setupClients(client *websocket.Client) {
 	if err != nil {
 		logger.Error("Failed to start WireGuard tester server: %v", err)
 	}
+
+	// Set up callback to restart wgtester with netstack when WireGuard is ready
+	wgService.SetOnNetstackReady(func(tnet *netstack.Net) {
+		logger.Info("WireGuard netstack is ready, restarting wgtester with netstack")
+		if err := wgTesterServer.RestartWithNetstack(tnet); err != nil {
+			logger.Error("Failed to restart wgtester with netstack: %v", err)
+		} else {
+			logger.Info("WGTester successfully restarted with netstack")
+		}
+	})
 
 	client.OnTokenUpdate(func(token string) {
 		wgService.SetToken(token)
