@@ -419,10 +419,18 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		// add the targets if there are any
 		if len(wgData.Targets.TCP) > 0 {
 			updateTargets(pm, "add", wgData.TunnelIP, "tcp", TargetData{Targets: wgData.Targets.TCP})
+			// Also update wgnetstack proxy manager
+			if wgService != nil && wgService.GetNetstackNet() != nil && wgService.GetProxyManager() != nil {
+				updateTargets(wgService.GetProxyManager(), "add", wgData.TunnelIP, "tcp", TargetData{Targets: wgData.Targets.TCP})
+			}
 		}
 
 		if len(wgData.Targets.UDP) > 0 {
 			updateTargets(pm, "add", wgData.TunnelIP, "udp", TargetData{Targets: wgData.Targets.UDP})
+			// Also update wgnetstack proxy manager
+			if wgService != nil && wgService.GetNetstackNet() != nil && wgService.GetProxyManager() != nil {
+				updateTargets(wgService.GetProxyManager(), "add", wgData.TunnelIP, "udp", TargetData{Targets: wgData.Targets.UDP})
+			}
 		}
 
 		clientsAddProxyTarget(pm, wgData.TunnelIP)
@@ -637,6 +645,11 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 		if len(targetData.Targets) > 0 {
 			updateTargets(pm, "add", wgData.TunnelIP, "tcp", targetData)
+
+			// Also update wgnetstack proxy manager
+			if wgService != nil && wgService.GetNetstackNet() != nil && wgService.GetProxyManager() != nil {
+				updateTargets(wgService.GetProxyManager(), "add", wgData.TunnelIP, "tcp", targetData)
+			}
 		}
 	})
 
@@ -657,6 +670,11 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 		if len(targetData.Targets) > 0 {
 			updateTargets(pm, "add", wgData.TunnelIP, "udp", targetData)
+
+			// Also update wgnetstack proxy manager
+			if wgService != nil && wgService.GetNetstackNet() != nil && wgService.GetProxyManager() != nil {
+				updateTargets(wgService.GetProxyManager(), "add", wgData.TunnelIP, "udp", targetData)
+			}
 		}
 	})
 
@@ -677,6 +695,11 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 		if len(targetData.Targets) > 0 {
 			updateTargets(pm, "remove", wgData.TunnelIP, "udp", targetData)
+
+			// Also update wgnetstack proxy manager
+			if wgService != nil && wgService.GetNetstackNet() != nil && wgService.GetProxyManager() != nil {
+				updateTargets(wgService.GetProxyManager(), "remove", wgData.TunnelIP, "udp", targetData)
+			}
 		}
 	})
 
@@ -697,6 +720,11 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 		if len(targetData.Targets) > 0 {
 			updateTargets(pm, "remove", wgData.TunnelIP, "tcp", targetData)
+
+			// Also update wgnetstack proxy manager
+			if wgService != nil && wgService.GetNetstackNet() != nil && wgService.GetProxyManager() != nil {
+				updateTargets(wgService.GetProxyManager(), "remove", wgData.TunnelIP, "tcp", targetData)
+			}
 		}
 	})
 

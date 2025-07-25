@@ -41,6 +41,23 @@ func NewProxyManager(tnet *netstack.Net) *ProxyManager {
 	}
 }
 
+// init function without tnet
+func NewProxyManagerWithoutTNet() *ProxyManager {
+	return &ProxyManager{
+		tcpTargets: make(map[string]map[int]string),
+		udpTargets: make(map[string]map[int]string),
+		listeners:  make([]*gonet.TCPListener, 0),
+		udpConns:   make([]*gonet.UDPConn, 0),
+	}
+}
+
+// Function to add tnet to existing ProxyManager
+func (pm *ProxyManager) SetTNet(tnet *netstack.Net) {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+	pm.tnet = tnet
+}
+
 // AddTarget adds as new target for proxying
 func (pm *ProxyManager) AddTarget(proto, listenIP string, port int, targetAddr string) error {
 	pm.mutex.Lock()

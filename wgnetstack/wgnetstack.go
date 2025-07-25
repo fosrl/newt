@@ -17,6 +17,7 @@ import (
 
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/network"
+	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/websocket"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"
@@ -75,6 +76,30 @@ type WireGuardService struct {
 	// Callback for when netstack is ready
 	onNetstackReady func(*netstack.Net)
 	othertnet       *netstack.Net
+	// Proxy manager for tunnel
+	proxyManager *proxy.ProxyManager
+	// ...existing code...
+}
+
+// GetProxyManager returns the proxy manager for this WireGuardService
+func (s *WireGuardService) GetProxyManager() *proxy.ProxyManager {
+	return s.proxyManager
+}
+
+// AddProxyTarget adds a target to the proxy manager
+func (s *WireGuardService) AddProxyTarget(proto, listenIP string, port int, targetAddr string) error {
+	if s.proxyManager == nil {
+		return fmt.Errorf("proxy manager not initialized")
+	}
+	return s.proxyManager.AddTarget(proto, listenIP, port, targetAddr)
+}
+
+// RemoveProxyTarget removes a target from the proxy manager
+func (s *WireGuardService) RemoveProxyTarget(proto, listenIP string, port int) error {
+	if s.proxyManager == nil {
+		return fmt.Errorf("proxy manager not initialized")
+	}
+	return s.proxyManager.RemoveTarget(proto, listenIP, port)
 }
 
 // Add this type definition
@@ -199,6 +224,7 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 		stopHolepunch: make(chan struct{}),
 		Port:          port,
 		dns:           dnsAddrs,
+		proxyManager:  proxy.NewProxyManagerWithoutTNet(),
 	}
 
 	// Register websocket handlers
@@ -356,6 +382,8 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		return fmt.Errorf("failed to create TUN device: %v", err)
 	}
 
+	s.proxyManager.SetTNet(s.tnet)
+
 	// Create WireGuard device
 	s.device = device.NewDevice(s.tun, NewFixedPortBind(s.Port), device.NewLogger(
 		device.LogLevelSilent, // Use silent logging by default - could be made configurable
@@ -381,6 +409,9 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 	}
 
 	logger.Info("WireGuard netstack device created and configured")
+
+	// Create ProxyManager for this tunnel
+	s.proxyManager.Start()
 
 	// Store callback and tnet reference before releasing mutex
 	callback := s.onNetstackReady
