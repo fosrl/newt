@@ -766,25 +766,27 @@ func (s *WireGuardService) sendUDPHolePunch(serverAddr string) error {
 		return fmt.Errorf("failed to resolve server hostname")
 	}
 
-	// Get client IP based on route to server
+	// Get client IP based on route to server for local binding
 	clientIP := network.GetClientIP(serverIPAddr.IP)
 
-	// Create server and client configs
-	server := &network.Server{
-		Hostname: serverHostname,
-		Addr:     serverIPAddr,
-		Port:     uint16(serverPort),
+	// Create local UDP address using the same port as WireGuard
+	localAddr := &net.UDPAddr{
+		IP:   clientIP,
+		Port: int(s.Port),
 	}
 
-	client := &network.PeerNet{
-		IP:     clientIP,
-		Port:   s.Port,
-		NewtID: s.newtId,
+	// Create remote server address
+	remoteAddr := &net.UDPAddr{
+		IP:   serverIPAddr.IP,
+		Port: int(serverPort),
 	}
 
-	// Setup raw connection with BPF filtering
-	rawConn := network.SetupRawConn(server, client)
-	defer rawConn.Close()
+	// Create UDP connection bound to the same port as WireGuard
+	conn, err := net.DialUDP("udp", localAddr, remoteAddr)
+	if err != nil {
+		return fmt.Errorf("failed to create UDP connection: %v", err)
+	}
+	defer conn.Close()
 
 	// Create JSON payload
 	payload := struct {
@@ -807,11 +809,19 @@ func (s *WireGuardService) sendUDPHolePunch(serverAddr string) error {
 		return fmt.Errorf("failed to encrypt payload: %v", err)
 	}
 
-	// Send the encrypted packet using the raw connection
-	err = network.SendDataPacket(encryptedPayload, rawConn, server, client)
+	// Convert encrypted payload to JSON
+	jsonData, err := json.Marshal(encryptedPayload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal encrypted payload: %v", err)
+	}
+
+	// Send the encrypted packet using the UDP connection
+	_, err = conn.Write(jsonData)
 	if err != nil {
 		return fmt.Errorf("failed to send UDP packet: %v", err)
 	}
+
+	logger.Debug("Sent UDP hole punch to %s from port %d", remoteAddr.String(), s.Port)
 
 	return nil
 }
