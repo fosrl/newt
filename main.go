@@ -93,6 +93,7 @@ var (
 	pingStopChan                       chan struct{}
 	stopFunc                           func()
 	healthFile                         string
+	useNativeInterface                 bool
 )
 
 func main() {
@@ -137,12 +138,13 @@ func main() {
 		flag.StringVar(&updownScript, "updown", "", "Path to updown script to be called when targets are added or removed")
 	}
 	if interfaceName == "" {
-		flag.StringVar(&interfaceName, "interface", "wg1", "Name of the WireGuard interface")
+		flag.StringVar(&interfaceName, "interface", "newt", "Name of the WireGuard interface")
 	}
 	if generateAndSaveKeyTo == "" {
 		flag.StringVar(&generateAndSaveKeyTo, "generateAndSaveKeyTo", "/tmp/newtkey", "Path to save generated private key")
 	}
 	flag.BoolVar(&keepInterface, "keep-interface", false, "Keep the WireGuard interface")
+	flag.BoolVar(&useNativeInterface, "useNativeInterface", false, "Use native WireGuard interface (requires WireGuard kernel module) and linux")
 	flag.BoolVar(&acceptClients, "accept-clients", false, "Accept clients on the WireGuard interface")
 	if tlsPrivateKey == "" {
 		flag.StringVar(&tlsPrivateKey, "tls-client-cert", "", "Path to client certificate used for mTLS")
