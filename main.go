@@ -144,7 +144,7 @@ func main() {
 		flag.StringVar(&generateAndSaveKeyTo, "generateAndSaveKeyTo", "/tmp/newtkey", "Path to save generated private key")
 	}
 	flag.BoolVar(&keepInterface, "keep-interface", false, "Keep the WireGuard interface")
-	flag.BoolVar(&useNativeInterface, "useNativeInterface", false, "Use native WireGuard interface (requires WireGuard kernel module) and linux")
+	flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface (requires WireGuard kernel module) and linux")
 	flag.BoolVar(&acceptClients, "accept-clients", false, "Accept clients on the WireGuard interface")
 	if tlsPrivateKey == "" {
 		flag.StringVar(&tlsPrivateKey, "tls-client-cert", "", "Path to client certificate used for mTLS")
