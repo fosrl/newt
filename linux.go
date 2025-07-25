@@ -56,6 +56,12 @@ func setupClients(client *websocket.Client) {
 	})
 }
 
+func setDownstreamTNetstack(tnet *netstack.Net) {
+	if wgService != nil {
+		wgService.SetOthertnet(tnet)
+	}
+}
+
 func closeClients() {
 	if wgService != nil {
 		wgService.Close(!keepInterface)

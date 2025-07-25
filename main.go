@@ -343,6 +343,8 @@ func main() {
 			logger.Error("Failed to create TUN device: %v", err)
 		}
 
+		setDownstreamTNetstack(tnet)
+
 		// Create WireGuard device
 		dev = device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(
 			mapToWireGuardLogLevel(loggerLevel),
