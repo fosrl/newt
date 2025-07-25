@@ -9,11 +9,13 @@ import (
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/websocket"
-	"github.com/fosrl/newt/wg"
+
+	// "github.com/fosrl/newt/wg"
+	"github.com/fosrl/newt/wgnetstack"
 	"github.com/fosrl/newt/wgtester"
 )
 
-var wgService *wg.WireGuardService
+var wgService *wgnetstack.WireGuardService
 var wgTesterServer *wgtester.Server
 
 func setupClients(client *websocket.Client) {
@@ -27,7 +29,7 @@ func setupClients(client *websocket.Client) {
 	host = strings.TrimSuffix(host, "/")
 
 	// Create WireGuard service
-	wgService, err = wg.NewWireGuardService(interfaceName, mtuInt, generateAndSaveKeyTo, host, id, client)
+	wgService, err = wgnetstack.NewWireGuardService(interfaceName, mtuInt, generateAndSaveKeyTo, host, id, client, "8.8.8.8")
 	if err != nil {
 		logger.Fatal("Failed to create WireGuard service: %v", err)
 	}
