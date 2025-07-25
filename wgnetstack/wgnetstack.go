@@ -88,7 +88,7 @@ type WireGuardService struct {
 	othertnet       *netstack.Net
 	// Proxy manager for tunnel
 	proxyManager *proxy.ProxyManager
-	// ...existing code...
+	TunnelIP     string
 }
 
 // GetProxyManager returns the proxy manager for this WireGuardService
@@ -242,8 +242,92 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 	wsClient.RegisterHandler("newt/wg/peer/add", service.handleAddPeer)
 	wsClient.RegisterHandler("newt/wg/peer/remove", service.handleRemovePeer)
 	wsClient.RegisterHandler("newt/wg/peer/update", service.handleUpdatePeer)
+	wsClient.RegisterHandler("newt/wg/tcp/add", service.addTcpTarget)
+	wsClient.RegisterHandler("newt/wg/udp/add", service.addUdpTarget)
+	wsClient.RegisterHandler("newt/wg/udp/remove", service.removeUdpTarget)
+	wsClient.RegisterHandler("newt/wg/tcp/remove", service.removeTcpTarget)
 
 	return service, nil
+}
+
+func (s *WireGuardService) addTcpTarget(msg websocket.WSMessage) {
+	logger.Debug("Received: %+v", msg)
+
+	// if there is no wgData or pm, we can't add targets
+	if s.TunnelIP == "" || s.proxyManager == nil {
+		logger.Info("No tunnel IP or proxy manager available")
+		return
+	}
+
+	targetData, err := parseTargetData(msg.Data)
+	if err != nil {
+		logger.Info("Error parsing target data: %v", err)
+		return
+	}
+
+	if len(targetData.Targets) > 0 {
+		updateTargets(s.proxyManager, "add", s.TunnelIP, "tcp", targetData)
+	}
+}
+
+func (s *WireGuardService) addUdpTarget(msg websocket.WSMessage) {
+	logger.Info("Received: %+v", msg)
+
+	// if there is no wgData or pm, we can't add targets
+	if s.TunnelIP == "" || s.proxyManager == nil {
+		logger.Info("No tunnel IP or proxy manager available")
+		return
+	}
+
+	targetData, err := parseTargetData(msg.Data)
+	if err != nil {
+		logger.Info("Error parsing target data: %v", err)
+		return
+	}
+
+	if len(targetData.Targets) > 0 {
+		updateTargets(s.proxyManager, "add", s.TunnelIP, "udp", targetData)
+	}
+}
+
+func (s *WireGuardService) removeUdpTarget(msg websocket.WSMessage) {
+	logger.Info("Received: %+v", msg)
+
+	// if there is no wgData or pm, we can't add targets
+	if s.TunnelIP == "" || s.proxyManager == nil {
+		logger.Info("No tunnel IP or proxy manager available")
+		return
+	}
+
+	targetData, err := parseTargetData(msg.Data)
+	if err != nil {
+		logger.Info("Error parsing target data: %v", err)
+		return
+	}
+
+	if len(targetData.Targets) > 0 {
+		updateTargets(s.proxyManager, "remove", s.TunnelIP, "udp", targetData)
+	}
+}
+
+func (s *WireGuardService) removeTcpTarget(msg websocket.WSMessage) {
+	logger.Info("Received: %+v", msg)
+
+	// if there is no wgData or pm, we can't add targets
+	if s.TunnelIP == "" || s.proxyManager == nil {
+		logger.Info("No tunnel IP or proxy manager available")
+		return
+	}
+
+	targetData, err := parseTargetData(msg.Data)
+	if err != nil {
+		logger.Info("Error parsing target data: %v", err)
+		return
+	}
+
+	if len(targetData.Targets) > 0 {
+		updateTargets(s.proxyManager, "remove", s.TunnelIP, "tcp", targetData)
+	}
 }
 
 func (s *WireGuardService) SetOthertnet(tnet *netstack.Net) {
@@ -405,6 +489,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 	}
 
 	s.proxyManager.SetTNet(s.tnet)
+	s.TunnelIP = tunnelIP.String()
 
 	// Create WireGuard device
 	s.device = device.NewDevice(s.tun, NewFixedPortBind(s.Port), device.NewLogger(
@@ -1034,4 +1119,19 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 	}
 
 	return nil
+}
+
+func parseTargetData(data interface{}) (TargetData, error) {
+	var targetData TargetData
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		logger.Info("Error marshaling data: %v", err)
+		return targetData, err
+	}
+
+	if err := json.Unmarshal(jsonData, &targetData); err != nil {
+		logger.Info("Error unmarshaling target data: %v", err)
+		return targetData, err
+	}
+	return targetData, nil
 }
