@@ -11,7 +11,6 @@ import (
 	"github.com/fosrl/newt/websocket"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 
-	// "github.com/fosrl/newt/wg"
 	"github.com/fosrl/newt/wgnetstack"
 	"github.com/fosrl/newt/wgtester"
 )
@@ -29,27 +28,31 @@ func setupClients(client *websocket.Client) {
 
 	host = strings.TrimSuffix(host, "/")
 
-	// Create WireGuard service
-	wgService, err = wgnetstack.NewWireGuardService(interfaceName, mtuInt, generateAndSaveKeyTo, host, id, client, "8.8.8.8")
-	if err != nil {
-		logger.Fatal("Failed to create WireGuard service: %v", err)
-	}
+	if useNativeInterface {
 
-	// // Set up callback to restart wgtester with netstack when WireGuard is ready
-	wgService.SetOnNetstackReady(func(tnet *netstack.Net) {
-
-		wgTesterServer = wgtester.NewServerWithNetstack("0.0.0.0", wgService.Port, id, tnet) // TODO: maybe make this the same ip of the wg server?
-		err := wgTesterServer.Start()
+	} else {
+		// Create WireGuard service
+		wgService, err = wgnetstack.NewWireGuardService(interfaceName, mtuInt, generateAndSaveKeyTo, host, id, client, "8.8.8.8")
 		if err != nil {
-			logger.Error("Failed to start WireGuard tester server: %v", err)
+			logger.Fatal("Failed to create WireGuard service: %v", err)
 		}
-		// 	logger.Info("WireGuard netstack is ready, restarting wgtester with netstack")
-		// 	if err := wgTesterServer.RestartWithNetstack(tnet); err != nil {
-		// 		logger.Error("Failed to restart wgtester with netstack: %v", err)
-		// 	} else {
-		// 		logger.Info("WGTester successfully restarted with netstack")
-		// 	}
-	})
+
+		// // Set up callback to restart wgtester with netstack when WireGuard is ready
+		wgService.SetOnNetstackReady(func(tnet *netstack.Net) {
+
+			wgTesterServer = wgtester.NewServerWithNetstack("0.0.0.0", wgService.Port, id, tnet) // TODO: maybe make this the same ip of the wg server?
+			err := wgTesterServer.Start()
+			if err != nil {
+				logger.Error("Failed to start WireGuard tester server: %v", err)
+			}
+			// 	logger.Info("WireGuard netstack is ready, restarting wgtester with netstack")
+			// 	if err := wgTesterServer.RestartWithNetstack(tnet); err != nil {
+			// 		logger.Error("Failed to restart wgtester with netstack: %v", err)
+			// 	} else {
+			// 		logger.Info("WGTester successfully restarted with netstack")
+			// 	}
+		})
+	}
 
 	client.OnTokenUpdate(func(token string) {
 		wgService.SetToken(token)
