@@ -119,7 +119,13 @@ func (s *Server) handleConnections() {
 					// Just a timeout, keep going
 					continue
 				}
-				logger.Error(s.outputPrefix+"Error reading from UDP: %v", err)
+				// Check if we're shutting down and the connection was closed
+				select {
+				case <-s.shutdownCh:
+					return // Don't log error if we're shutting down
+				default:
+					logger.Error(s.outputPrefix+"Error reading from UDP: %v", err)
+				}
 				continue
 			}
 

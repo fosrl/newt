@@ -798,9 +798,12 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
-	dev.Close()
-
+	// Close clients first (including WGTester)
 	closeClients()
+
+	if dev != nil {
+		dev.Close()
+	}
 
 	if pm != nil {
 		pm.Stop()

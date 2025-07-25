@@ -55,6 +55,7 @@ type WireGuardService struct {
 	wgClient          *wgctrl.Client
 	config            WgConfig
 	key               wgtypes.Key
+	keyFilePath       string
 	newtId            string
 	lastReadings      map[string]PeerReading
 	mu                sync.Mutex
@@ -179,6 +180,7 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 		client:        wsClient,
 		wgClient:      wgClient,
 		key:           key,
+		keyFilePath:   generateAndSaveKeyTo,
 		newtId:        newtId,
 		host:          host,
 		lastReadings:  make(map[string]PeerReading),
@@ -229,9 +231,11 @@ func (s *WireGuardService) Close(rm bool) {
 		}
 
 		// Remove the private key file
-		if err := os.Remove(s.key.String()); err != nil {
-			logger.Error("Failed to remove private key file: %v", err)
-		}
+		// if s.keyFilePath != "" {
+		// 	if err := os.Remove(s.keyFilePath); err != nil {
+		// 		logger.Error("Failed to remove private key file: %v", err)
+		// 	}
+		// }
 	}
 }
 
@@ -251,7 +255,7 @@ func (s *WireGuardService) SetToken(token string) {
 
 func (s *WireGuardService) LoadRemoteConfig() error {
 	s.stopGetConfig = s.client.SendMessageInterval("newt/wg/get-config", map[string]interface{}{
-		"publicKey": fmt.Sprintf("%s", s.key.PublicKey().String()),
+		"publicKey": s.key.PublicKey().String(),
 		"port":      s.Port,
 	}, 2*time.Second)
 
@@ -638,7 +642,7 @@ func (s *WireGuardService) handleUpdatePeer(msg websocket.WSMessage) {
 	}
 
 	// Only update AllowedIPs if provided in the request
-	if request.AllowedIPs != nil && len(request.AllowedIPs) > 0 {
+	if len(request.AllowedIPs) > 0 {
 		var allowedIPs []net.IPNet
 		for _, ipStr := range request.AllowedIPs {
 			_, ipNet, err := net.ParseCIDR(ipStr)
