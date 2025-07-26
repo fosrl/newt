@@ -33,7 +33,7 @@ jobs:
             - name: Install Go
               uses: actions/setup-go@v4
               with:
-                  go-version: 1.23.1
+                  go-version: 1.24
 
             - name: Update version in main.go
               run: |
