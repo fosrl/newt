@@ -7,26 +7,26 @@ import (
 	"github.com/fosrl/newt/websocket"
 )
 
-func setupClients(client *websocket.Client) {
+func setupClientsNative(client *websocket.Client, host string) {
 	return // This function is not implemented for non-Linux systems.
 }
 
-func closeClients() {
-	// This function is not implemented for non-Linux systems.
+func closeWgServiceNative() {
+	// No-op for non-Linux systems
 	return
 }
 
-func clientsHandleNewtConnection(publicKey string) {
-	// This function is not implemented for non-Linux systems.
+func clientsOnConnectNative() {
+	// No-op for non-Linux systems
 	return
 }
 
-func clientsOnConnect() {
-	// This function is not implemented for non-Linux systems.
+func clientsHandleNewtConnectionNative(publicKey, endpoint string) {
+	// No-op for non-Linux systems
 	return
 }
 
-func clientsAddProxyTarget(pm *proxy.ProxyManager, tunnelIp string) {
-	// This function is not implemented for non-Linux systems.
+func clientsAddProxyTargetNative(pm *proxy.ProxyManager, tunnelIp string) {
+	// No-op for non-Linux systems
 	return
 }

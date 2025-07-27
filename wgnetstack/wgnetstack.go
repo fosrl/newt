@@ -166,21 +166,7 @@ func FindAvailableUDPPort(minPort, maxPort uint16) (uint16, error) {
 			continue // Port is in use or there was an error, try next port
 		}
 
-		// Check if port+1 is also available
-		addr2 := &net.UDPAddr{
-			IP:   net.ParseIP("127.0.0.1"),
-			Port: int(port + 1),
-		}
-		conn2, err2 := net.ListenUDP("udp", addr2)
-		if err2 != nil {
-			// The next port is not available, so close the first connection and try again
-			conn1.Close()
-			continue
-		}
-
-		// Both ports are available, close connections and return the first port
 		conn1.Close()
-		conn2.Close()
 		return port, nil
 	}
 
@@ -189,27 +175,29 @@ func FindAvailableUDPPort(minPort, maxPort uint16) (uint16, error) {
 
 func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo string, host string, newtId string, wsClient *websocket.Client, dns string) (*WireGuardService, error) {
 	var key wgtypes.Key
+	var err error
+
+	key, err = wgtypes.GeneratePrivateKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate private key: %v", err)
+	}
 
 	// Load or generate private key
-	if _, err := os.Stat(generateAndSaveKeyTo); os.IsNotExist(err) {
-		// Generate a new private key
-		key, err = wgtypes.GeneratePrivateKey()
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate private key: %v", err)
-		}
-		// Save the key to the file
-		err = os.WriteFile(generateAndSaveKeyTo, []byte(key.String()), 0644)
-		if err != nil {
-			return nil, fmt.Errorf("failed to save private key: %v", err)
-		}
-	} else {
-		keyData, err := os.ReadFile(generateAndSaveKeyTo)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read private key: %v", err)
-		}
-		key, err = wgtypes.ParseKey(strings.TrimSpace(string(keyData)))
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse private key: %v", err)
+	if generateAndSaveKeyTo != "" {
+		if _, err := os.Stat(generateAndSaveKeyTo); os.IsNotExist(err) {
+			keyData, err := os.ReadFile(generateAndSaveKeyTo)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read private key: %v", err)
+			}
+			key, err = wgtypes.ParseKey(strings.TrimSpace(string(keyData)))
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse private key: %v", err)
+			}
+		} else {
+			err = os.WriteFile(generateAndSaveKeyTo, []byte(key.String()), 0644)
+			if err != nil {
+				return nil, fmt.Errorf("failed to save private key: %v", err)
+			}
 		}
 	}
 
@@ -632,6 +620,11 @@ func (s *WireGuardService) handleAddPeer(msg websocket.WSMessage) {
 		return
 	}
 
+	if s.device == nil {
+		logger.Info("WireGuard device is not initialized")
+		return
+	}
+
 	err = s.addPeerToDevice(peer)
 	if err != nil {
 		logger.Info("Error adding peer: %v", err)
@@ -655,6 +648,11 @@ func (s *WireGuardService) handleRemovePeer(msg websocket.WSMessage) {
 	var request RemoveRequest
 	if err := json.Unmarshal(jsonData, &request); err != nil {
 		logger.Info("Error unmarshaling data: %v", err)
+		return
+	}
+
+	if s.device == nil {
+		logger.Info("WireGuard device is not initialized")
 		return
 	}
 
@@ -708,6 +706,11 @@ func (s *WireGuardService) handleUpdatePeer(msg websocket.WSMessage) {
 	pubKey, err := wgtypes.ParseKey(request.PublicKey)
 	if err != nil {
 		logger.Info("Failed to parse public key: %v", err)
+		return
+	}
+
+	if s.device == nil {
+		logger.Info("WireGuard device is not initialized")
 		return
 	}
 
@@ -935,12 +938,9 @@ func (s *WireGuardService) sendUDPHolePunch(serverAddr string) error {
 		return fmt.Errorf("failed to resolve server hostname")
 	}
 
-	// Get client IP based on route to server for local binding
-	clientIP := network.GetClientIP(serverIPAddr.IP)
-
 	// Create local UDP address using the same port as WireGuard
 	localAddr := &net.UDPAddr{
-		IP:   clientIP,
+		IP:   net.IPv4zero,
 		Port: int(s.Port),
 	}
 

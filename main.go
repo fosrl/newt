@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -141,7 +140,7 @@ func main() {
 		flag.StringVar(&interfaceName, "interface", "newt", "Name of the WireGuard interface")
 	}
 	if generateAndSaveKeyTo == "" {
-		flag.StringVar(&generateAndSaveKeyTo, "generateAndSaveKeyTo", "/tmp/newtkey", "Path to save generated private key")
+		flag.StringVar(&generateAndSaveKeyTo, "generateAndSaveKeyTo", "", "Path to save generated private key")
 	}
 	flag.BoolVar(&keepInterface, "keep-interface", false, "Keep the WireGuard interface")
 	flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface (requires WireGuard kernel module) and linux")
@@ -269,12 +268,6 @@ func main() {
 	var wgData WgData
 
 	if acceptClients {
-		// make sure we are running on linux
-		if runtime.GOOS != "linux" {
-			logger.Fatal("Tunnel management is only supported on Linux right now!")
-			os.Exit(1)
-		}
-
 		setupClients(client)
 	}
 

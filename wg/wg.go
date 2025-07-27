@@ -152,25 +152,27 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 
 	var key wgtypes.Key
 	// if generateAndSaveKeyTo is provided, generate a private key and save it to the file. if the file already exists, load the key from the file
-	if _, err := os.Stat(generateAndSaveKeyTo); os.IsNotExist(err) {
-		// generate a new private key
-		key, err = wgtypes.GeneratePrivateKey()
-		if err != nil {
-			logger.Fatal("Failed to generate private key: %v", err)
-		}
-		// save the key to the file
-		err = os.WriteFile(generateAndSaveKeyTo, []byte(key.String()), 0644)
-		if err != nil {
-			logger.Fatal("Failed to save private key: %v", err)
-		}
-	} else {
-		keyData, err := os.ReadFile(generateAndSaveKeyTo)
-		if err != nil {
-			logger.Fatal("Failed to read private key: %v", err)
-		}
-		key, err = wgtypes.ParseKey(string(keyData))
-		if err != nil {
-			logger.Fatal("Failed to parse private key: %v", err)
+	key, err = wgtypes.GeneratePrivateKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate private key: %v", err)
+	}
+
+	// Load or generate private key
+	if generateAndSaveKeyTo != "" {
+		if _, err := os.Stat(generateAndSaveKeyTo); os.IsNotExist(err) {
+			keyData, err := os.ReadFile(generateAndSaveKeyTo)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read private key: %v", err)
+			}
+			key, err = wgtypes.ParseKey(strings.TrimSpace(string(keyData)))
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse private key: %v", err)
+			}
+		} else {
+			err = os.WriteFile(generateAndSaveKeyTo, []byte(key.String()), 0644)
+			if err != nil {
+				return nil, fmt.Errorf("failed to save private key: %v", err)
+			}
 		}
 	}
 
