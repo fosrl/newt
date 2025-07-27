@@ -66,6 +66,7 @@ type WireGuardService struct {
 	holePunchEndpoint string
 	token             string
 	stopGetConfig     func()
+	interfaceCreated  bool
 }
 
 // Add this type definition
@@ -242,10 +243,17 @@ func (s *WireGuardService) Close(rm bool) {
 }
 
 func (s *WireGuardService) StartHolepunch(serverPubKey string, endpoint string) {
+	// if the device is already created dont start a new holepunch
+	if s.interfaceCreated {
+		return
+	}
+
 	s.serverPubKey = serverPubKey
 	s.holePunchEndpoint = endpoint
 
 	logger.Debug("Starting UDP hole punch to %s", s.holePunchEndpoint)
+
+	s.stopHolepunch = make(chan struct{})
 
 	// start the UDP holepunch
 	go s.keepSendingUDPHolePunch(s.holePunchEndpoint)
@@ -310,6 +318,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 			if err != nil {
 				logger.Fatal("Failed to create WireGuard interface: %v", err)
 			}
+			s.interfaceCreated = true
 			logger.Info("Created WireGuard interface %s\n", s.interfaceName)
 		} else {
 			logger.Fatal("Error checking for WireGuard interface: %v", err)
@@ -327,7 +336,14 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		s.Port = uint16(device.ListenPort)
 		logger.Info("WireGuard interface %s already exists with port %d\n", s.interfaceName, s.Port)
 
+		s.interfaceCreated = true
 		return nil
+	}
+
+	// stop the holepunch its a channel
+	if s.stopHolepunch != nil {
+		close(s.stopHolepunch)
+		s.stopHolepunch = nil
 	}
 
 	logger.Info("Assigning IP address %s to interface %s\n", wgconfig.IpAddress, s.interfaceName)

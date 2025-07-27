@@ -347,6 +347,11 @@ func (s *WireGuardService) Close(rm bool) {
 }
 
 func (s *WireGuardService) StartHolepunch(serverPubKey string, endpoint string) {
+	// if the device is already created dont start a new holepunch
+	if s.device != nil {
+		return
+	}
+
 	s.serverPubKey = serverPubKey
 	s.holePunchEndpoint = endpoint
 

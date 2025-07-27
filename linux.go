@@ -66,9 +66,6 @@ func clientsHandleNewtConnectionNative(publicKey, endpoint string) {
 }
 
 func clientsAddProxyTargetNative(pm *proxy.ProxyManager, tunnelIp string) {
-	if !ready {
-		return
-	}
 	// add a udp proxy for localost and the wgService port
 	// TODO: make sure this port is not used in a target
 	if wgServiceNative != nil {

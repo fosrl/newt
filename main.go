@@ -240,6 +240,8 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to create client: %v", err)
 	}
+	endpoint = client.GetConfig().Endpoint // Update endpoint from config
+	id = client.GetConfig().ID             // Update ID from config
 
 	// output env var values if set
 	logger.Debug("Endpoint: %v", endpoint)
@@ -415,17 +417,17 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		if len(wgData.Targets.TCP) > 0 {
 			updateTargets(pm, "add", wgData.TunnelIP, "tcp", TargetData{Targets: wgData.Targets.TCP})
 			// Also update wgnetstack proxy manager
-			if wgService != nil {
-				updateTargets(wgService.GetProxyManager(), "add", wgData.TunnelIP, "tcp", TargetData{Targets: wgData.Targets.TCP})
-			}
+			// if wgService != nil {
+			// 	updateTargets(wgService.GetProxyManager(), "add", wgData.TunnelIP, "tcp", TargetData{Targets: wgData.Targets.TCP})
+			// }
 		}
 
 		if len(wgData.Targets.UDP) > 0 {
 			updateTargets(pm, "add", wgData.TunnelIP, "udp", TargetData{Targets: wgData.Targets.UDP})
 			// Also update wgnetstack proxy manager
-			if wgService != nil {
-				updateTargets(wgService.GetProxyManager(), "add", wgData.TunnelIP, "udp", TargetData{Targets: wgData.Targets.UDP})
-			}
+			// if wgService != nil {
+			// 	updateTargets(wgService.GetProxyManager(), "add", wgData.TunnelIP, "udp", TargetData{Targets: wgData.Targets.UDP})
+			// }
 		}
 
 		clientsAddProxyTarget(pm, wgData.TunnelIP)
