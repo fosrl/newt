@@ -121,7 +121,8 @@ func main() {
 	dockerEnforceNetworkValidation = os.Getenv("DOCKER_ENFORCE_NETWORK_VALIDATION")
 	healthFile = os.Getenv("HEALTH_FILE")
 	useNativeInterface = os.Getenv("USE_NATIVE_INTERFACE") == "true"
-	authorizedKeysFile = os.Getenv("AUTHORIZED_KEYS_FILE")
+	// authorizedKeysFile = os.Getenv("AUTHORIZED_KEYS_FILE")
+	authorizedKeysFile = ""
 
 	if endpoint == "" {
 		flag.StringVar(&endpoint, "endpoint", "", "Endpoint of your pangolin server")
@@ -168,9 +169,9 @@ func main() {
 	if pingTimeoutStr == "" {
 		flag.StringVar(&pingTimeoutStr, "ping-timeout", "5s", "	Timeout for each ping (default 5s)")
 	}
-	if authorizedKeysFile == "" {
-		flag.StringVar(&authorizedKeysFile, "authorized-keys-file", "~/.ssh/authorized_keys", "Path to authorized keys file (if unset, no keys will be authorized)")
-	}
+	// if authorizedKeysFile == "" {
+	// 	flag.StringVar(&authorizedKeysFile, "authorized-keys-file", "~/.ssh/authorized_keys", "Path to authorized keys file (if unset, no keys will be authorized)")
+	// }
 
 	if pingIntervalStr != "" {
 		pingInterval, err = time.ParseDuration(pingIntervalStr)
@@ -801,6 +802,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 	})
 
+	// EXPERIMENTAL: WHAT SHOULD WE DO ABOUT SECURITY?
 	client.RegisterHandler("newt/send/ssh/publicKey", func(msg websocket.WSMessage) {
 		logger.Debug("Received SSH public key request")
 
