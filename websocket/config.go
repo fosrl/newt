@@ -9,22 +9,27 @@ import (
 )
 
 func getConfigPath(clientType string) string {
-	var configDir string
-	switch runtime.GOOS {
-	case "darwin":
-		configDir = filepath.Join(os.Getenv("HOME"), "Library", "Application Support", clientType+"-client")
-	case "windows":
-		logDir := filepath.Join(os.Getenv("PROGRAMDATA"), "olm")
-		configDir = filepath.Join(logDir, clientType+"-client")
-	default: // linux and others
-		configDir = filepath.Join(os.Getenv("HOME"), ".config", clientType+"-client")
+	configFile := os.Getenv("CONFIG_FILE")
+	if configFile == "" {
+		var configDir string
+		switch runtime.GOOS {
+		case "darwin":
+			configDir = filepath.Join(os.Getenv("HOME"), "Library", "Application Support", clientType+"-client")
+		case "windows":
+			logDir := filepath.Join(os.Getenv("PROGRAMDATA"), "olm")
+			configDir = filepath.Join(logDir, clientType+"-client")
+		default: // linux and others
+			configDir = filepath.Join(os.Getenv("HOME"), ".config", clientType+"-client")
+		}
+
+		if err := os.MkdirAll(configDir, 0755); err != nil {
+			log.Printf("Failed to create config directory: %v", err)
+		}
+
+		return filepath.Join(configDir, "config.json")
 	}
 
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		log.Printf("Failed to create config directory: %v", err)
-	}
-
-	return filepath.Join(configDir, "config.json")
+	return configFile
 }
 
 func (c *Client) loadConfig() error {
