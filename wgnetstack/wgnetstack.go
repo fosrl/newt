@@ -438,11 +438,11 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 
 	// add the targets if there are any
 	if len(config.Targets.TCP) > 0 {
-		updateTargets(s.proxyManager, "add", config.IpAddress, "tcp", TargetData{Targets: config.Targets.TCP})
+		updateTargets(s.proxyManager, "add", s.TunnelIP, "tcp", TargetData{Targets: config.Targets.TCP})
 	}
 
 	if len(config.Targets.UDP) > 0 {
-		updateTargets(s.proxyManager, "add", config.IpAddress, "udp", TargetData{Targets: config.Targets.UDP})
+		updateTargets(s.proxyManager, "add", s.TunnelIP, "udp", TargetData{Targets: config.Targets.UDP})
 	}
 
 	// Create ProxyManager for this tunnel
