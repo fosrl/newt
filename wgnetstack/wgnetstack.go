@@ -490,7 +490,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		"wireguard: ",
 	))
 
-	logger.Info("Private key is %s", fixKey(s.key.String()))
+	// logger.Info("Private key is %s", fixKey(s.key.String()))
 
 	// Configure WireGuard with private key
 	config := fmt.Sprintf("private_key=%s", fixKey(s.key.String()))
