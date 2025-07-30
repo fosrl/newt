@@ -53,6 +53,32 @@ type Network struct {
 	DNSNames            []string `json:"dnsNames,omitempty"`
 }
 
+// Strcuture parts of docker api endpoint
+type dockerHost struct {
+	protocol string // e.g. unix, http, tcp, ssh
+	address  string // e.g. "/var/run/docker.sock" or "host:port"
+}
+
+// Parse the docker api endpoint into its parts
+func parseDockerHost(raw string) (dockerHost, error) {
+	switch {
+	case strings.HasPrefix(raw, "unix://"):
+		return dockerHost{"unix", strings.TrimPrefix(raw, "unix://")}, nil
+	case strings.HasPrefix(raw, "ssh://"):
+		// SSH is treated as TCP-like transport by the docker client
+		return dockerHost{"ssh", strings.TrimPrefix(raw, "ssh://")}, nil
+	case strings.HasPrefix(raw, "tcp://"), strings.HasPrefix(raw, "http://"), strings.HasPrefix(raw, "https://"):
+		s := raw
+		s = strings.TrimPrefix(s, "tcp://")
+		s = strings.TrimPrefix(s, "http://")
+		s = strings.TrimPrefix(s, "https://")
+		return dockerHost{"tcp", s}, nil
+	default:
+		// default fallback to unix
+		return dockerHost{"unix", raw}, nil
+	}
+}
+
 // CheckSocket checks if Docker socket is available
 func CheckSocket(socketPath string) bool {
 	// Use the provided socket path or default to standard location
