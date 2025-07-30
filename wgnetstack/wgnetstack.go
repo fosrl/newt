@@ -1084,7 +1084,7 @@ func (s *WireGuardService) keepSendingUDPHolePunch(host string) {
 }
 
 func (s *WireGuardService) updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto string, targetData TargetData) error {
-	var replace = true
+	var replace = false
 	for _, t := range targetData.Targets {
 		// Split the first number off of the target with : separator and use as the port
 		parts := strings.Split(t, ":")
@@ -1113,9 +1113,9 @@ func (s *WireGuardService) updateTargets(pm *proxy.ProxyManager, action string, 
 				// Ignore "target not found" errors as this is expected for new targets
 				if !strings.Contains(err.Error(), "target not found") {
 					logger.Error("Failed to remove existing target: %v", err)
-				} else {
-					replace = false // If we got here, it means the target didn't exist, so we can add it without replacing
 				}
+			} else {
+				replace = true // We successfully removed an existing target
 			}
 
 			// Add the new target
@@ -1134,7 +1134,7 @@ func (s *WireGuardService) updateTargets(pm *proxy.ProxyManager, action string, 
 
 	if replace {
 		// If we replaced any targets, we need to hot swap the netstack
-		if err := s.ReplaceNetstack(s.dns); err != nil {
+		if err := s.ReplaceNetstack(); err != nil {
 			logger.Error("Failed to replace netstack after updating targets: %v", err)
 			return err
 		}
@@ -1162,7 +1162,7 @@ func parseTargetData(data interface{}) (TargetData, error) {
 }
 
 // Add this method to WireGuardService
-func (s *WireGuardService) ReplaceNetstack(newDNS []netip.Addr) error {
+func (s *WireGuardService) ReplaceNetstack() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1183,7 +1183,7 @@ func (s *WireGuardService) ReplaceNetstack(newDNS []netip.Addr) error {
 	// Create new TUN device and netstack with new DNS
 	newTun, newTnet, err := netstack.CreateNetTUN(
 		[]netip.Addr{tunnelIP},
-		newDNS,
+		s.dns,
 		s.mtu)
 	if err != nil {
 		// Restart proxy manager with old tnet on failure
@@ -1213,7 +1213,6 @@ func (s *WireGuardService) ReplaceNetstack(newDNS []netip.Addr) error {
 	// Update references
 	s.tun = newTun
 	s.tnet = newTnet
-	s.dns = newDNS
 
 	// Create new WireGuard device with same port
 	s.device = device.NewDevice(s.tun, NewFixedPortBind(s.Port), device.NewLogger(
@@ -1244,7 +1243,6 @@ func (s *WireGuardService) ReplaceNetstack(newDNS []netip.Addr) error {
 		go s.onNetstackReady(s.tnet)
 	}
 
-	logger.Info("Netstack replaced successfully with new DNS servers")
 	return nil
 }
 
