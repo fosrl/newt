@@ -165,7 +165,7 @@ func ListContainers(socketPath string, enforceNetworkValidation bool) ([]Contain
 
 	// Create client with custom socket path
 	cli, err := client.NewClientWithOpts(
-		client.WithHost("unix://"+socketPath),
+		client.WithHost(socketPath),
 		client.WithAPIVersionNegotiation(),
 	)
 	if err != nil {
@@ -214,7 +214,6 @@ func ListContainers(socketPath string, enforceNetworkValidation bool) ([]Contain
 		if err == nil && containerInfo.Config != nil {
 			hostname = containerInfo.Config.Hostname
 		}
-
 
 		// Skip host container if set
 		if hostContainerId != "" && c.ID == hostContainerId {
