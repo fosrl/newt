@@ -191,13 +191,13 @@ func (pm *ProxyManager) Stop() error {
 		pm.udpConns = append(pm.udpConns[:i], pm.udpConns[i+1:]...)
 	}
 
-	// Clear the target maps
-	for k := range pm.tcpTargets {
-		delete(pm.tcpTargets, k)
-	}
-	for k := range pm.udpTargets {
-		delete(pm.udpTargets, k)
-	}
+	// // Clear the target maps
+	// for k := range pm.tcpTargets {
+	// 	delete(pm.tcpTargets, k)
+	// }
+	// for k := range pm.udpTargets {
+	// 	delete(pm.udpTargets, k)
+	// }
 
 	// Give active connections a chance to close gracefully
 	time.Sleep(100 * time.Millisecond)
@@ -365,6 +365,26 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			clientsMutex.Lock()
 			delete(clientConns, clientKey)
 			clientsMutex.Unlock()
+		}
+	}
+}
+
+// write a function to print out the current targets in the ProxyManager
+func (pm *ProxyManager) PrintTargets() {
+	pm.mutex.RLock()
+	defer pm.mutex.RUnlock()
+
+	logger.Info("Current TCP Targets:")
+	for listenIP, targets := range pm.tcpTargets {
+		for port, targetAddr := range targets {
+			logger.Info("TCP %s:%d -> %s", listenIP, port, targetAddr)
+		}
+	}
+
+	logger.Info("Current UDP Targets:")
+	for listenIP, targets := range pm.udpTargets {
+		for port, targetAddr := range targets {
+			logger.Info("UDP %s:%d -> %s", listenIP, port, targetAddr)
 		}
 	}
 }

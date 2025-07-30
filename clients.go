@@ -54,6 +54,13 @@ func setupClientsNetstack(client *websocket.Client, host string) {
 		}
 	})
 
+	wgService.SetOnNetstackClose(func() {
+		if wgTesterServer != nil {
+			wgTesterServer.Stop()
+			wgTesterServer = nil
+		}
+	})
+
 	client.OnTokenUpdate(func(token string) {
 		wgService.SetToken(token)
 	})
