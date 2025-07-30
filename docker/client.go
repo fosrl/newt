@@ -83,18 +83,25 @@ func parseDockerHost(raw string) (dockerHost, error) {
 func CheckSocket(socketPath string) bool {
 	// Use the provided socket path or default to standard location
 	if socketPath == "" {
-		socketPath = "/var/run/docker.sock"
+		socketPath = "unix:///var/run/docker.sock"
 	}
-
-	// Try to create a connection to the Docker socket
-	conn, err := net.Dial("unix", socketPath)
+	host, err := parseDockerHost(socketPath)
 	if err != nil {
-		logger.Debug("Docker socket not available at %s: %v", socketPath, err)
+		logger.Debug("Invalid Docker socket path '%s': %v", socketPath, err)
+		return false
+	}
+	protocol := host.protocol
+	addr := host.address
+
+	// ssh might need different verification, but tcp works for basic reachability
+	conn, err := net.DialTimeout(protocol, addr, 2*time.Second)
+	if err != nil {
+		logger.Debug("Docker not reachable via %s at %s: %v", protocol, addr, err)
 		return false
 	}
 	defer conn.Close()
 
-	logger.Debug("Docker socket is available at %s", socketPath)
+	logger.Debug("Docker reachable via %s at %s", protocol, addr)
 	return true
 }
 
