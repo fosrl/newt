@@ -35,11 +35,23 @@ type Client struct {
 	onTokenUpdate     func(token string)
 	writeMux          sync.Mutex
 	clientType        string // Type of client (e.g., "newt", "olm")
+	tlsConfig         TLSConfig
 }
 
 type ClientOption func(*Client)
 
 type MessageHandler func(message WSMessage)
+
+// TLSConfig holds TLS configuration options
+type TLSConfig struct {
+	// New separate certificate support
+	ClientCertFile string
+	ClientKeyFile  string
+	CAFiles        []string
+	
+	// Existing PKCS12 support (deprecated)
+	PKCS12File string
+}
 
 // WithBaseURL sets the base URL for the client
 func WithBaseURL(url string) ClientOption {
@@ -48,9 +60,14 @@ func WithBaseURL(url string) ClientOption {
 	}
 }
 
-func WithTLSConfig(tlsClientCertPath string) ClientOption {
+// WithTLSConfig sets the TLS configuration for the client
+func WithTLSConfig(config TLSConfig) ClientOption {
 	return func(c *Client) {
-		c.config.TlsClientCert = tlsClientCertPath
+		c.tlsConfig = config
+		// For backward compatibility, also set the legacy field
+		if config.PKCS12File != "" {
+			c.config.TlsClientCert = config.PKCS12File
+		}
 	}
 }
 
@@ -198,10 +215,12 @@ func (c *Client) getToken() (string, error) {
 	baseEndpoint := strings.TrimRight(baseURL.String(), "/")
 
 	var tlsConfig *tls.Config = nil
-	if c.config.TlsClientCert != "" {
-		tlsConfig, err = loadClientCertificate(c.config.TlsClientCert)
+	
+	// Use new TLS configuration method
+	if c.tlsConfig.ClientCertFile != "" || c.tlsConfig.ClientKeyFile != "" || len(c.tlsConfig.CAFiles) > 0 || c.tlsConfig.PKCS12File != "" {
+		tlsConfig, err = c.setupTLS()
 		if err != nil {
-			return "", fmt.Errorf("failed to load certificate %s: %w", c.config.TlsClientCert, err)
+			return "", fmt.Errorf("failed to setup TLS configuration: %w", err)
 		}
 	}
 
@@ -331,14 +350,17 @@ func (c *Client) establishConnection() error {
 
 	// Connect to WebSocket
 	dialer := websocket.DefaultDialer
-	if c.config.TlsClientCert != "" {
-		logger.Info("Adding tls to req")
-		tlsConfig, err := loadClientCertificate(c.config.TlsClientCert)
+	
+	// Use new TLS configuration method
+	if c.tlsConfig.ClientCertFile != "" || c.tlsConfig.ClientKeyFile != "" || len(c.tlsConfig.CAFiles) > 0 || c.tlsConfig.PKCS12File != "" {
+		logger.Info("Setting up TLS configuration for WebSocket connection")
+		tlsConfig, err := c.setupTLS()
 		if err != nil {
-			return fmt.Errorf("failed to load certificate %s: %w", c.config.TlsClientCert, err)
+			return fmt.Errorf("failed to setup TLS configuration: %w", err)
 		}
 		dialer.TLSClientConfig = tlsConfig
 	}
+	
 	conn, _, err := dialer.Dial(u.String(), nil)
 	if err != nil {
 		return fmt.Errorf("failed to connect to WebSocket: %w", err)
@@ -363,6 +385,69 @@ func (c *Client) establishConnection() error {
 	}
 
 	return nil
+}
+
+// setupTLS configures TLS based on the TLS configuration
+func (c *Client) setupTLS() (*tls.Config, error) {
+	tlsConfig := &tls.Config{}
+	
+	// Handle new separate certificate configuration
+	if c.tlsConfig.ClientCertFile != "" && c.tlsConfig.ClientKeyFile != "" {
+		logger.Info("Loading separate certificate files for mTLS")
+		logger.Debug("Client cert: %s", c.tlsConfig.ClientCertFile)
+		logger.Debug("Client key: %s", c.tlsConfig.ClientKeyFile)
+		
+		// Load client certificate and key
+		cert, err := tls.LoadX509KeyPair(c.tlsConfig.ClientCertFile, c.tlsConfig.ClientKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load client certificate pair: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+		
+		// Load CA certificates for remote validation if specified
+		if len(c.tlsConfig.CAFiles) > 0 {
+			logger.Debug("Loading CA certificates: %v", c.tlsConfig.CAFiles)
+			caCertPool := x509.NewCertPool()
+			for _, caFile := range c.tlsConfig.CAFiles {
+				caCert, err := os.ReadFile(caFile)
+				if err != nil {
+					return nil, fmt.Errorf("failed to read CA file %s: %w", caFile, err)
+				}
+				
+				// Try to parse as PEM first, then DER
+				if !caCertPool.AppendCertsFromPEM(caCert) {
+					// If PEM parsing failed, try DER
+					cert, err := x509.ParseCertificate(caCert)
+					if err != nil {
+						return nil, fmt.Errorf("failed to parse CA certificate from %s: %w", caFile, err)
+					}
+					caCertPool.AddCert(cert)
+				}
+			}
+			tlsConfig.RootCAs = caCertPool
+		}
+		
+		return tlsConfig, nil
+	}
+	
+	// Fallback to existing PKCS12 implementation for backward compatibility
+	if c.tlsConfig.PKCS12File != "" {
+		logger.Info("Loading PKCS12 certificate for mTLS (deprecated)")
+		return c.setupPKCS12TLS()
+	}
+	
+	// Legacy fallback using config.TlsClientCert
+	if c.config.TlsClientCert != "" {
+		logger.Info("Loading legacy PKCS12 certificate for mTLS (deprecated)")
+		return loadClientCertificate(c.config.TlsClientCert)
+	}
+	
+	return nil, nil
+}
+
+// setupPKCS12TLS loads TLS configuration from PKCS12 file
+func (c *Client) setupPKCS12TLS() (*tls.Config, error) {
+	return loadClientCertificate(c.tlsConfig.PKCS12File)
 }
 
 // pingMonitor sends pings at a short interval and triggers reconnect on failure
@@ -469,7 +554,7 @@ func (c *Client) setConnected(status bool) {
 	c.isConnected = status
 }
 
-// LoadClientCertificate Helper method to load client certificates
+// LoadClientCertificate Helper method to load client certificates (PKCS12 format)
 func loadClientCertificate(p12Path string) (*tls.Config, error) {
 	logger.Info("Loading tls-client-cert %s", p12Path)
 	// Read the PKCS12 file
