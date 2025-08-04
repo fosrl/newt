@@ -338,6 +338,9 @@ func main() {
 			connected = false
 		}
 
+		// print out the data
+		logger.Debug("Received registration message data: %+v", msg.Data)
+
 		jsonData, err := json.Marshal(msg.Data)
 		if err != nil {
 			logger.Info("Error marshaling data: %v", err)
@@ -905,11 +908,11 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	})
 
 	// Initialize health check monitor with status change callback
-	healthMonitor = healthcheck.NewMonitor(func(targets map[string]*healthcheck.Target) {
+	healthMonitor = healthcheck.NewMonitor(func(targets map[int]*healthcheck.Target) {
 		logger.Debug("Health check status update for %d targets", len(targets))
 
 		// Send health status update to the server
-		healthStatuses := make(map[string]interface{})
+		healthStatuses := make(map[int]interface{})
 		for id, target := range targets {
 			healthStatuses[id] = map[string]interface{}{
 				"status":     target.Status.String(),
@@ -963,7 +966,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		logger.Debug("Received health check remove request: %+v", msg)
 
 		type HealthCheckConfig struct {
-			IDs []string `json:"ids"`
+			IDs []int `json:"ids"`
 		}
 
 		var requestData HealthCheckConfig
@@ -991,7 +994,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		logger.Debug("Received health check enable request: %+v", msg)
 
 		var requestData struct {
-			ID string `json:"id"`
+			ID int `json:"id"`
 		}
 		jsonData, err := json.Marshal(msg.Data)
 		if err != nil {
@@ -1016,7 +1019,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		logger.Debug("Received health check disable request: %+v", msg)
 
 		var requestData struct {
-			ID string `json:"id"`
+			ID int `json:"id"`
 		}
 		jsonData, err := json.Marshal(msg.Data)
 		if err != nil {
@@ -1041,7 +1044,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		logger.Debug("Received health check status request")
 
 		targets := healthMonitor.GetTargets()
-		healthStatuses := make(map[string]interface{})
+		healthStatuses := make(map[int]interface{})
 		for id, target := range targets {
 			healthStatuses[id] = map[string]interface{}{
 				"status":     target.Status.String(),

@@ -205,6 +205,15 @@ func (c *Client) getToken() (string, error) {
 		}
 	}
 
+	// Check for environment variable to skip TLS verification
+	if os.Getenv("SKIP_TLS_VERIFY") == "true" {
+		if tlsConfig == nil {
+			tlsConfig = &tls.Config{}
+		}
+		tlsConfig.InsecureSkipVerify = true
+		logger.Debug("TLS certificate verification disabled via SKIP_TLS_VERIFY environment variable")
+	}
+
 	var tokenData map[string]interface{}
 
 	// Get a new token
@@ -338,6 +347,15 @@ func (c *Client) establishConnection() error {
 			return fmt.Errorf("failed to load certificate %s: %w", c.config.TlsClientCert, err)
 		}
 		dialer.TLSClientConfig = tlsConfig
+	}
+
+	// Check for environment variable to skip TLS verification for WebSocket connection
+	if os.Getenv("SKIP_TLS_VERIFY") == "true" {
+		if dialer.TLSClientConfig == nil {
+			dialer.TLSClientConfig = &tls.Config{}
+		}
+		dialer.TLSClientConfig.InsecureSkipVerify = true
+		logger.Debug("WebSocket TLS certificate verification disabled via SKIP_TLS_VERIFY environment variable")
 	}
 	conn, _, err := dialer.Dial(u.String(), nil)
 	if err != nil {

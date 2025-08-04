@@ -32,7 +32,7 @@ func (s Status) String() string {
 
 // Config holds the health check configuration for a target
 type Config struct {
-	ID                string            `json:"id"`
+	ID                int               `json:"id"`
 	Enabled           bool              `json:"hcEnabled"`
 	Path              string            `json:"hcPath"`
 	Scheme            string            `json:"hcScheme"`
@@ -59,11 +59,11 @@ type Target struct {
 }
 
 // StatusChangeCallback is called when any target's status changes
-type StatusChangeCallback func(targets map[string]*Target)
+type StatusChangeCallback func(targets map[int]*Target)
 
 // Monitor manages health check targets and their monitoring
 type Monitor struct {
-	targets  map[string]*Target
+	targets  map[int]*Target
 	mutex    sync.RWMutex
 	callback StatusChangeCallback
 	client   *http.Client
@@ -72,7 +72,7 @@ type Monitor struct {
 // NewMonitor creates a new health check monitor
 func NewMonitor(callback StatusChangeCallback) *Monitor {
 	return &Monitor{
-		targets:  make(map[string]*Target),
+		targets:  make(map[int]*Target),
 		callback: callback,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
@@ -118,7 +118,7 @@ func (m *Monitor) AddTargets(configs []Config) error {
 
 	for _, config := range configs {
 		if err := m.addTargetUnsafe(config); err != nil {
-			return fmt.Errorf("failed to add target %s: %v", config.ID, err)
+			return fmt.Errorf("failed to add target %d: %v", config.ID, err)
 		}
 	}
 
@@ -183,13 +183,13 @@ func (m *Monitor) addTargetUnsafe(config Config) error {
 }
 
 // RemoveTarget removes a health check target
-func (m *Monitor) RemoveTarget(id string) error {
+func (m *Monitor) RemoveTarget(id int) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	target, exists := m.targets[id]
 	if !exists {
-		return fmt.Errorf("target with id %s not found", id)
+		return fmt.Errorf("target with id %d not found", id)
 	}
 
 	target.cancel()
@@ -204,11 +204,11 @@ func (m *Monitor) RemoveTarget(id string) error {
 }
 
 // RemoveTargets removes multiple health check targets
-func (m *Monitor) RemoveTargets(ids []string) error {
+func (m *Monitor) RemoveTargets(ids []int) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	var notFound []string
+	var notFound []int
 
 	for _, id := range ids {
 		target, exists := m.targets[id]
@@ -234,20 +234,20 @@ func (m *Monitor) RemoveTargets(ids []string) error {
 }
 
 // RemoveTargetsByID is a convenience method that accepts either a single ID or multiple IDs
-func (m *Monitor) RemoveTargetsByID(ids ...string) error {
+func (m *Monitor) RemoveTargetsByID(ids ...int) error {
 	return m.RemoveTargets(ids)
 }
 
 // GetTargets returns a copy of all targets
-func (m *Monitor) GetTargets() map[string]*Target {
+func (m *Monitor) GetTargets() map[int]*Target {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 	return m.getAllTargetsUnsafe()
 }
 
 // getAllTargetsUnsafe returns a copy of all targets without acquiring the mutex (internal method)
-func (m *Monitor) getAllTargetsUnsafe() map[string]*Target {
-	targets := make(map[string]*Target)
+func (m *Monitor) getAllTargetsUnsafe() map[int]*Target {
+	targets := make(map[int]*Target)
 	for id, target := range m.targets {
 		// Create a copy to avoid race conditions
 		targetCopy := *target
@@ -257,7 +257,7 @@ func (m *Monitor) getAllTargetsUnsafe() map[string]*Target {
 }
 
 // getAllTargets returns a copy of all targets (deprecated, use GetTargets)
-func (m *Monitor) getAllTargets() map[string]*Target {
+func (m *Monitor) getAllTargets() map[int]*Target {
 	return m.GetTargets()
 }
 
@@ -363,17 +363,17 @@ func (m *Monitor) Stop() {
 	for _, target := range m.targets {
 		target.cancel()
 	}
-	m.targets = make(map[string]*Target)
+	m.targets = make(map[int]*Target)
 }
 
 // EnableTarget enables monitoring for a specific target
-func (m *Monitor) EnableTarget(id string) error {
+func (m *Monitor) EnableTarget(id int) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	target, exists := m.targets[id]
 	if !exists {
-		return fmt.Errorf("target with id %s not found", id)
+		return fmt.Errorf("target with id %d not found", id)
 	}
 
 	if !target.Config.Enabled {
@@ -391,13 +391,13 @@ func (m *Monitor) EnableTarget(id string) error {
 }
 
 // DisableTarget disables monitoring for a specific target
-func (m *Monitor) DisableTarget(id string) error {
+func (m *Monitor) DisableTarget(id int) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	target, exists := m.targets[id]
 	if !exists {
-		return fmt.Errorf("target with id %s not found", id)
+		return fmt.Errorf("target with id %d not found", id)
 	}
 
 	if target.Config.Enabled {
