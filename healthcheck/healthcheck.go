@@ -108,6 +108,30 @@ func (m *Monitor) AddTarget(config Config) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	return m.addTargetUnsafe(config)
+}
+
+// AddTargets adds multiple health check targets in bulk
+func (m *Monitor) AddTargets(configs []Config) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	for _, config := range configs {
+		if err := m.addTargetUnsafe(config); err != nil {
+			return fmt.Errorf("failed to add target %s: %v", config.ID, err)
+		}
+	}
+
+	// Notify callback once after all targets are added
+	if m.callback != nil {
+		go m.callback(m.getAllTargetsUnsafe())
+	}
+
+	return nil
+}
+
+// addTargetUnsafe adds a target without acquiring the mutex (internal method)
+func (m *Monitor) addTargetUnsafe(config Config) error {
 	// Set defaults
 	if config.Scheme == "" {
 		config.Scheme = "http"
@@ -173,22 +197,56 @@ func (m *Monitor) RemoveTarget(id string) error {
 
 	// Notify callback of status change
 	if m.callback != nil {
-		go m.callback(m.getAllTargets())
+		go m.callback(m.GetTargets())
 	}
 
 	return nil
 }
 
-// GetTargets returns a copy of all targets
-func (m *Monitor) GetTargets() map[string]*Target {
-	return m.getAllTargets()
+// RemoveTargets removes multiple health check targets
+func (m *Monitor) RemoveTargets(ids []string) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	var notFound []string
+
+	for _, id := range ids {
+		target, exists := m.targets[id]
+		if !exists {
+			notFound = append(notFound, id)
+			continue
+		}
+
+		target.cancel()
+		delete(m.targets, id)
+	}
+
+	// Notify callback of status change if any targets were removed
+	if len(notFound) != len(ids) && m.callback != nil {
+		go m.callback(m.GetTargets())
+	}
+
+	if len(notFound) > 0 {
+		return fmt.Errorf("targets not found: %v", notFound)
+	}
+
+	return nil
 }
 
-// getAllTargets returns a copy of all targets (internal method)
-func (m *Monitor) getAllTargets() map[string]*Target {
+// RemoveTargetsByID is a convenience method that accepts either a single ID or multiple IDs
+func (m *Monitor) RemoveTargetsByID(ids ...string) error {
+	return m.RemoveTargets(ids)
+}
+
+// GetTargets returns a copy of all targets
+func (m *Monitor) GetTargets() map[string]*Target {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
+	return m.getAllTargetsUnsafe()
+}
 
+// getAllTargetsUnsafe returns a copy of all targets without acquiring the mutex (internal method)
+func (m *Monitor) getAllTargetsUnsafe() map[string]*Target {
 	targets := make(map[string]*Target)
 	for id, target := range m.targets {
 		// Create a copy to avoid race conditions
@@ -196,6 +254,11 @@ func (m *Monitor) getAllTargets() map[string]*Target {
 		targets[id] = &targetCopy
 	}
 	return targets
+}
+
+// getAllTargets returns a copy of all targets (deprecated, use GetTargets)
+func (m *Monitor) getAllTargets() map[string]*Target {
+	return m.GetTargets()
 }
 
 // monitorTarget monitors a single target
@@ -234,7 +297,7 @@ func (m *Monitor) monitorTarget(target *Target) {
 
 			// Notify callback if status changed
 			if oldStatus != target.Status && m.callback != nil {
-				go m.callback(m.getAllTargets())
+				go m.callback(m.GetTargets())
 			}
 		}
 	}
@@ -344,7 +407,7 @@ func (m *Monitor) DisableTarget(id string) error {
 
 		// Notify callback of status change
 		if m.callback != nil {
-			go m.callback(m.getAllTargets())
+			go m.callback(m.GetTargets())
 		}
 	}
 

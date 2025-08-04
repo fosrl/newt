@@ -30,11 +30,12 @@ import (
 )
 
 type WgData struct {
-	Endpoint  string        `json:"endpoint"`
-	PublicKey string        `json:"publicKey"`
-	ServerIP  string        `json:"serverIP"`
-	TunnelIP  string        `json:"tunnelIP"`
-	Targets   TargetsByType `json:"targets"`
+	Endpoint           string               `json:"endpoint"`
+	PublicKey          string               `json:"publicKey"`
+	ServerIP           string               `json:"serverIP"`
+	TunnelIP           string               `json:"tunnelIP"`
+	Targets            TargetsByType        `json:"targets"`
+	HealthCheckTargets []healthcheck.Config `json:"healthCheckTargets"`
 }
 
 type TargetsByType struct {
@@ -448,6 +449,12 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		clientsAddProxyTarget(pm, wgData.TunnelIP)
+
+		if err := healthMonitor.AddTargets(wgData.HealthCheckTargets); err != nil {
+			logger.Error("Failed to bulk add health check targets: %v", err)
+		} else {
+			logger.Info("Successfully added %d health check targets", len(wgData.HealthCheckTargets))
+		}
 
 		err = pm.Start()
 		if err != nil {
@@ -925,7 +932,12 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	client.RegisterHandler("newt/healthcheck/add", func(msg websocket.WSMessage) {
 		logger.Debug("Received health check add request: %+v", msg)
 
-		var config healthcheck.Config
+		type HealthCheckConfig struct {
+			Targets []healthcheck.Config `json:"targets"`
+		}
+
+		var config HealthCheckConfig
+		// add a bunch of targets at once
 		jsonData, err := json.Marshal(msg.Data)
 		if err != nil {
 			logger.Error("Error marshaling health check data: %v", err)
@@ -937,20 +949,24 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			return
 		}
 
-		if err := healthMonitor.AddTarget(config); err != nil {
-			logger.Error("Failed to add health check target %s: %v", config.ID, err)
+		if err := healthMonitor.AddTargets(config.Targets); err != nil {
+			logger.Error("Failed to add health check targets: %v", err)
 		} else {
-			logger.Info("Added health check target: %s", config.ID)
+			logger.Info("Added %d health check targets", len(config.Targets))
 		}
+
+		logger.Debug("Health check targets added: %+v", config.Targets)
 	})
 
 	// Register handler for removing health check targets
 	client.RegisterHandler("newt/healthcheck/remove", func(msg websocket.WSMessage) {
 		logger.Debug("Received health check remove request: %+v", msg)
 
-		var requestData struct {
-			ID string `json:"id"`
+		type HealthCheckConfig struct {
+			IDs []string `json:"ids"`
 		}
+
+		var requestData HealthCheckConfig
 		jsonData, err := json.Marshal(msg.Data)
 		if err != nil {
 			logger.Error("Error marshaling health check remove data: %v", err)
@@ -962,10 +978,11 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			return
 		}
 
-		if err := healthMonitor.RemoveTarget(requestData.ID); err != nil {
-			logger.Error("Failed to remove health check target %s: %v", requestData.ID, err)
+		// Multiple target removal
+		if err := healthMonitor.RemoveTargets(requestData.IDs); err != nil {
+			logger.Error("Failed to remove health check targets %v: %v", requestData.IDs, err)
 		} else {
-			logger.Info("Removed health check target: %s", requestData.ID)
+			logger.Info("Removed %d health check targets: %v", len(requestData.IDs), requestData.IDs)
 		}
 	})
 
