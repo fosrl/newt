@@ -42,6 +42,9 @@ When Newt receives WireGuard control messages, it will use the information encod
 -   `ping-timeout` (optional): Timeout for each ping. Default: 5s
 -   `updown` (optional): A script to be called when targets are added or removed.
 -   `tls-client-cert` (optional): Client certificate (p12 or pfx) for mTLS. See [mTLS](#mtls)
+-   `tls-client-cert` (optional): Path to client certificate (PEM format, optional if using PKCS12). See [mTLS](#mtls)
+-   `tls-client-key` (optional): Path to private key for mTLS (PEM format, optional if using PKCS12)
+-   `tls-ca-cert` (optional): Path to CA certificate to verify server (PEM format, optional if using PKCS12)
 -   `docker-enforce-network-validation` (optional): Validate the container target is on the same network as the newt process. Default: false
 -   `health-file` (optional): Check if connection to WG server (pangolin) is ok. creates a file if ok, removes it if not ok. Can be used with docker healtcheck to restart newt
 -   `accept-clients` (optional): Enable WireGuard server mode to accept incoming olm client connections. Default: false
@@ -65,6 +68,9 @@ All CLI arguments can be set using environment variables as an alternative to co
 -   `PING_TIMEOUT`: Timeout for each ping. Default: 5s (equivalent to `--ping-timeout`)
 -   `UPDOWN_SCRIPT`: Path to updown script for target add/remove events (equivalent to `--updown`)
 -   `TLS_CLIENT_CERT`: Path to client certificate for mTLS (equivalent to `--tls-client-cert`)
+-   `TLS_CLIENT_CERT`: Path to client certificate for mTLS (equivalent to `--tls-client-cert`)
+-   `TLS_CLIENT_KEY`: Path to private key for mTLS (equivalent to `--tls-client-key`)
+-   `TLS_CA_CERT`: Path to CA certificate to verify server (equivalent to `--tls-ca-cert`)
 -   `DOCKER_ENFORCE_NETWORK_VALIDATION`: Validate container targets are on same network. Default: false (equivalent to `--docker-enforce-network-validation`)
 -   `HEALTH_FILE`: Path to health file for connection monitoring (equivalent to `--health-file`)
 -   `ACCEPT_CLIENTS`: Enable WireGuard server mode. Default: false (equivalent to `--accept-clients`)
@@ -259,16 +265,20 @@ You can look at updown.py as a reference script to get started!
 
 ### mTLS
 
-Newt supports mutual TLS (mTLS) authentication, if the server has been configured to request a client certificate.
+Newt supports mutual TLS (mTLS) authentication if the server is configured to request a client certificate. You can use either a PKCS12 (.p12/.pfx) file or split PEM files for the client cert, private key, and CA.
 
--   Only PKCS12 (.p12 or .pfx) file format is accepted
--   The PKCS12 file must contain:
-    -   Private key
-    -   Public certificate
-    -   CA certificate
--   Encrypted PKCS12 files are currently not supported
+#### Option 1: PKCS12 (Legacy)
 
-Examples:
+> This is the original method and still supported.
+
+* File must contain:
+
+  * Client private key
+  * Public certificate
+  * CA certificate
+* Encrypted `.p12` files are **not supported**
+
+Example:
 
 ```bash
 newt \
@@ -277,6 +287,27 @@ newt \
 --endpoint https://example.com \
 --tls-client-cert ./client.p12
 ```
+
+#### Option 2: Split PEM Files (Preferred)
+
+You can now provide separate files for:
+
+* `--tls-client-cert`: client certificate (`.crt` or `.pem`)
+* `--tls-client-key`: client private key (`.key` or `.pem`)
+* `--tls-ca-cert`: CA cert to verify the server
+
+Example:
+
+```bash
+newt \
+--id 31frd0uzbjvp721 \
+--secret h51mmlknrvrwv8s4r1i210azhumt6isgbpyavxodibx1k2d6 \
+--endpoint https://example.com \
+--tls-client-cert ./client.crt \
+--tls-client-key ./client.key \
+--tls-ca-cert ./ca.crt
+```
+
 
 ```yaml
 services:
