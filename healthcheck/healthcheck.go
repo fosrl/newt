@@ -8,18 +8,20 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/fosrl/newt/logger"
 )
 
-// Status represents the health status of a target
-type Status int
+// Health represents the health status of a target
+type Health int
 
 const (
-	StatusUnknown Status = iota
+	StatusUnknown Health = iota
 	StatusHealthy
 	StatusUnhealthy
 )
 
-func (s Status) String() string {
+func (s Health) String() string {
 	switch s {
 	case StatusHealthy:
 		return "healthy"
@@ -44,12 +46,13 @@ type Config struct {
 	Timeout           int               `json:"hcTimeout"`           // in seconds
 	Headers           map[string]string `json:"hcHeaders"`
 	Method            string            `json:"hcMethod"`
+	Status            int               `json:"hcStatus"` // HTTP status code
 }
 
 // Target represents a health check target with its current status
 type Target struct {
 	Config     Config    `json:"config"`
-	Status     Status    `json:"status"`
+	Status     Health    `json:"status"`
 	LastCheck  time.Time `json:"lastCheck"`
 	LastError  string    `json:"lastError,omitempty"`
 	CheckCount int       `json:"checkCount"`
@@ -71,6 +74,7 @@ type Monitor struct {
 
 // NewMonitor creates a new health check monitor
 func NewMonitor(callback StatusChangeCallback) *Monitor {
+	logger.Info("Creating new health check monitor")
 	return &Monitor{
 		targets:  make(map[int]*Target),
 		callback: callback,
@@ -108,6 +112,9 @@ func (m *Monitor) AddTarget(config Config) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	logger.Info("Adding health check target: ID=%d, hostname=%s, port=%d, enabled=%t",
+		config.ID, config.Hostname, config.Port, config.Enabled)
+
 	return m.addTargetUnsafe(config)
 }
 
@@ -116,17 +123,20 @@ func (m *Monitor) AddTargets(configs []Config) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	logger.Info("Adding %d health check targets in bulk", len(configs))
+
 	for _, config := range configs {
 		if err := m.addTargetUnsafe(config); err != nil {
+			logger.Error("Failed to add target %d: %v", config.ID, err)
 			return fmt.Errorf("failed to add target %d: %v", config.ID, err)
 		}
+		logger.Debug("Successfully added target: ID=%d, hostname=%s", config.ID, config.Hostname)
 	}
 
-	// Notify callback once after all targets are added
-	if m.callback != nil {
-		go m.callback(m.getAllTargetsUnsafe())
-	}
+	// Don't notify callback immediately - let the initial health checks complete first
+	// The callback will be triggered when the first health check results are available
 
+	logger.Info("Successfully added all %d health check targets", len(configs))
 	return nil
 }
 
@@ -152,6 +162,9 @@ func (m *Monitor) addTargetUnsafe(config Config) error {
 		config.Timeout = 5
 	}
 
+	logger.Debug("Target %d configuration: scheme=%s, method=%s, interval=%ds, timeout=%ds",
+		config.ID, config.Scheme, config.Method, config.Interval, config.Timeout)
+
 	// Parse headers if provided as string
 	if len(config.Headers) == 0 && config.Path != "" {
 		// This is a simplified header parsing - in real use you might want more robust parsing
@@ -160,6 +173,7 @@ func (m *Monitor) addTargetUnsafe(config Config) error {
 
 	// Remove existing target if it exists
 	if existing, exists := m.targets[config.ID]; exists {
+		logger.Info("Replacing existing target with ID %d", config.ID)
 		existing.cancel()
 	}
 
@@ -176,7 +190,10 @@ func (m *Monitor) addTargetUnsafe(config Config) error {
 
 	// Start monitoring if enabled
 	if config.Enabled {
+		logger.Info("Starting monitoring for target %d (%s:%d)", config.ID, config.Hostname, config.Port)
 		go m.monitorTarget(target)
+	} else {
+		logger.Debug("Target %d added but monitoring is disabled", config.ID)
 	}
 
 	return nil
@@ -189,9 +206,11 @@ func (m *Monitor) RemoveTarget(id int) error {
 
 	target, exists := m.targets[id]
 	if !exists {
+		logger.Warn("Attempted to remove non-existent target with ID %d", id)
 		return fmt.Errorf("target with id %d not found", id)
 	}
 
+	logger.Info("Removing health check target: ID=%d", id)
 	target.cancel()
 	delete(m.targets, id)
 
@@ -200,6 +219,7 @@ func (m *Monitor) RemoveTarget(id int) error {
 		go m.callback(m.GetTargets())
 	}
 
+	logger.Info("Successfully removed target %d", id)
 	return nil
 }
 
@@ -208,18 +228,24 @@ func (m *Monitor) RemoveTargets(ids []int) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	logger.Info("Removing %d health check targets", len(ids))
 	var notFound []int
 
 	for _, id := range ids {
 		target, exists := m.targets[id]
 		if !exists {
 			notFound = append(notFound, id)
+			logger.Warn("Target with ID %d not found during bulk removal", id)
 			continue
 		}
 
+		logger.Debug("Removing target %d", id)
 		target.cancel()
 		delete(m.targets, id)
 	}
+
+	removedCount := len(ids) - len(notFound)
+	logger.Info("Successfully removed %d targets", removedCount)
 
 	// Notify callback of status change if any targets were removed
 	if len(notFound) != len(ids) && m.callback != nil {
@@ -227,6 +253,7 @@ func (m *Monitor) RemoveTargets(ids []int) error {
 	}
 
 	if len(notFound) > 0 {
+		logger.Error("Some targets not found during removal: %v", notFound)
 		return fmt.Errorf("targets not found: %v", notFound)
 	}
 
@@ -263,8 +290,18 @@ func (m *Monitor) getAllTargets() map[int]*Target {
 
 // monitorTarget monitors a single target
 func (m *Monitor) monitorTarget(target *Target) {
+	logger.Info("Starting health check monitoring for target %d (%s:%d)",
+		target.Config.ID, target.Config.Hostname, target.Config.Port)
+
 	// Initial check
+	oldStatus := target.Status
 	m.performHealthCheck(target)
+
+	// Notify callback after initial check if status changed or if it's the first check
+	if (oldStatus != target.Status || oldStatus == StatusUnknown) && m.callback != nil {
+		logger.Info("Target %d initial status: %s", target.Config.ID, target.Status.String())
+		go m.callback(m.GetTargets())
+	}
 
 	// Set up ticker based on current status
 	interval := time.Duration(target.Config.Interval) * time.Second
@@ -272,12 +309,14 @@ func (m *Monitor) monitorTarget(target *Target) {
 		interval = time.Duration(target.Config.UnhealthyInterval) * time.Second
 	}
 
+	logger.Debug("Target %d: initial check interval set to %v", target.Config.ID, interval)
 	target.ticker = time.NewTicker(interval)
 	defer target.ticker.Stop()
 
 	for {
 		select {
 		case <-target.ctx.Done():
+			logger.Info("Stopping health check monitoring for target %d", target.Config.ID)
 			return
 		case <-target.ticker.C:
 			oldStatus := target.Status
@@ -290,6 +329,8 @@ func (m *Monitor) monitorTarget(target *Target) {
 			}
 
 			if newInterval != interval {
+				logger.Debug("Target %d: updating check interval from %v to %v due to status change",
+					target.Config.ID, interval, newInterval)
 				target.ticker.Stop()
 				target.ticker = time.NewTicker(newInterval)
 				interval = newInterval
@@ -297,6 +338,8 @@ func (m *Monitor) monitorTarget(target *Target) {
 
 			// Notify callback if status changed
 			if oldStatus != target.Status && m.callback != nil {
+				logger.Info("Target %d status changed: %s -> %s",
+					target.Config.ID, oldStatus.String(), target.Status.String())
 				go m.callback(m.GetTargets())
 			}
 		}
@@ -321,6 +364,9 @@ func (m *Monitor) performHealthCheck(target *Target) {
 		url += target.Config.Path
 	}
 
+	logger.Debug("Target %d: performing health check %d to %s",
+		target.Config.ID, target.CheckCount, url)
+
 	// Create request
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(target.Config.Timeout)*time.Second)
 	defer cancel()
@@ -329,6 +375,7 @@ func (m *Monitor) performHealthCheck(target *Target) {
 	if err != nil {
 		target.Status = StatusUnhealthy
 		target.LastError = fmt.Sprintf("failed to create request: %v", err)
+		logger.Warn("Target %d: failed to create request: %v", target.Config.ID, err)
 		return
 	}
 
@@ -342,16 +389,40 @@ func (m *Monitor) performHealthCheck(target *Target) {
 	if err != nil {
 		target.Status = StatusUnhealthy
 		target.LastError = fmt.Sprintf("request failed: %v", err)
+		logger.Warn("Target %d: health check failed: %v", target.Config.ID, err)
 		return
 	}
 	defer resp.Body.Close()
 
 	// Check response status
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		target.Status = StatusHealthy
+	var expectedStatus int
+	if target.Config.Status > 0 {
+		expectedStatus = target.Config.Status
 	} else {
-		target.Status = StatusUnhealthy
-		target.LastError = fmt.Sprintf("unhealthy status code: %d", resp.StatusCode)
+		expectedStatus = 0 // Use range check for 200-299
+	}
+
+	if expectedStatus > 0 {
+		logger.Debug("Target %d: checking health status against expected code %d", target.Config.ID, expectedStatus)
+		// Check for specific status code
+		if resp.StatusCode == expectedStatus {
+			target.Status = StatusHealthy
+			logger.Debug("Target %d: health check passed (status: %d, expected: %d)", target.Config.ID, resp.StatusCode, expectedStatus)
+		} else {
+			target.Status = StatusUnhealthy
+			target.LastError = fmt.Sprintf("unexpected status code: %d (expected: %d)", resp.StatusCode, expectedStatus)
+			logger.Warn("Target %d: health check failed with status code %d (expected: %d)", target.Config.ID, resp.StatusCode, expectedStatus)
+		}
+	} else {
+		// Check for 2xx range
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			target.Status = StatusHealthy
+			logger.Debug("Target %d: health check passed (status: %d)", target.Config.ID, resp.StatusCode)
+		} else {
+			target.Status = StatusUnhealthy
+			target.LastError = fmt.Sprintf("unhealthy status code: %d", resp.StatusCode)
+			logger.Warn("Target %d: health check failed with status code %d", target.Config.ID, resp.StatusCode)
+		}
 	}
 }
 
@@ -360,10 +431,16 @@ func (m *Monitor) Stop() {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	for _, target := range m.targets {
+	targetCount := len(m.targets)
+	logger.Info("Stopping health check monitor with %d targets", targetCount)
+
+	for id, target := range m.targets {
+		logger.Debug("Stopping monitoring for target %d", id)
 		target.cancel()
 	}
 	m.targets = make(map[int]*Target)
+
+	logger.Info("Health check monitor stopped")
 }
 
 // EnableTarget enables monitoring for a specific target
@@ -373,10 +450,12 @@ func (m *Monitor) EnableTarget(id int) error {
 
 	target, exists := m.targets[id]
 	if !exists {
+		logger.Warn("Attempted to enable non-existent target with ID %d", id)
 		return fmt.Errorf("target with id %d not found", id)
 	}
 
 	if !target.Config.Enabled {
+		logger.Info("Enabling health check monitoring for target %d", id)
 		target.Config.Enabled = true
 		target.cancel() // Stop existing monitoring
 
@@ -385,6 +464,8 @@ func (m *Monitor) EnableTarget(id int) error {
 		target.cancel = cancel
 
 		go m.monitorTarget(target)
+	} else {
+		logger.Debug("Target %d is already enabled", id)
 	}
 
 	return nil
@@ -397,10 +478,12 @@ func (m *Monitor) DisableTarget(id int) error {
 
 	target, exists := m.targets[id]
 	if !exists {
+		logger.Warn("Attempted to disable non-existent target with ID %d", id)
 		return fmt.Errorf("target with id %d not found", id)
 	}
 
 	if target.Config.Enabled {
+		logger.Info("Disabling health check monitoring for target %d", id)
 		target.Config.Enabled = false
 		target.cancel()
 		target.Status = StatusUnknown
@@ -409,6 +492,8 @@ func (m *Monitor) DisableTarget(id int) error {
 		if m.callback != nil {
 			go m.callback(m.GetTargets())
 		}
+	} else {
+		logger.Debug("Target %d is already disabled", id)
 	}
 
 	return nil

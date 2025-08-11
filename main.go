@@ -101,6 +101,7 @@ var (
 	healthFile                         string
 	useNativeInterface                 bool
 	authorizedKeysFile                 string
+	preferEndpoint                     string
 	healthMonitor                      *healthcheck.Monitor
 )
 
@@ -172,6 +173,9 @@ func main() {
 	if pingTimeoutStr == "" {
 		flag.StringVar(&pingTimeoutStr, "ping-timeout", "5s", "	Timeout for each ping (default 5s)")
 	}
+	// load the prefer endpoint just as a flag
+	flag.StringVar(&preferEndpoint, "prefer-endpoint", "", "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
+
 	// if authorizedKeysFile == "" {
 	// 	flag.StringVar(&authorizedKeysFile, "authorized-keys-file", "~/.ssh/authorized_keys", "Path to authorized keys file (if unset, no keys will be authorized)")
 	// }
@@ -290,6 +294,33 @@ func main() {
 	if acceptClients {
 		setupClients(client)
 	}
+
+	// Initialize health check monitor with status change callback
+	healthMonitor = healthcheck.NewMonitor(func(targets map[int]*healthcheck.Target) {
+		logger.Debug("Health check status update for %d targets", len(targets))
+
+		// Send health status update to the server
+		healthStatuses := make(map[int]interface{})
+		for id, target := range targets {
+			healthStatuses[id] = map[string]interface{}{
+				"status":     target.Status.String(),
+				"lastCheck":  target.LastCheck.Format(time.RFC3339),
+				"checkCount": target.CheckCount,
+				"lastError":  target.LastError,
+				"config":     target.Config,
+			}
+		}
+
+		// print the status of the targets
+		logger.Debug("Health check status: %+v", healthStatuses)
+
+		err := client.SendMessage("newt/healthcheck/status", map[string]interface{}{
+			"targets": healthStatuses,
+		})
+		if err != nil {
+			logger.Error("Failed to send health check status update: %v", err)
+		}
+	})
 
 	var pingWithRetryStopChan chan struct{}
 
@@ -529,8 +560,18 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		// If there is just one exit node, we can skip pinging it and use it directly
-		if len(exitNodes) == 1 {
+		if len(exitNodes) == 1 || preferEndpoint != "" {
 			logger.Debug("Only one exit node available, using it directly: %s", exitNodes[0].Endpoint)
+
+			// if the preferEndpoint is set, we will use it instead of the exit node endpoint. first you need to find the exit node with that endpoint in the list and send that one
+			if preferEndpoint != "" {
+				for _, node := range exitNodes {
+					if node.Endpoint == preferEndpoint {
+						exitNodes[0] = node
+						break
+					}
+				}
+			}
 
 			// Prepare data to send to the cloud for selection
 			pingResults := []ExitNodePingResult{
@@ -905,30 +946,6 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		logger.Info("SSH public key appended to authorized keys file")
-	})
-
-	// Initialize health check monitor with status change callback
-	healthMonitor = healthcheck.NewMonitor(func(targets map[int]*healthcheck.Target) {
-		logger.Debug("Health check status update for %d targets", len(targets))
-
-		// Send health status update to the server
-		healthStatuses := make(map[int]interface{})
-		for id, target := range targets {
-			healthStatuses[id] = map[string]interface{}{
-				"status":     target.Status.String(),
-				"lastCheck":  target.LastCheck.Format(time.RFC3339),
-				"checkCount": target.CheckCount,
-				"lastError":  target.LastError,
-				"config":     target.Config,
-			}
-		}
-
-		err := client.SendMessage("newt/healthcheck/status", map[string]interface{}{
-			"targets": healthStatuses,
-		})
-		if err != nil {
-			logger.Error("Failed to send health check status update: %v", err)
-		}
 	})
 
 	// Register handler for adding health check targets
