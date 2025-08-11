@@ -196,7 +196,7 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 				return nil, fmt.Errorf("failed to parse private key: %v", err)
 			}
 		} else {
-			err = os.WriteFile(generateAndSaveKeyTo, []byte(key.String()), 0644)
+			err = os.WriteFile(generateAndSaveKeyTo, []byte(key.String()), 0600)
 			if err != nil {
 				return nil, fmt.Errorf("failed to save private key: %v", err)
 			}
