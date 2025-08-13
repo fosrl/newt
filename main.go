@@ -448,7 +448,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		if err != nil {
 			logger.Warn("Initial reliable ping failed, but continuing: %v", err)
 		} else {
-			logger.Info("Initial connection test successful!")
+			logger.Info("Initial connection test successful")
 		}
 
 		pingWithRetryStopChan, _ = pingWithRetry(tnet, wgData.ServerIP, pingTimeout)

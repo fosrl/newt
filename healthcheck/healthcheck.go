@@ -123,7 +123,7 @@ func (m *Monitor) AddTargets(configs []Config) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	logger.Info("Adding %d health check targets in bulk", len(configs))
+	logger.Debug("Adding %d health check targets in bulk", len(configs))
 
 	for _, config := range configs {
 		if err := m.addTargetUnsafe(config); err != nil {
@@ -136,7 +136,7 @@ func (m *Monitor) AddTargets(configs []Config) error {
 	// Don't notify callback immediately - let the initial health checks complete first
 	// The callback will be triggered when the first health check results are available
 
-	logger.Info("Successfully added all %d health check targets", len(configs))
+	logger.Debug("Successfully added all %d health check targets", len(configs))
 	return nil
 }
 
