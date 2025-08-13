@@ -112,15 +112,20 @@ func main() {
 	updownScript = os.Getenv("UPDOWN_SCRIPT")
 	interfaceName = os.Getenv("INTERFACE")
 	generateAndSaveKeyTo = os.Getenv("GENERATE_AND_SAVE_KEY_TO")
-	keepInterface = os.Getenv("KEEP_INTERFACE") == "true"
-	acceptClients = os.Getenv("ACCEPT_CLIENTS") == "true"
+	keepInterfaceEnv := os.Getenv("KEEP_INTERFACE")
+	acceptClientsEnv := os.Getenv("ACCEPT_CLIENTS")
+	useNativeInterfaceEnv := os.Getenv("USE_NATIVE_INTERFACE")
+
+	keepInterface = keepInterfaceEnv == "true"
+	acceptClients = acceptClientsEnv == "true"
+	useNativeInterface = useNativeInterfaceEnv == "true"
+
 	tlsPrivateKey = os.Getenv("TLS_CLIENT_CERT")
 	dockerSocket = os.Getenv("DOCKER_SOCKET")
 	pingIntervalStr := os.Getenv("PING_INTERVAL")
 	pingTimeoutStr := os.Getenv("PING_TIMEOUT")
 	dockerEnforceNetworkValidation = os.Getenv("DOCKER_ENFORCE_NETWORK_VALIDATION")
 	healthFile = os.Getenv("HEALTH_FILE")
-	useNativeInterface = os.Getenv("USE_NATIVE_INTERFACE") == "true"
 	// authorizedKeysFile = os.Getenv("AUTHORIZED_KEYS_FILE")
 	authorizedKeysFile = ""
 
@@ -151,9 +156,15 @@ func main() {
 	if generateAndSaveKeyTo == "" {
 		flag.StringVar(&generateAndSaveKeyTo, "generateAndSaveKeyTo", "", "Path to save generated private key")
 	}
-	flag.BoolVar(&keepInterface, "keep-interface", false, "Keep the WireGuard interface")
-	flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface (requires WireGuard kernel module) and linux")
-	flag.BoolVar(&acceptClients, "accept-clients", false, "Accept clients on the WireGuard interface")
+	if keepInterfaceEnv == "" {
+		flag.BoolVar(&keepInterface, "keep-interface", false, "Keep the WireGuard interface")
+	}
+	if useNativeInterfaceEnv == "" {
+		flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface (requires WireGuard kernel module) and linux")
+	}
+	if acceptClientsEnv == "" {
+		flag.BoolVar(&acceptClients, "accept-clients", false, "Accept clients on the WireGuard interface")
+	}
 	if tlsPrivateKey == "" {
 		flag.StringVar(&tlsPrivateKey, "tls-client-cert", "", "Path to client certificate used for mTLS")
 	}
@@ -162,9 +173,6 @@ func main() {
 	}
 	if pingIntervalStr == "" {
 		flag.StringVar(&pingIntervalStr, "ping-interval", "3s", "Interval for pinging the server (default 3s)")
-	}
-	if pingTimeoutStr == "" {
-		flag.StringVar(&pingTimeoutStr, "ping-timeout", "5s", "	Timeout for each ping (default 5s)")
 	}
 	if pingTimeoutStr == "" {
 		flag.StringVar(&pingTimeoutStr, "ping-timeout", "5s", "	Timeout for each ping (default 5s)")
