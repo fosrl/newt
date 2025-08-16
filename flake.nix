@@ -31,7 +31,7 @@
             cp -r ${./.} $out
             chmod -R +w $out
             rm -rf $out/.git $out/result $out/.envrc $out/.direnv
-            find $out -name "*.go" -type f -exec sed -i "s/version_replaceme/${version}/g" {} \;
+            sed -i "s/version_replaceme/${version}/g" $out/main.go
           '';
         in
         {
