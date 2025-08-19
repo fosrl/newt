@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/fosrl/newt/docker"
+	"github.com/fosrl/newt/healthcheck"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/updates"
@@ -29,11 +30,12 @@ import (
 )
 
 type WgData struct {
-	Endpoint  string        `json:"endpoint"`
-	PublicKey string        `json:"publicKey"`
-	ServerIP  string        `json:"serverIP"`
-	TunnelIP  string        `json:"tunnelIP"`
-	Targets   TargetsByType `json:"targets"`
+	Endpoint           string               `json:"endpoint"`
+	PublicKey          string               `json:"publicKey"`
+	ServerIP           string               `json:"serverIP"`
+	TunnelIP           string               `json:"tunnelIP"`
+	Targets            TargetsByType        `json:"targets"`
+	HealthCheckTargets []healthcheck.Config `json:"healthCheckTargets"`
 }
 
 type TargetsByType struct {
@@ -99,6 +101,8 @@ var (
 	healthFile                         string
 	useNativeInterface                 bool
 	authorizedKeysFile                 string
+	preferEndpoint                     string
+	healthMonitor                      *healthcheck.Monitor
 )
 
 func main() {
@@ -177,6 +181,9 @@ func main() {
 	if pingTimeoutStr == "" {
 		flag.StringVar(&pingTimeoutStr, "ping-timeout", "5s", "	Timeout for each ping (default 5s)")
 	}
+	// load the prefer endpoint just as a flag
+	flag.StringVar(&preferEndpoint, "prefer-endpoint", "", "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
+
 	// if authorizedKeysFile == "" {
 	// 	flag.StringVar(&authorizedKeysFile, "authorized-keys-file", "~/.ssh/authorized_keys", "Path to authorized keys file (if unset, no keys will be authorized)")
 	// }
@@ -296,6 +303,33 @@ func main() {
 		setupClients(client)
 	}
 
+	// Initialize health check monitor with status change callback
+	healthMonitor = healthcheck.NewMonitor(func(targets map[int]*healthcheck.Target) {
+		logger.Debug("Health check status update for %d targets", len(targets))
+
+		// Send health status update to the server
+		healthStatuses := make(map[int]interface{})
+		for id, target := range targets {
+			healthStatuses[id] = map[string]interface{}{
+				"status":     target.Status.String(),
+				"lastCheck":  target.LastCheck.Format(time.RFC3339),
+				"checkCount": target.CheckCount,
+				"lastError":  target.LastError,
+				"config":     target.Config,
+			}
+		}
+
+		// print the status of the targets
+		logger.Debug("Health check status: %+v", healthStatuses)
+
+		err := client.SendMessage("newt/healthcheck/status", map[string]interface{}{
+			"targets": healthStatuses,
+		})
+		if err != nil {
+			logger.Error("Failed to send health check status update: %v", err)
+		}
+	})
+
 	var pingWithRetryStopChan chan struct{}
 
 	closeWgTunnel := func() {
@@ -342,6 +376,9 @@ func main() {
 
 			connected = false
 		}
+
+		// print out the data
+		logger.Debug("Received registration message data: %+v", msg.Data)
 
 		jsonData, err := json.Marshal(msg.Data)
 		if err != nil {
@@ -419,7 +456,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		if err != nil {
 			logger.Warn("Initial reliable ping failed, but continuing: %v", err)
 		} else {
-			logger.Info("Initial connection test successful!")
+			logger.Info("Initial connection test successful")
 		}
 
 		pingWithRetryStopChan, _ = pingWithRetry(tnet, wgData.ServerIP, pingTimeout)
@@ -454,6 +491,12 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		clientsAddProxyTarget(pm, wgData.TunnelIP)
+
+		if err := healthMonitor.AddTargets(wgData.HealthCheckTargets); err != nil {
+			logger.Error("Failed to bulk add health check targets: %v", err)
+		} else {
+			logger.Info("Successfully added %d health check targets", len(wgData.HealthCheckTargets))
+		}
 
 		err = pm.Start()
 		if err != nil {
@@ -525,8 +568,18 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		// If there is just one exit node, we can skip pinging it and use it directly
-		if len(exitNodes) == 1 {
+		if len(exitNodes) == 1 || preferEndpoint != "" {
 			logger.Debug("Only one exit node available, using it directly: %s", exitNodes[0].Endpoint)
+
+			// if the preferEndpoint is set, we will use it instead of the exit node endpoint. first you need to find the exit node with that endpoint in the list and send that one
+			if preferEndpoint != "" {
+				for _, node := range exitNodes {
+					if node.Endpoint == preferEndpoint {
+						exitNodes[0] = node
+						break
+					}
+				}
+			}
 
 			// Prepare data to send to the cloud for selection
 			pingResults := []ExitNodePingResult{
@@ -903,6 +956,138 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		logger.Info("SSH public key appended to authorized keys file")
 	})
 
+	// Register handler for adding health check targets
+	client.RegisterHandler("newt/healthcheck/add", func(msg websocket.WSMessage) {
+		logger.Debug("Received health check add request: %+v", msg)
+
+		type HealthCheckConfig struct {
+			Targets []healthcheck.Config `json:"targets"`
+		}
+
+		var config HealthCheckConfig
+		// add a bunch of targets at once
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling health check data: %v", err)
+			return
+		}
+
+		if err := json.Unmarshal(jsonData, &config); err != nil {
+			logger.Error("Error unmarshaling health check config: %v", err)
+			return
+		}
+
+		if err := healthMonitor.AddTargets(config.Targets); err != nil {
+			logger.Error("Failed to add health check targets: %v", err)
+		} else {
+			logger.Info("Added %d health check targets", len(config.Targets))
+		}
+
+		logger.Debug("Health check targets added: %+v", config.Targets)
+	})
+
+	// Register handler for removing health check targets
+	client.RegisterHandler("newt/healthcheck/remove", func(msg websocket.WSMessage) {
+		logger.Debug("Received health check remove request: %+v", msg)
+
+		type HealthCheckConfig struct {
+			IDs []int `json:"ids"`
+		}
+
+		var requestData HealthCheckConfig
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling health check remove data: %v", err)
+			return
+		}
+
+		if err := json.Unmarshal(jsonData, &requestData); err != nil {
+			logger.Error("Error unmarshaling health check remove request: %v", err)
+			return
+		}
+
+		// Multiple target removal
+		if err := healthMonitor.RemoveTargets(requestData.IDs); err != nil {
+			logger.Error("Failed to remove health check targets %v: %v", requestData.IDs, err)
+		} else {
+			logger.Info("Removed %d health check targets: %v", len(requestData.IDs), requestData.IDs)
+		}
+	})
+
+	// Register handler for enabling health check targets
+	client.RegisterHandler("newt/healthcheck/enable", func(msg websocket.WSMessage) {
+		logger.Debug("Received health check enable request: %+v", msg)
+
+		var requestData struct {
+			ID int `json:"id"`
+		}
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling health check enable data: %v", err)
+			return
+		}
+
+		if err := json.Unmarshal(jsonData, &requestData); err != nil {
+			logger.Error("Error unmarshaling health check enable request: %v", err)
+			return
+		}
+
+		if err := healthMonitor.EnableTarget(requestData.ID); err != nil {
+			logger.Error("Failed to enable health check target %s: %v", requestData.ID, err)
+		} else {
+			logger.Info("Enabled health check target: %s", requestData.ID)
+		}
+	})
+
+	// Register handler for disabling health check targets
+	client.RegisterHandler("newt/healthcheck/disable", func(msg websocket.WSMessage) {
+		logger.Debug("Received health check disable request: %+v", msg)
+
+		var requestData struct {
+			ID int `json:"id"`
+		}
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling health check disable data: %v", err)
+			return
+		}
+
+		if err := json.Unmarshal(jsonData, &requestData); err != nil {
+			logger.Error("Error unmarshaling health check disable request: %v", err)
+			return
+		}
+
+		if err := healthMonitor.DisableTarget(requestData.ID); err != nil {
+			logger.Error("Failed to disable health check target %s: %v", requestData.ID, err)
+		} else {
+			logger.Info("Disabled health check target: %s", requestData.ID)
+		}
+	})
+
+	// Register handler for getting health check status
+	client.RegisterHandler("newt/healthcheck/status/request", func(msg websocket.WSMessage) {
+		logger.Debug("Received health check status request")
+
+		targets := healthMonitor.GetTargets()
+		healthStatuses := make(map[int]interface{})
+		for id, target := range targets {
+			healthStatuses[id] = map[string]interface{}{
+				"status":     target.Status.String(),
+				"lastCheck":  target.LastCheck.Format(time.RFC3339),
+				"checkCount": target.CheckCount,
+				"lastError":  target.LastError,
+				"config":     target.Config,
+			}
+		}
+
+		err := client.SendMessage("newt/healthcheck/status", map[string]interface{}{
+			"targets": healthStatuses,
+		})
+		if err != nil {
+			logger.Error("Failed to send health check status response: %v", err)
+		}
+	})
+
 	client.OnConnect(func() error {
 		publicKey = privateKey.PublicKey()
 		logger.Debug("Public key: %s", publicKey)
@@ -943,6 +1128,10 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 	// Close clients first (including WGTester)
 	closeClients()
+
+	if healthMonitor != nil {
+		healthMonitor.Stop()
+	}
 
 	if dev != nil {
 		dev.Close()

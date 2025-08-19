@@ -296,6 +296,13 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 		n, remoteAddr, err := conn.ReadFrom(buffer)
 		if err != nil {
 			if !pm.running {
+				// Clean up all connections when stopping
+				clientsMutex.Lock()
+				for _, targetConn := range clientConns {
+					targetConn.Close()
+				}
+				clientConns = nil
+				clientsMutex.Unlock()
 				return
 			}
 
@@ -340,22 +347,32 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			clientConns[clientKey] = targetConn
 			clientsMutex.Unlock()
 
-			go func() {
+			go func(clientKey string, targetConn *net.UDPConn, remoteAddr net.Addr) {
+				defer func() {
+					// Always clean up when this goroutine exits
+					clientsMutex.Lock()
+					if storedConn, exists := clientConns[clientKey]; exists && storedConn == targetConn {
+						delete(clientConns, clientKey)
+						targetConn.Close()
+					}
+					clientsMutex.Unlock()
+				}()
+
 				buffer := make([]byte, 65507)
 				for {
 					n, _, err := targetConn.ReadFromUDP(buffer)
 					if err != nil {
 						logger.Error("Error reading from target: %v", err)
-						return
+						return // defer will handle cleanup
 					}
 
 					_, err = conn.WriteTo(buffer[:n], remoteAddr)
 					if err != nil {
 						logger.Error("Error writing to client: %v", err)
-						return
+						return // defer will handle cleanup
 					}
 				}
-			}()
+			}(clientKey, targetConn, remoteAddr)
 		}
 
 		_, err = targetConn.Write(buffer[:n])
