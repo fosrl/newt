@@ -44,7 +44,7 @@ When Newt receives WireGuard control messages, it will use the information encod
 -   `tls-client-cert` (optional): Client certificate (p12 or pfx) for mTLS. See [mTLS](#mtls)
 -   `docker-enforce-network-validation` (optional): Validate the container target is on the same network as the newt process. Default: false
 -   `health-file` (optional): Check if connection to WG server (pangolin) is ok. creates a file if ok, removes it if not ok. Can be used with docker healtcheck to restart newt
--   `accept-clients` (optional): Enable WireGuard server mode to accept incoming olm client connections. Default: false
+-   `accept-clients` (optional): Enable WireGuard server mode to accept incoming newt client connections. Default: false
     -   `generateAndSaveKeyTo` (optional): Path to save generated private key
     -   `native` (optional): Use native WireGuard interface when accepting clients (requires WireGuard kernel module and Linux, must run as root). Default: false (uses userspace netstack)
         -   `interface` (optional): Name of the WireGuard interface. Default: newt
@@ -73,6 +73,30 @@ All CLI arguments can be set using environment variables as an alternative to co
 -   `INTERFACE`: Name of the WireGuard interface. Default: newt (equivalent to `--interface`)
 -   `KEEP_INTERFACE`: Keep the WireGuard interface after shutdown. Default: false (equivalent to `--keep-interface`)
 -   `CONFIG_FILE`: Load the config json from this file instead of in the home folder.
+
+## Loading secrets from files
+
+You can use `CONFIG_FILE` to define a location of a config file to store the credentials between runs. 
+
+```
+$ cat ~/.config/newt-client/config.json
+{
+  "id": "spmzu8rbpzj1qq6",
+  "secret": "f6v61mjutwme2kkydbw3fjo227zl60a2tsf5psw9r25hgae3",
+  "endpoint": "https://pangolin.fossorial.io",
+  "tlsClientCert": ""
+}
+```
+
+This file is also written to when newt first starts up. So you do not need to run every time with --id and secret if you have run it once! 
+
+Default locations: 
+
+- **macOS**: `~/Library/Application Support/newt-client/config.json`
+- **Windows**: `%PROGRAMDATA%\newt\newt-client\config.json`
+- **Linux/Others**: `~/.config/newt-client/config.json`
+
+## Examples
 
 **Note**: When both environment variables and CLI arguments are provided, CLI arguments take precedence.
 
