@@ -22,17 +22,25 @@
         system:
         let
           pkgs = pkgsFor system;
+
+          # Update version when releasing
+          version = "1.4.1";
+
+          # Update the version in a new source tree
+          srcWithReplacedVersion = pkgs.runCommand "newt-src-with-version" { } ''
+            cp -r ${./.} $out
+            chmod -R +w $out
+            rm -rf $out/.git $out/result $out/.envrc $out/.direnv
+            sed -i "s/version_replaceme/${version}/g" $out/main.go
+          '';
         in
         {
           default = self.packages.${system}.pangolin-newt;
           pangolin-newt = pkgs.buildGoModule {
             pname = "pangolin-newt";
-            version = "1.4.0";
-
-            src = ./.;
-
-            vendorHash = "sha256-V8sq7XD/HJFKjhggrDWPdEEq3hjz0IHzpybQXA8Z/pg=";
-
+            version = version;
+            src = srcWithReplacedVersion;
+            vendorHash = "sha256-PENsCO2yFxLVZNPgx2OP+gWVNfjJAfXkwWS7tzlm490=";
             meta = with pkgs.lib; {
               description = "A tunneling client for Pangolin";
               homepage = "https://github.com/fosrl/newt";
