@@ -53,22 +53,55 @@ type Network struct {
 	DNSNames            []string `json:"dnsNames,omitempty"`
 }
 
+// Strcuture parts of docker api endpoint
+type dockerHost struct {
+	protocol string // e.g. unix, http, tcp, ssh
+	address  string // e.g. "/var/run/docker.sock" or "host:port"
+}
+
+// Parse the docker api endpoint into its parts
+func parseDockerHost(raw string) (dockerHost, error) {
+	switch {
+	case strings.HasPrefix(raw, "unix://"):
+		return dockerHost{"unix", strings.TrimPrefix(raw, "unix://")}, nil
+	case strings.HasPrefix(raw, "ssh://"):
+		// SSH is treated as TCP-like transport by the docker client
+		return dockerHost{"ssh", strings.TrimPrefix(raw, "ssh://")}, nil
+	case strings.HasPrefix(raw, "tcp://"), strings.HasPrefix(raw, "http://"), strings.HasPrefix(raw, "https://"):
+		s := raw
+		s = strings.TrimPrefix(s, "tcp://")
+		s = strings.TrimPrefix(s, "http://")
+		s = strings.TrimPrefix(s, "https://")
+		return dockerHost{"tcp", s}, nil
+	default:
+		// default fallback to unix
+		return dockerHost{"unix", raw}, nil
+	}
+}
+
 // CheckSocket checks if Docker socket is available
 func CheckSocket(socketPath string) bool {
 	// Use the provided socket path or default to standard location
 	if socketPath == "" {
-		socketPath = "/var/run/docker.sock"
+		socketPath = "unix:///var/run/docker.sock"
 	}
-
-	// Try to create a connection to the Docker socket
-	conn, err := net.Dial("unix", socketPath)
+	host, err := parseDockerHost(socketPath)
 	if err != nil {
-		logger.Debug("Docker socket not available at %s: %v", socketPath, err)
+		logger.Debug("Invalid Docker socket path '%s': %v", socketPath, err)
+		return false
+	}
+	protocol := host.protocol
+	addr := host.address
+
+	// ssh might need different verification, but tcp works for basic reachability
+	conn, err := net.DialTimeout(protocol, addr, 2*time.Second)
+	if err != nil {
+		logger.Debug("Docker not reachable via %s at %s: %v", protocol, addr, err)
 		return false
 	}
 	defer conn.Close()
 
-	logger.Debug("Docker socket is available at %s", socketPath)
+	logger.Debug("Docker reachable via %s at %s", protocol, addr)
 	return true
 }
 
@@ -132,7 +165,7 @@ func ListContainers(socketPath string, enforceNetworkValidation bool) ([]Contain
 
 	// Create client with custom socket path
 	cli, err := client.NewClientWithOpts(
-		client.WithHost("unix://"+socketPath),
+		client.WithHost(socketPath),
 		client.WithAPIVersionNegotiation(),
 	)
 	if err != nil {
@@ -181,7 +214,6 @@ func ListContainers(socketPath string, enforceNetworkValidation bool) ([]Contain
 		if err == nil && containerInfo.Config != nil {
 			hostname = containerInfo.Config.Hostname
 		}
-
 
 		// Skip host container if set
 		if hostContainerId != "" && c.ID == hostContainerId {
