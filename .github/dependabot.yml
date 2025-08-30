@@ -33,3 +33,8 @@ updates:
       minor-updates:
         update-types:
           - "minor"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

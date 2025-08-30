@@ -1,6 +1,6 @@
 module github.com/fosrl/newt
 
-go 1.24
+go 1.25
 
 require (
 	github.com/docker/docker v28.3.3+incompatible
