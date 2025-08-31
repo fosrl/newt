@@ -24,7 +24,7 @@
           pkgs = pkgsFor system;
 
           # Update version when releasing
-          version = "1.4.1";
+          version = "1.4.2";
 
           # Update the version in a new source tree
           srcWithReplacedVersion = pkgs.runCommand "newt-src-with-version" { } ''
