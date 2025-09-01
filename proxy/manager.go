@@ -325,9 +325,11 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			continue
 		}
 
-		clientKey := remoteAddr.String()
+		// Use only the client IP as the key, not IP:port
+		// This ensures all packets from the same client reuse the same target connection
+		clientIP := remoteAddr.(*net.UDPAddr).IP.String()
 		clientsMutex.RLock()
-		targetConn, exists := clientConns[clientKey]
+		targetConn, exists := clientConns[clientIP]
 		clientsMutex.RUnlock()
 
 		if !exists {
@@ -344,15 +346,15 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			}
 
 			clientsMutex.Lock()
-			clientConns[clientKey] = targetConn
+			clientConns[clientIP] = targetConn
 			clientsMutex.Unlock()
 
-			go func(clientKey string, targetConn *net.UDPConn, remoteAddr net.Addr) {
+			go func(clientIP string, targetConn *net.UDPConn, remoteAddr net.Addr) {
 				defer func() {
 					// Always clean up when this goroutine exits
 					clientsMutex.Lock()
-					if storedConn, exists := clientConns[clientKey]; exists && storedConn == targetConn {
-						delete(clientConns, clientKey)
+					if storedConn, exists := clientConns[clientIP]; exists && storedConn == targetConn {
+						delete(clientConns, clientIP)
 						targetConn.Close()
 					}
 					clientsMutex.Unlock()
@@ -372,7 +374,7 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 						return // defer will handle cleanup
 					}
 				}
-			}(clientKey, targetConn, remoteAddr)
+			}(clientIP, targetConn, remoteAddr)
 		}
 
 		_, err = targetConn.Write(buffer[:n])
@@ -380,7 +382,7 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			logger.Error("Error writing to target: %v", err)
 			targetConn.Close()
 			clientsMutex.Lock()
-			delete(clientConns, clientKey)
+			delete(clientConns, clientIP)
 			clientsMutex.Unlock()
 		}
 	}
