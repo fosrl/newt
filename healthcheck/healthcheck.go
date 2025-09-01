@@ -2,6 +2,7 @@ package healthcheck
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -66,20 +67,31 @@ type StatusChangeCallback func(targets map[int]*Target)
 
 // Monitor manages health check targets and their monitoring
 type Monitor struct {
-	targets  map[int]*Target
-	mutex    sync.RWMutex
-	callback StatusChangeCallback
-	client   *http.Client
+	targets     map[int]*Target
+	mutex       sync.RWMutex
+	callback    StatusChangeCallback
+	client      *http.Client
+	enforceCert bool
 }
 
 // NewMonitor creates a new health check monitor
-func NewMonitor(callback StatusChangeCallback) *Monitor {
-	logger.Info("Creating new health check monitor")
+func NewMonitor(callback StatusChangeCallback, enforceCert bool) *Monitor {
+	logger.Info("Creating new health check monitor with certificate enforcement: %t", enforceCert)
+
+	// Configure TLS settings based on certificate enforcement
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: !enforceCert,
+		},
+	}
+
 	return &Monitor{
-		targets:  make(map[int]*Target),
-		callback: callback,
+		targets:     make(map[int]*Target),
+		callback:    callback,
+		enforceCert: enforceCert,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: transport,
 		},
 	}
 }
@@ -366,6 +378,11 @@ func (m *Monitor) performHealthCheck(target *Target) {
 
 	logger.Debug("Target %d: performing health check %d to %s",
 		target.Config.ID, target.CheckCount, url)
+
+	if target.Config.Scheme == "https" {
+		logger.Debug("Target %d: HTTPS health check with certificate enforcement: %t",
+			target.Config.ID, m.enforceCert)
+	}
 
 	// Create request
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(target.Config.Timeout)*time.Second)

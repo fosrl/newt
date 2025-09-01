@@ -114,6 +114,7 @@ var (
 	authorizedKeysFile                 string
 	preferEndpoint                     string
 	healthMonitor                      *healthcheck.Monitor
+	enforceHealthcheckCert             bool
 
 	// New mTLS configuration variables
 	tlsClientCert string
@@ -138,10 +139,12 @@ func main() {
 	keepInterfaceEnv := os.Getenv("KEEP_INTERFACE")
 	acceptClientsEnv := os.Getenv("ACCEPT_CLIENTS")
 	useNativeInterfaceEnv := os.Getenv("USE_NATIVE_INTERFACE")
+	enforceHealthcheckCertEnv := os.Getenv("ENFORCE_HC_CERT")
 
 	keepInterface = keepInterfaceEnv == "true"
 	acceptClients = acceptClientsEnv == "true"
 	useNativeInterface = useNativeInterfaceEnv == "true"
+	enforceHealthcheckCert = enforceHealthcheckCertEnv == "true"
 
 	dockerSocket = os.Getenv("DOCKER_SOCKET")
 	pingIntervalStr := os.Getenv("PING_INTERVAL")
@@ -206,8 +209,8 @@ func main() {
 	if acceptClientsEnv == "" {
 		flag.BoolVar(&acceptClients, "accept-clients", false, "Accept clients on the WireGuard interface")
 	}
-	if tlsPrivateKey == "" {
-		flag.StringVar(&tlsPrivateKey, "tls-client-cert", "", "Path to client certificate used for mTLS")
+	if enforceHealthcheckCertEnv == "" {
+		flag.BoolVar(&enforceHealthcheckCert, "enforce-hc-cert", false, "Enforce certificate validation for health checks (default: false, accepts any cert)")
 	}
 	if dockerSocket == "" {
 		flag.StringVar(&dockerSocket, "docker-socket", "", "Path or address to Docker socket (typically unix:///var/run/docker.sock)")
@@ -364,6 +367,7 @@ func main() {
 	logger.Debug("Endpoint: %v", endpoint)
 	logger.Debug("Log Level: %v", logLevel)
 	logger.Debug("Docker Network Validation Enabled: %v", dockerEnforceNetworkValidationBool)
+	logger.Debug("Health Check Certificate Enforcement: %v", enforceHealthcheckCert)
 
 	// Add new TLS debug logging
 	if tlsClientCert != "" {
@@ -429,7 +433,7 @@ func main() {
 		if err != nil {
 			logger.Error("Failed to send health check status update: %v", err)
 		}
-	})
+	}, enforceHealthcheckCert)
 
 	var pingWithRetryStopChan chan struct{}
 
