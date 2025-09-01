@@ -175,19 +175,29 @@ func (c *Client) SendMessage(messageType string, data interface{}) error {
 func (c *Client) SendMessageInterval(messageType string, data interface{}, interval time.Duration) (stop func()) {
 	stopChan := make(chan struct{})
 	go func() {
+		count := 0
+		maxAttempts := 10
+
 		err := c.SendMessage(messageType, data) // Send immediately
 		if err != nil {
 			logger.Error("Failed to send initial message: %v", err)
 		}
+		count++
+
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
+				if count >= maxAttempts {
+					logger.Info("SendMessageInterval timed out after %d attempts for message type: %s", maxAttempts, messageType)
+					return
+				}
 				err = c.SendMessage(messageType, data)
 				if err != nil {
 					logger.Error("Failed to send message: %v", err)
 				}
+				count++
 			case <-stopChan:
 				return
 			}
