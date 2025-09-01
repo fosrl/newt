@@ -37,6 +37,7 @@ When Newt receives WireGuard control messages, it will use the information encod
 -   `mtu` (optional): MTU for the internal WG interface. Default: 1280
 -   `dns` (optional): DNS server to use to resolve the endpoint. Default: 8.8.8.8
 -   `log-level` (optional): The log level to use (DEBUG, INFO, WARN, ERROR, FATAL). Default: INFO
+-   `enforce-hc-cert` (optional): Enforce certificate validation for health checks. Default: false (accepts any cert)
 -   `docker-socket` (optional): Set the Docker socket to use the container discovery integration
 -   `ping-interval` (optional): Interval for pinging the server. Default: 3s
 -   `ping-timeout` (optional): Timeout for each ping. Default: 5s
@@ -72,6 +73,7 @@ All CLI arguments can be set using environment variables as an alternative to co
 -   `TLS_CLIENT_KEY`: Path to private key for mTLS (equivalent to `--tls-client-key`)
 -   `TLS_CA_CERT`: Path to CA certificate to verify server (equivalent to `--tls-ca-cert`)
 -   `DOCKER_ENFORCE_NETWORK_VALIDATION`: Validate container targets are on same network. Default: false (equivalent to `--docker-enforce-network-validation`)
+-   `ENFORCE_HC_CERT`: Enforce certificate validation for health checks. Default: false (equivalent to `--enforce-hc-cert`)
 -   `HEALTH_FILE`: Path to health file for connection monitoring (equivalent to `--health-file`)
 -   `ACCEPT_CLIENTS`: Enable WireGuard server mode. Default: false (equivalent to `--accept-clients`)
 -   `GENERATE_AND_SAVE_KEY_TO`: Path to save generated private key (equivalent to `--generateAndSaveKeyTo`)
