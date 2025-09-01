@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -281,8 +282,9 @@ func (c *Client) getToken() (string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		logger.Error("Failed to get token with status code: %d", resp.StatusCode)
-		return "", fmt.Errorf("failed to get token with status code: %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		logger.Error("Failed to get token with status code: %d, body: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("failed to get token with status code: %d, body: %s", resp.StatusCode, string(body))
 	}
 
 	var tokenResp TokenResponse
