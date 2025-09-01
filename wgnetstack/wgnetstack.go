@@ -399,6 +399,10 @@ func (s *WireGuardService) SetOnNetstackClose(callback func()) {
 }
 
 func (s *WireGuardService) LoadRemoteConfig() error {
+	if s.stopGetConfig != nil {
+		s.stopGetConfig()
+		s.stopGetConfig = nil
+	}
 	s.stopGetConfig = s.client.SendMessageInterval("newt/wg/get-config", map[string]interface{}{
 		"publicKey": s.key.PublicKey().String(),
 		"port":      s.Port,

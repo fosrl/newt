@@ -1199,6 +1199,10 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		logger.Info("Websocket connected")
 
 		if !connected {
+			// make sure the stop function is called
+			if stopFunc != nil {
+				stopFunc()
+			}
 			// request from the server the list of nodes to ping at newt/ping/request
 			stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
 			logger.Info("Requesting exit nodes from server")
