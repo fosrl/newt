@@ -73,8 +73,11 @@ func parseDockerHost(raw string) (dockerHost, error) {
 		s = strings.TrimPrefix(s, "http://")
 		s = strings.TrimPrefix(s, "https://")
 		return dockerHost{"tcp", s}, nil
+	case strings.HasPrefix(raw, "/"):
+		// Absolute path without scheme - treat as unix socket
+		return dockerHost{"unix", raw}, nil
 	default:
-		// default fallback to unix
+		// For relative paths or other formats, also default to unix
 		return dockerHost{"unix", raw}, nil
 	}
 }
@@ -85,6 +88,13 @@ func CheckSocket(socketPath string) bool {
 	if socketPath == "" {
 		socketPath = "unix:///var/run/docker.sock"
 	}
+
+	// Ensure the socket path is properly formatted
+	if !strings.Contains(socketPath, "://") {
+		// If no scheme provided, assume unix socket
+		socketPath = "unix://" + socketPath
+	}
+
 	host, err := parseDockerHost(socketPath)
 	if err != nil {
 		logger.Debug("Invalid Docker socket path '%s': %v", socketPath, err)
@@ -149,7 +159,13 @@ func IsWithinHostNetwork(socketPath string, targetAddress string, targetPort int
 func ListContainers(socketPath string, enforceNetworkValidation bool) ([]Container, error) {
 	// Use the provided socket path or default to standard location
 	if socketPath == "" {
-		socketPath = "/var/run/docker.sock"
+		socketPath = "unix:///var/run/docker.sock"
+	}
+
+	// Ensure the socket path is properly formatted for the Docker client
+	if !strings.Contains(socketPath, "://") {
+		// If no scheme provided, assume unix socket
+		socketPath = "unix://" + socketPath
 	}
 
 	// Used to filter down containers returned to Pangolin
