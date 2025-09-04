@@ -186,7 +186,7 @@ func main() {
 		flag.StringVar(&mtu, "mtu", "1280", "MTU to use")
 	}
 	if dns == "" {
-		flag.StringVar(&dns, "dns", "8.8.8.8", "DNS server to use")
+		flag.StringVar(&dns, "dns", "9.9.9.9", "DNS server to use")
 	}
 	if logLevel == "" {
 		flag.StringVar(&logLevel, "log-level", "INFO", "Log level (DEBUG, INFO, WARN, ERROR, FATAL)")
