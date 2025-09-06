@@ -605,10 +605,19 @@ func (s *WireGuardService) addPeerToDevice(peer Peer) error {
 
 	// Add endpoint if specified
 	if peer.Endpoint != "" {
-		config += fmt.Sprintf("\nendpoint=%s", peer.Endpoint)
+		// Reformat the endpoint if it's a non-bracketed IPv6 address
+		formattedEndpoint := peer.Endpoint
+		if strings.Contains(formattedEndpoint, ":") && !strings.HasPrefix(formattedEndpoint, "[") {
+			lastColon := strings.LastIndex(formattedEndpoint, ":")
+			if strings.Count(formattedEndpoint, ":") > 1 {
+				host := formattedEndpoint[:lastColon]
+				port := formattedEndpoint[lastColon+1:]
+				formattedEndpoint = fmt.Sprintf("[%s]:%s", host, port)
+			}
+		}
+		config += fmt.Sprintf("\nendpoint=%s", formattedEndpoint)
 	}
 
-	// Add persistent keepalive
 	config += "\npersistent_keepalive_interval=25"
 
 	// Apply the configuration
@@ -935,33 +944,37 @@ func (s *WireGuardService) sendUDPHolePunch(serverAddr string) error {
 		return nil
 	}
 
-	// Parse server address
-	serverSplit := strings.Split(serverAddr, ":")
-	if len(serverSplit) < 2 {
-		return fmt.Errorf("invalid server address format, expected hostname:port")
-	}
-
-	serverHostname := serverSplit[0]
-	serverPort, err := strconv.ParseUint(serverSplit[1], 10, 16)
+	serverHostname, serverPortStr, err := net.SplitHostPort(serverAddr)
 	if err != nil {
-		return fmt.Errorf("failed to parse server port: %v", err)
+		return fmt.Errorf("failed to parse server address '%s': %v", serverAddr, err)
 	}
 
-	// Resolve server hostname to IP
-	serverIPAddr := network.HostToAddr(serverHostname)
-	if serverIPAddr == nil {
-		return fmt.Errorf("failed to resolve server hostname")
+	serverPort, err := strconv.ParseUint(serverPortStr, 10, 16)
+	if err != nil {
+		return fmt.Errorf("failed to parse server port from '%s': %v", serverPortStr, err)
 	}
 
-	// Create local UDP address using the same port as WireGuard
+	var serverIPAddr net.IP
+	ip := net.ParseIP(serverHostname)
+
+	if ip != nil {
+		serverIPAddr = ip
+	} else {
+		serverIPAddr = network.HostToAddr(serverHostname)
+		if serverIPAddr == nil {
+			return fmt.Errorf("failed to resolve server hostname: %s", serverHostname)
+		}
+	}
+
+	// Create a local UDP address that is protocol-agnostic
 	localAddr := &net.UDPAddr{
-		IP:   net.IPv4zero,
 		Port: int(s.Port),
+		// IP is left nil (unspecified), letting the OS choose correctly (0.0.0.0 for v4, :: for v6)
 	}
 
 	// Create remote server address
 	remoteAddr := &net.UDPAddr{
-		IP:   serverIPAddr.IP,
+		IP:   serverIPAddr,
 		Port: int(serverPort),
 	}
 

@@ -291,7 +291,7 @@ func main() {
 		fmt.Println("Newt version " + newtVersion)
 		os.Exit(0)
 	} else {
-		logger.Info("Newt version " + newtVersion)
+		logger.Info("Newt version %s", newtVersion)
 	}
 
 	if err := updates.CheckForUpdate("fosrl", "newt", newtVersion); err != nil {
@@ -1138,9 +1138,9 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		if err := healthMonitor.EnableTarget(requestData.ID); err != nil {
-			logger.Error("Failed to enable health check target %s: %v", requestData.ID, err)
+			logger.Error("Failed to enable health check target %d: %v", requestData.ID, err)
 		} else {
-			logger.Info("Enabled health check target: %s", requestData.ID)
+			logger.Info("Enabled health check target: %d", requestData.ID)
 		}
 	})
 
@@ -1163,9 +1163,9 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		if err := healthMonitor.DisableTarget(requestData.ID); err != nil {
-			logger.Error("Failed to disable health check target %s: %v", requestData.ID, err)
+			logger.Error("Failed to disable health check target %d: %v", requestData.ID, err)
 		} else {
-			logger.Info("Disabled health check target: %s", requestData.ID)
+			logger.Info("Disabled health check target: %d", requestData.ID)
 		}
 	})
 
