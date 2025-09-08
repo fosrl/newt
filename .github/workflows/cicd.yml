@@ -31,7 +31,7 @@ jobs:
               run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
 
             - name: Install Go
-              uses: actions/setup-go@v5
+              uses: actions/setup-go@v6
               with:
                   go-version: 1.25
 
