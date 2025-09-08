@@ -74,6 +74,11 @@ type ExitNodePingResult struct {
 	WasPreviouslyConnected bool    `json:"wasPreviouslyConnected"`
 }
 
+type BlueprintResult struct {
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
+}
+
 // Custom flag type for multiple CA files
 type stringSlice []string
 
@@ -115,6 +120,7 @@ var (
 	preferEndpoint                     string
 	healthMonitor                      *healthcheck.Monitor
 	enforceHealthcheckCert             bool
+	blueprintFile                      string
 
 	// New mTLS configuration variables
 	tlsClientCert string
@@ -172,6 +178,7 @@ func main() {
 	if tlsPrivateKey == "" {
 		tlsPrivateKey = os.Getenv("TLS_CLIENT_CERT")
 	}
+	blueprintFile = os.Getenv("BLUEPRINT_FILE")
 
 	if endpoint == "" {
 		flag.StringVar(&endpoint, "endpoint", "", "Endpoint of your pangolin server")
@@ -270,6 +277,9 @@ func main() {
 	}
 	if healthFile == "" {
 		flag.StringVar(&healthFile, "health-file", "", "Path to health file (if unset, health file won't be written)")
+	}
+	if blueprintFile == "" {
+		flag.StringVar(&blueprintFile, "blueprint-file", "", "Path to blueprint file (if unset, no blueprint will be applied)")
 	}
 
 	// do a --version check
@@ -1193,6 +1203,29 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 	})
 
+	// Register handler for getting health check status
+	client.RegisterHandler("newt/blueprint/results", func(msg websocket.WSMessage) {
+		logger.Debug("Received blueprint results message")
+
+		var blueprintResult BlueprintResult
+
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Info("Error marshaling data: %v", err)
+			return
+		}
+		if err := json.Unmarshal(jsonData, &blueprintResult); err != nil {
+			logger.Info("Error unmarshaling config results data: %v", err)
+			return
+		}
+
+		if blueprintResult.Success {
+			logger.Info("Blueprint applied successfully!")
+		} else {
+			logger.Warn("Blueprint application failed: %s", blueprintResult.Message)
+		}
+	})
+
 	client.OnConnect(func() error {
 		publicKey = privateKey.PublicKey()
 		logger.Debug("Public key: %s", publicKey)
@@ -1215,6 +1248,8 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			"newtVersion":         newtVersion,
 			"backwardsCompatible": true,
 		})
+
+		sendBlueprint(client)
 
 		if err != nil {
 			logger.Error("Failed to send registration message: %v", err)
