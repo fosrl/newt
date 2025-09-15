@@ -1,0 +1,37 @@
+resources:
+  resource-nice-id:
+    name: this is my resource
+    protocol: http
+    full-domain: level1.test3.example.com
+    host-header: example.com
+    tls-server-name: example.com
+    auth:
+      pincode: 123456
+      password: sadfasdfadsf
+      sso-enabled: true
+      sso-roles:
+      - Member
+      sso-users:
+      - owen@fossorial.io
+      whitelist-users:
+      - owen@fossorial.io
+    targets:
+    # - site: glossy-plains-viscacha-rat
+    - hostname: localhost
+      method: http
+      port: 8000
+      healthcheck:
+        port: 8000
+        hostname: localhost
+    # - site: glossy-plains-viscacha-rat
+    - hostname: localhost
+      method: http
+      port: 8001
+  resource-nice-id2:
+    name: this is other resource
+    protocol: tcp
+    proxy-port: 3000
+    targets:
+    # - site: glossy-plains-viscacha-rat
+    - hostname: localhost
+      port: 3000

@@ -478,7 +478,7 @@ func main() {
 
 	// Register handlers for different message types
 	client.RegisterHandler("newt/wg/connect", func(msg websocket.WSMessage) {
-		logger.Info("Received registration message")
+		logger.Debug("Received registration message")
 		if stopFunc != nil {
 			stopFunc()     // stop the ws from sending more requests
 			stopFunc = nil // reset stopFunc to nil to avoid double stopping
@@ -571,7 +571,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		if err != nil {
 			logger.Warn("Initial reliable ping failed, but continuing: %v", err)
 		} else {
-			logger.Info("Initial connection test successful")
+			logger.Debug("Initial connection test successful")
 		}
 
 		pingWithRetryStopChan, _ = pingWithRetry(tnet, wgData.ServerIP, pingTimeout)
@@ -610,7 +610,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		if err := healthMonitor.AddTargets(wgData.HealthCheckTargets); err != nil {
 			logger.Error("Failed to bulk add health check targets: %v", err)
 		} else {
-			logger.Info("Successfully added %d health check targets", len(wgData.HealthCheckTargets))
+			logger.Debug("Successfully added %d health check targets", len(wgData.HealthCheckTargets))
 		}
 
 		err = pm.Start()
@@ -657,7 +657,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	})
 
 	client.RegisterHandler("newt/ping/exitNodes", func(msg websocket.WSMessage) {
-		logger.Info("Received ping message")
+		logger.Debug("Received ping message")
 		if stopFunc != nil {
 			stopFunc()     // stop the ws from sending more requests
 			stopFunc = nil // reset stopFunc to nil to avoid double stopping
@@ -979,7 +979,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		if err != nil {
 			logger.Error("Failed to send Docker container list: %v", err)
 		} else {
-			logger.Info("Docker container list sent, count: %d", len(containers))
+			logger.Debug("Docker container list sent, count: %d", len(containers))
 		}
 	})
 
@@ -1095,7 +1095,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		if err := healthMonitor.AddTargets(config.Targets); err != nil {
 			logger.Error("Failed to add health check targets: %v", err)
 		} else {
-			logger.Info("Added %d health check targets", len(config.Targets))
+			logger.Debug("Added %d health check targets", len(config.Targets))
 		}
 
 		logger.Debug("Health check targets added: %+v", config.Targets)
@@ -1238,7 +1238,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			}
 			// request from the server the list of nodes to ping at newt/ping/request
 			stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
-			logger.Info("Requesting exit nodes from server")
+			logger.Debug("Requesting exit nodes from server")
 			clientsOnConnect()
 		}
 
