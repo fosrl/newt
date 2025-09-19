@@ -169,7 +169,7 @@ func main() {
 	// Legacy PKCS12 support (deprecated)
 	tlsPrivateKey = os.Getenv("TLS_CLIENT_CERT_PKCS12")
 	// Keep backward compatibility with old environment variable name
-	if tlsPrivateKey == "" {
+	if tlsPrivateKey == "" && tlsClientKey == "" && len(tlsClientCAs) == 0 {
 		tlsPrivateKey = os.Getenv("TLS_CLIENT_CERT")
 	}
 
