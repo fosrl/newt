@@ -1,4 +1,7 @@
 # Newt
+[![PkgGoDev](https://pkg.go.dev/badge/github.com/fosrl/newt)](https://pkg.go.dev/github.com/fosrl/newt)
+[![GitHub License](https://img.shields.io/github/license/fosrl/newt)](https://github.com/fosrl/newt/blob/main/LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/github.com/fosrl/newt)](https://goreportcard.com/report/github.com/fosrl/newt)
 
 Newt is a fully user space [WireGuard](https://www.wireguard.com/) tunnel client and TCP/UDP proxy, designed to securely expose private resources controlled by Pangolin. By using Newt, you don't need to manage complex WireGuard tunnels and NATing.
 
