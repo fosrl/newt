@@ -517,9 +517,32 @@ func (s *WireGuardService) addPeer(peer Peer) error {
 
 	var peerConfig wgtypes.PeerConfig
 	if peer.Endpoint != "" {
-		endpoint, err := net.ResolveUDPAddr("udp", peer.Endpoint)
+		// This logic correctly handles IPv4, IPv6, and hostnames.
+		formattedEndpoint := peer.Endpoint
+		host, _, err := net.SplitHostPort(formattedEndpoint)
+		if err == nil {
+			// It's a host:port string, check if the host is a literal IPv6
+			ip := net.ParseIP(host)
+			if ip != nil && ip.To4() == nil { // It is a literal IPv6
+				// Already correctly formatted by SplitHostPort logic, do nothing
+			}
+		} else {
+			// Not a standard host:port string, could be IPv6 without brackets.
+			// Let's try to parse it as such.
+			lastColon := strings.LastIndex(formattedEndpoint, ":")
+			if lastColon != -1 {
+				host := formattedEndpoint[:lastColon]
+				port := formattedEndpoint[lastColon+1:]
+				ip := net.ParseIP(host)
+				if ip != nil && ip.To4() == nil { // It is a literal IPv6
+					formattedEndpoint = fmt.Sprintf("[%s]:%s", host, port)
+				}
+			}
+		}
+
+		endpoint, err := net.ResolveUDPAddr("udp", formattedEndpoint)
 		if err != nil {
-			return fmt.Errorf("failed to resolve endpoint address: %w", err)
+			return fmt.Errorf("failed to resolve endpoint address '%s': %w", formattedEndpoint, err)
 		}
 
 		peerConfig = wgtypes.PeerConfig{
@@ -539,6 +562,7 @@ func (s *WireGuardService) addPeer(peer Peer) error {
 
 	config := wgtypes.Config{
 		Peers: []wgtypes.PeerConfig{peerConfig},
+		ReplacePeers: false,
 	}
 
 	if err := s.wgClient.ConfigureDevice(s.interfaceName, config); err != nil {
@@ -549,6 +573,7 @@ func (s *WireGuardService) addPeer(peer Peer) error {
 
 	return nil
 }
+
 
 func (s *WireGuardService) handleRemovePeer(msg websocket.WSMessage) {
 	logger.Debug("Received message: %v", msg.Data)
@@ -599,113 +624,113 @@ func (s *WireGuardService) removePeer(publicKey string) error {
 }
 
 func (s *WireGuardService) handleUpdatePeer(msg websocket.WSMessage) {
-	logger.Debug("Received message: %v", msg.Data)
-	// Define a struct to match the incoming message structure with optional fields
-	type UpdatePeerRequest struct {
-		PublicKey  string   `json:"publicKey"`
-		AllowedIPs []string `json:"allowedIps,omitempty"`
-		Endpoint   string   `json:"endpoint,omitempty"`
-	}
-	jsonData, err := json.Marshal(msg.Data)
-	if err != nil {
-		logger.Info("Error marshaling data: %v", err)
-		return
-	}
-	var request UpdatePeerRequest
-	if err := json.Unmarshal(jsonData, &request); err != nil {
-		logger.Info("Error unmarshaling peer data: %v", err)
-		return
-	}
-	// First, get the current peer configuration to preserve any unmodified fields
-	device, err := s.wgClient.Device(s.interfaceName)
-	if err != nil {
-		logger.Info("Error getting WireGuard device: %v", err)
-		return
-	}
-	pubKey, err := wgtypes.ParseKey(request.PublicKey)
-	if err != nil {
-		logger.Info("Error parsing public key: %v", err)
-		return
-	}
-	// Find the existing peer configuration
-	var currentPeer *wgtypes.Peer
-	for _, p := range device.Peers {
-		if p.PublicKey == pubKey {
-			currentPeer = &p
-			break
-		}
-	}
-	if currentPeer == nil {
-		logger.Info("Peer %s not found, cannot update", request.PublicKey)
-		return
-	}
-	// Create the update peer config
-	peerConfig := wgtypes.PeerConfig{
-		PublicKey:  pubKey,
-		UpdateOnly: true,
-	}
-	// Keep the default persistent keepalive of 1 second
-	keepalive := time.Second
-	peerConfig.PersistentKeepaliveInterval = &keepalive
+    logger.Debug("Received message: %v", msg.Data)
+    // Define a struct to match the incoming message structure with optional fields
+    type UpdatePeerRequest struct {
+        PublicKey  string   `json:"publicKey"`
+        AllowedIPs []string `json:"allowedIps,omitempty"`
+        Endpoint   string   `json:"endpoint,omitempty"`
+    }
+    jsonData, err := json.Marshal(msg.Data)
+    if err != nil {
+        logger.Info("Error marshaling data: %v", err)
+        return
+    }
+    var request UpdatePeerRequest
+    if err := json.Unmarshal(jsonData, &request); err != nil {
+        logger.Info("Error unmarshaling peer data: %v", err)
+        return
+    }
+    // First, get the current peer configuration to preserve any unmodified fields
+    device, err := s.wgClient.Device(s.interfaceName)
+    if err != nil {
+        logger.Info("Error getting WireGuard device: %v", err)
+        return
+    }
+    pubKey, err := wgtypes.ParseKey(request.PublicKey)
+    if err != nil {
+        logger.Info("Error parsing public key: %v", err)
+        return
+    }
+    // Find the existing peer configuration
+    var currentPeer *wgtypes.Peer
+    for i := range device.Peers {
+        if device.Peers[i].PublicKey == pubKey {
+            currentPeer = &device.Peers[i]
+            break
+        }
+    }
+    if currentPeer == nil {
+        logger.Info("Peer %s not found, cannot update", request.PublicKey)
+        return
+    }
+    // Create the update peer config
+    peerConfig := wgtypes.PeerConfig{
+        PublicKey:  pubKey,
+        UpdateOnly: true,
+    }
+    // Keep the default persistent keepalive
+    keepalive := 25 * time.Second
+    peerConfig.PersistentKeepaliveInterval = &keepalive
 
-	// Handle Endpoint field special case
-	// If Endpoint is included in the request but empty, we want to remove the endpoint
-	// If Endpoint is not included, we don't modify it
-	endpointSpecified := false
-	for key := range msg.Data.(map[string]interface{}) {
-		if key == "endpoint" {
-			endpointSpecified = true
-			break
-		}
-	}
+    // Handle Endpoint field special case
+    endpointSpecified := false
+    if rawData, ok := msg.Data.(map[string]interface{}); ok {
+        _, endpointSpecified = rawData["endpoint"]
+    }
 
-	// Only update AllowedIPs if provided in the request
-	if len(request.AllowedIPs) > 0 {
-		var allowedIPs []net.IPNet
-		for _, ipStr := range request.AllowedIPs {
-			_, ipNet, err := net.ParseCIDR(ipStr)
-			if err != nil {
-				logger.Info("Error parsing allowed IP %s: %v", ipStr, err)
-				return
-			}
-			allowedIPs = append(allowedIPs, *ipNet)
-		}
-		peerConfig.AllowedIPs = allowedIPs
-		peerConfig.ReplaceAllowedIPs = true
-		logger.Info("Updating AllowedIPs for peer %s", request.PublicKey)
-	} else if endpointSpecified && request.Endpoint == "" {
-		peerConfig.ReplaceAllowedIPs = false
-	}
+    // Only update AllowedIPs if provided in the request
+    if len(request.AllowedIPs) > 0 {
+        var allowedIPs []net.IPNet
+        for _, ipStr := range request.AllowedIPs {
+            _, ipNet, err := net.ParseCIDR(ipStr)
+            if err != nil {
+                logger.Info("Error parsing allowed IP %s: %v", ipStr, err)
+                return
+            }
+            allowedIPs = append(allowedIPs, *ipNet)
+        }
+        peerConfig.AllowedIPs = allowedIPs
+        peerConfig.ReplaceAllowedIPs = true
+        logger.Info("Updating AllowedIPs for peer %s", request.PublicKey)
+    }
 
-	if endpointSpecified {
-		if request.Endpoint != "" {
-			// Update to new endpoint
-			endpoint, err := net.ResolveUDPAddr("udp", request.Endpoint)
-			if err != nil {
-				logger.Info("Error resolving endpoint address %s: %v", request.Endpoint, err)
-				return
-			}
-			peerConfig.Endpoint = endpoint
-			logger.Info("Updating Endpoint for peer %s to %s", request.PublicKey, request.Endpoint)
-		} else {
-			// specify any address to listen for any incoming packets
-			peerConfig.Endpoint = &net.UDPAddr{
-				IP: net.IPv4(127, 0, 0, 1),
-			}
-			logger.Info("Removing Endpoint for peer %s", request.PublicKey)
-		}
-	}
+    if endpointSpecified {
+        if request.Endpoint != "" {
+            // Update to new endpoint using the robust formatting logic
+            formattedEndpoint := request.Endpoint
+            host, port, err := net.SplitHostPort(request.Endpoint)
+            if err == nil {
+                ip := net.ParseIP(host)
+                if ip != nil && ip.To4() == nil {
+                    formattedEndpoint = fmt.Sprintf("[%s]:%s", host, port)
+                }
+            }
+            endpoint, err := net.ResolveUDPAddr("udp", formattedEndpoint)
+            if err != nil {
+                logger.Info("Error resolving endpoint address %s: %v", formattedEndpoint, err)
+                return
+            }
+            peerConfig.Endpoint = endpoint
+            logger.Info("Updating Endpoint for peer %s to %s", request.PublicKey, formattedEndpoint)
+        } else {
+            // Set a valid "any" IP address instead of a nil one.
+            logger.Info("Removing Endpoint for peer %s", request.PublicKey)
+            peerConfig.Endpoint = &net.UDPAddr{IP: net.IPv4zero, Port: 0}
+        }
+    }
 
-	// Apply the configuration update
-	config := wgtypes.Config{
-		Peers: []wgtypes.PeerConfig{peerConfig},
-	}
-	if err := s.wgClient.ConfigureDevice(s.interfaceName, config); err != nil {
-		logger.Info("Error updating peer configuration: %v", err)
-		return
-	}
-	logger.Info("Peer %s updated successfully", request.PublicKey)
+    // Apply the configuration update
+    config := wgtypes.Config{
+        Peers: []wgtypes.PeerConfig{peerConfig},
+    }
+    if err := s.wgClient.ConfigureDevice(s.interfaceName, config); err != nil {
+        logger.Info("Error updating peer configuration: %v", err)
+        return
+    }
+    logger.Info("Peer %s updated successfully", request.PublicKey)
 }
+
 
 func (s *WireGuardService) periodicBandwidthCheck() {
 	ticker := time.NewTicker(10 * time.Second)
@@ -738,15 +763,13 @@ func (s *WireGuardService) calculatePeerBandwidth() ([]PeerBandwidth, error) {
 			LastChecked:      now,
 		}
 
-		var bytesInDiff, bytesOutDiff float64
 		lastReading, exists := s.lastReadings[publicKey]
 
 		if exists {
 			timeDiff := currentReading.LastChecked.Sub(lastReading.LastChecked).Seconds()
 			if timeDiff > 0 {
-				// Calculate bytes transferred since last reading
-				bytesInDiff = float64(currentReading.BytesReceived - lastReading.BytesReceived)
-				bytesOutDiff = float64(currentReading.BytesTransmitted - lastReading.BytesTransmitted)
+				bytesInDiff := float64(currentReading.BytesReceived - lastReading.BytesReceived)
+				bytesOutDiff := float64(currentReading.BytesTransmitted - lastReading.BytesTransmitted)
 
 				// Handle counter wraparound (if the counter resets or overflows)
 				if bytesInDiff < 0 {
@@ -765,37 +788,17 @@ func (s *WireGuardService) calculatePeerBandwidth() ([]PeerBandwidth, error) {
 					BytesIn:   bytesInMB,
 					BytesOut:  bytesOutMB,
 				})
-			} else {
-				// If readings are too close together or time hasn't passed, report 0
-				peerBandwidths = append(peerBandwidths, PeerBandwidth{
-					PublicKey: publicKey,
-					BytesIn:   0,
-					BytesOut:  0,
-				})
 			}
-		} else {
-			// For first reading of a peer, report 0 to establish baseline
-			peerBandwidths = append(peerBandwidths, PeerBandwidth{
-				PublicKey: publicKey,
-				BytesIn:   0,
-				BytesOut:  0,
-			})
 		}
-
-		// Update the last reading
 		s.lastReadings[publicKey] = currentReading
 	}
 
-	// Clean up old peers
+	activePeers := make(map[string]struct{})
+	for _, peer := range device.Peers {
+		activePeers[peer.PublicKey.String()] = struct{}{}
+	}
 	for publicKey := range s.lastReadings {
-		found := false
-		for _, peer := range device.Peers {
-			if peer.PublicKey.String() == publicKey {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if _, found := activePeers[publicKey]; !found {
 			delete(s.lastReadings, publicKey)
 		}
 	}
@@ -807,6 +810,10 @@ func (s *WireGuardService) reportPeerBandwidth() error {
 	bandwidths, err := s.calculatePeerBandwidth()
 	if err != nil {
 		return fmt.Errorf("failed to calculate peer bandwidth: %v", err)
+	}
+
+	if len(bandwidths) == 0 {
+		return nil
 	}
 
 	err = s.client.SendMessage("newt/receive-bandwidth", map[string]interface{}{
@@ -826,26 +833,29 @@ func (s *WireGuardService) sendUDPHolePunch(serverAddr string) error {
 		return nil
 	}
 
-	// Parse server address
-	serverSplit := strings.Split(serverAddr, ":")
-	if len(serverSplit) < 2 {
-		return fmt.Errorf("invalid server address format, expected hostname:port")
-	}
-
-	serverHostname := serverSplit[0]
-	serverPort, err := strconv.ParseUint(serverSplit[1], 10, 16)
+	serverHostname, serverPortStr, err := net.SplitHostPort(serverAddr)
 	if err != nil {
-		return fmt.Errorf("failed to parse server port: %v", err)
+		return fmt.Errorf("failed to parse server address '%s': %v", serverAddr, err)
 	}
 
-	// Resolve server hostname to IP
-	serverIPAddr := network.HostToAddr(serverHostname)
-	if serverIPAddr == nil {
-		return fmt.Errorf("failed to resolve server hostname")
+	serverPort, err := strconv.ParseUint(serverPortStr, 10, 16)
+	if err != nil {
+		return fmt.Errorf("failed to parse server port from '%s': %v", serverPortStr, err)
 	}
 
-	// Get client IP based on route to server
-	clientIP := network.GetClientIP(serverIPAddr.IP)
+	var serverIPAddr net.IP
+	ip := net.ParseIP(serverHostname)
+
+	if ip != nil {
+		serverIPAddr = ip
+	} else {
+		serverIPAddr = network.HostToAddr(serverHostname)
+		if serverIPAddr == nil {
+			return fmt.Errorf("failed to resolve server hostname: %s", serverHostname)
+		}
+	}
+
+	clientIP := network.GetClientIP(serverIPAddr)
 
 	// Create server and client configs
 	server := &network.Server{
@@ -860,9 +870,8 @@ func (s *WireGuardService) sendUDPHolePunch(serverAddr string) error {
 		NewtID: s.newtId,
 	}
 
-	// Setup raw connection with BPF filtering
-	rawConn := network.SetupRawConn(server, client)
-	defer rawConn.Close()
+	conn := network.SetupConn(client)
+	defer conn.Close()
 
 	// Create JSON payload
 	payload := struct {
@@ -886,7 +895,7 @@ func (s *WireGuardService) sendUDPHolePunch(serverAddr string) error {
 	}
 
 	// Send the encrypted packet using the raw connection
-	err = network.SendDataPacket(encryptedPayload, rawConn, server, client)
+	err = network.SendDataPacket(encryptedPayload, conn, server, client)
 	if err != nil {
 		return fmt.Errorf("failed to send UDP packet: %v", err)
 	}
@@ -973,6 +982,11 @@ func (s *WireGuardService) removeInterface() error {
 	// Remove the WireGuard interface
 	link, err := netlink.LinkByName(s.interfaceName)
 	if err != nil {
+		// If the link is not found, we can consider it as successfully removed
+		if _, ok := err.(netlink.LinkNotFoundError); ok {
+			logger.Info("WireGuard interface %s already removed", s.interfaceName)
+			return nil
+		}
 		return fmt.Errorf("failed to get interface: %v", err)
 	}
 
