@@ -368,18 +368,18 @@ func NewEventMonitor(socketPath string, enforceNetworkValidation bool, callback 
 
 // Start begins monitoring Docker events
 func (em *EventMonitor) Start() error {
-	logger.Info("Starting Docker event monitoring")
+	logger.Debug("Starting Docker event monitoring")
 
 	// Filter for container events we care about
 	eventFilters := filters.NewArgs()
 	eventFilters.Add("type", "container")
-	eventFilters.Add("event", "create")
+	// eventFilters.Add("event", "create")
 	eventFilters.Add("event", "start")
 	eventFilters.Add("event", "stop")
-	eventFilters.Add("event", "destroy")
-	eventFilters.Add("event", "die")
-	eventFilters.Add("event", "pause")
-	eventFilters.Add("event", "unpause")
+	// eventFilters.Add("event", "destroy")
+	// eventFilters.Add("event", "die")
+	// eventFilters.Add("event", "pause")
+	// eventFilters.Add("event", "unpause")
 
 	// Start listening for events
 	eventCh, errCh := em.client.Events(em.ctx, events.ListOptions{

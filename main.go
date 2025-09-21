@@ -949,7 +949,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		if err != nil {
 			logger.Error("Failed to send Docker socket check response: %v", err)
 		} else {
-			logger.Info("Docker socket check response sent: available=%t", isAvailable)
+			logger.Debug("Docker socket check response sent: available=%t", isAvailable)
 		}
 	})
 
@@ -1221,7 +1221,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		if blueprintResult.Success {
-			logger.Info("Blueprint applied successfully!")
+			logger.Debug("Blueprint applied successfully!")
 		} else {
 			logger.Warn("Blueprint application failed: %s", blueprintResult.Message)
 		}
@@ -1268,7 +1268,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 	// Initialize Docker event monitoring if Docker socket is available and monitoring is enabled
 	if dockerSocket != "" {
-		logger.Info("Initializing Docker event monitoring")
+		logger.Debug("Initializing Docker event monitoring")
 		dockerEventMonitor, err = docker.NewEventMonitor(dockerSocket, dockerEnforceNetworkValidationBool, func(containers []docker.Container) {
 			// Send updated container list via websocket when Docker events occur
 			logger.Debug("Docker event detected, sending updated container list (%d containers)", len(containers))
@@ -1289,7 +1289,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			if err != nil {
 				logger.Error("Failed to start Docker event monitoring: %v", err)
 			} else {
-				logger.Info("Docker event monitoring started successfully")
+				logger.Debug("Docker event monitoring started successfully")
 			}
 		}
 	}
