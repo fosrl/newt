@@ -56,6 +56,7 @@ When Newt receives WireGuard control messages, it will use the information encod
     -   `native` (optional): Use native WireGuard interface when accepting clients (requires WireGuard kernel module and Linux, must run as root). Default: false (uses userspace netstack)
         -   `interface` (optional): Name of the WireGuard interface. Default: newt
         -   `keep-interface` (optional): Keep the WireGuard interface. Default: false
+-   `blueprint-file` (optional): Path to blueprint file to define Pangolin resources and configurations.
 
 ## Environment Variables
 
@@ -84,6 +85,7 @@ All CLI arguments can be set using environment variables as an alternative to co
 -   `INTERFACE`: Name of the WireGuard interface. Default: newt (equivalent to `--interface`)
 -   `KEEP_INTERFACE`: Keep the WireGuard interface after shutdown. Default: false (equivalent to `--keep-interface`)
 -   `CONFIG_FILE`: Load the config json from this file instead of in the home folder.
+-   `BLUEPRINT_FILE`: Path to blueprint file to define Pangolin resources and configurations. (equivalent to `--blueprint-file`)
 
 ## Loading secrets from files
 
