@@ -152,6 +152,7 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 	}
 
 	var key wgtypes.Key
+	var port uint16
 	// if generateAndSaveKeyTo is provided, generate a private key and save it to the file. if the file already exists, load the key from the file
 	key, err = wgtypes.GeneratePrivateKey()
 	if err != nil {
@@ -177,38 +178,41 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 		}
 	}
 
-	service := &WireGuardService{
-		interfaceName: interfaceName,
-		mtu:           mtu,
-		client:        wsClient,
-		wgClient:      wgClient,
-		key:           key,
-		keyFilePath:   generateAndSaveKeyTo,
-		newtId:        newtId,
-		host:          host,
-		lastReadings:  make(map[string]PeerReading),
-		stopHolepunch: make(chan struct{}),
-	}
-
-	// Get the existing wireguard port (keep this part)
-	device, err := service.wgClient.Device(service.interfaceName)
+	// Get the existing wireguard port
+	device, err := wgClient.Device(interfaceName)
 	if err == nil {
-		service.Port = uint16(device.ListenPort)
-		if service.Port != 0 {
-			logger.Info("WireGuard interface %s already exists with port %d\n", service.interfaceName, service.Port)
+		port = uint16(device.ListenPort)
+		// also set the private key to the existing key
+		key = device.PrivateKey
+		if port != 0 {
+			logger.Info("WireGuard interface %s already exists with port %d\n", interfaceName, port)
 		} else {
-			service.Port, err = FindAvailableUDPPort(49152, 65535)
+			port, err = FindAvailableUDPPort(49152, 65535)
 			if err != nil {
 				fmt.Printf("Error finding available port: %v\n", err)
 				return nil, err
 			}
 		}
 	} else {
-		service.Port, err = FindAvailableUDPPort(49152, 65535)
+		port, err = FindAvailableUDPPort(49152, 65535)
 		if err != nil {
 			fmt.Printf("Error finding available port: %v\n", err)
 			return nil, err
 		}
+	}
+
+	service := &WireGuardService{
+		interfaceName: interfaceName,
+		mtu:           mtu,
+		client:        wsClient,
+		wgClient:      wgClient,
+		key:           key,
+		Port:          port,
+		keyFilePath:   generateAndSaveKeyTo,
+		newtId:        newtId,
+		host:          host,
+		lastReadings:  make(map[string]PeerReading),
+		stopHolepunch: make(chan struct{}),
 	}
 
 	// Register websocket handlers
