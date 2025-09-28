@@ -187,6 +187,13 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 	// Load or generate private key
 	if generateAndSaveKeyTo != "" {
 		if _, err := os.Stat(generateAndSaveKeyTo); os.IsNotExist(err) {
+			// File doesn't exist, save the generated key
+			err = os.WriteFile(generateAndSaveKeyTo, []byte(key.String()), 0600)
+			if err != nil {
+				return nil, fmt.Errorf("failed to save private key: %v", err)
+			}
+		} else {
+			// File exists, read the existing key
 			keyData, err := os.ReadFile(generateAndSaveKeyTo)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read private key: %v", err)
@@ -194,11 +201,6 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 			key, err = wgtypes.ParseKey(strings.TrimSpace(string(keyData)))
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse private key: %v", err)
-			}
-		} else {
-			err = os.WriteFile(generateAndSaveKeyTo, []byte(key.String()), 0600)
-			if err != nil {
-				return nil, fmt.Errorf("failed to save private key: %v", err)
 			}
 		}
 	}
