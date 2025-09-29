@@ -3,7 +3,7 @@ module github.com/fosrl/newt
 go 1.25
 
 require (
-	github.com/docker/docker v28.3.3+incompatible
+	github.com/docker/docker v28.4.0+incompatible
 	github.com/google/gopacket v1.1.19
 	github.com/gorilla/websocket v1.5.3
 	github.com/vishvananda/netlink v1.3.1
@@ -12,6 +12,7 @@ require (
 	golang.org/x/net v0.44.0
 	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
+	gopkg.in/yaml.v3 v3.0.1
 	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c
 	software.sslmate.com/src/go-pkcs12 v0.6.0
 )
@@ -26,7 +27,6 @@ require (
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/josharian/native v1.1.0 // indirect
@@ -51,5 +51,4 @@ require (
 	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
