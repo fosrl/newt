@@ -1,0 +1,47 @@
+body:
+    - type: textarea
+      attributes:
+          label: Summary
+          description: A clear and concise summary of the requested feature.
+      validations:
+          required: true
+
+    - type: textarea
+      attributes:
+          label: Motivation
+          description: |
+              Why is this feature important?
+              Explain the problem this feature would solve or what use case it would enable.
+      validations:
+          required: true
+
+    - type: textarea
+      attributes:
+          label: Proposed Solution
+          description: |
+              How would you like to see this feature implemented?
+              Provide as much detail as possible about the desired behavior, configuration, or changes.
+      validations:
+          required: true
+
+    - type: textarea
+      attributes:
+          label: Alternatives Considered
+          description: Describe any alternative solutions or workarounds you've thought about.
+      validations:
+          required: false
+
+    - type: textarea
+      attributes:
+          label: Additional Context
+          description: Add any other context, mockups, or screenshots about the feature request here.
+      validations:
+          required: false
+
+    - type: markdown
+      attributes:
+          value: |
+              Before submitting, please:
+              - Check if there is an existing issue for this feature.
+              - Clearly explain the benefit and use case.
+              - Be as specific as possible to help contributors evaluate and implement.
