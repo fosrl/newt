@@ -121,6 +121,7 @@ var (
 	healthMonitor                      *healthcheck.Monitor
 	enforceHealthcheckCert             bool
 	blueprintFile                      string
+	noCloud                            bool
 
 	// New mTLS configuration variables
 	tlsClientCert string
@@ -143,15 +144,13 @@ func main() {
 	interfaceName = os.Getenv("INTERFACE")
 	generateAndSaveKeyTo = os.Getenv("GENERATE_AND_SAVE_KEY_TO")
 	keepInterfaceEnv := os.Getenv("KEEP_INTERFACE")
-	acceptClientsEnv := os.Getenv("ACCEPT_CLIENTS")
-	useNativeInterfaceEnv := os.Getenv("USE_NATIVE_INTERFACE")
-	enforceHealthcheckCertEnv := os.Getenv("ENFORCE_HC_CERT")
-
 	keepInterface = keepInterfaceEnv == "true"
+	acceptClientsEnv := os.Getenv("ACCEPT_CLIENTS")
 	acceptClients = acceptClientsEnv == "true"
+	useNativeInterfaceEnv := os.Getenv("USE_NATIVE_INTERFACE")
 	useNativeInterface = useNativeInterfaceEnv == "true"
+	enforceHealthcheckCertEnv := os.Getenv("ENFORCE_HC_CERT")
 	enforceHealthcheckCert = enforceHealthcheckCertEnv == "true"
-
 	dockerSocket = os.Getenv("DOCKER_SOCKET")
 	pingIntervalStr := os.Getenv("PING_INTERVAL")
 	pingTimeoutStr := os.Getenv("PING_TIMEOUT")
@@ -179,6 +178,8 @@ func main() {
 		tlsPrivateKey = os.Getenv("TLS_CLIENT_CERT")
 	}
 	blueprintFile = os.Getenv("BLUEPRINT_FILE")
+	noCloudEnv := os.Getenv("NO_CLOUD")
+	noCloud = noCloudEnv == "true"
 
 	if endpoint == "" {
 		flag.StringVar(&endpoint, "endpoint", "", "Endpoint of your pangolin server")
@@ -280,6 +281,9 @@ func main() {
 	}
 	if blueprintFile == "" {
 		flag.StringVar(&blueprintFile, "blueprint-file", "", "Path to blueprint file (if unset, no blueprint will be applied)")
+	}
+	if noCloudEnv == "" {
+		flag.BoolVar(&noCloud, "no-cloud", false, "Disable cloud failover")
 	}
 
 	// do a --version check
@@ -635,7 +639,9 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		// Request exit nodes from the server
-		stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
+		stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{
+			"noCloud": noCloud,
+		}, 3*time.Second)
 
 		logger.Info("Tunnel destroyed, ready for reconnection")
 	})
@@ -1237,8 +1243,10 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			if stopFunc != nil {
 				stopFunc()
 			}
-			// request from the server the list of nodes to ping at newt/ping/request
-			stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
+			// request from the server the list of nodes to ping
+			stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{
+				"noCloud": noCloud,
+			}, 3*time.Second)
 			logger.Debug("Requesting exit nodes from server")
 			clientsOnConnect()
 		}
