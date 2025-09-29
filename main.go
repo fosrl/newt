@@ -413,6 +413,7 @@ func main() {
 	var pm *proxy.ProxyManager
 	var connected bool
 	var wgData WgData
+	var dockerEventMonitor *docker.EventMonitor
 
 	if acceptClients {
 		setupClients(client)
@@ -948,7 +949,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		if err != nil {
 			logger.Error("Failed to send Docker socket check response: %v", err)
 		} else {
-			logger.Info("Docker socket check response sent: available=%t", isAvailable)
+			logger.Debug("Docker socket check response sent: available=%t", isAvailable)
 		}
 	})
 
@@ -1220,7 +1221,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		if blueprintResult.Success {
-			logger.Info("Blueprint applied successfully!")
+			logger.Debug("Blueprint applied successfully!")
 		} else {
 			logger.Warn("Blueprint application failed: %s", blueprintResult.Message)
 		}
@@ -1265,6 +1266,34 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	}
 	defer client.Close()
 
+	// Initialize Docker event monitoring if Docker socket is available and monitoring is enabled
+	if dockerSocket != "" {
+		logger.Debug("Initializing Docker event monitoring")
+		dockerEventMonitor, err = docker.NewEventMonitor(dockerSocket, dockerEnforceNetworkValidationBool, func(containers []docker.Container) {
+			// Send updated container list via websocket when Docker events occur
+			logger.Debug("Docker event detected, sending updated container list (%d containers)", len(containers))
+			err := client.SendMessage("newt/socket/containers", map[string]interface{}{
+				"containers": containers,
+			})
+			if err != nil {
+				logger.Error("Failed to send updated container list after Docker event: %v", err)
+			} else {
+				logger.Debug("Updated container list sent successfully")
+			}
+		})
+
+		if err != nil {
+			logger.Error("Failed to create Docker event monitor: %v", err)
+		} else {
+			err = dockerEventMonitor.Start()
+			if err != nil {
+				logger.Error("Failed to start Docker event monitoring: %v", err)
+			} else {
+				logger.Debug("Docker event monitoring started successfully")
+			}
+		}
+	}
+
 	// Wait for interrupt signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -1272,6 +1301,10 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 	// Close clients first (including WGTester)
 	closeClients()
+
+	if dockerEventMonitor != nil {
+		dockerEventMonitor.Stop()
+	}
 
 	if healthMonitor != nil {
 		healthMonitor.Stop()
