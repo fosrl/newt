@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/fosrl/newt/logger"
 )
 
 func getConfigPath(clientType string) string {
@@ -34,6 +36,7 @@ func getConfigPath(clientType string) string {
 
 func (c *Client) loadConfig() error {
 	if c.config.ID != "" && c.config.Secret != "" && c.config.Endpoint != "" {
+		logger.Debug("Config already provided, skipping loading from file")
 		return nil
 	}
 
@@ -64,6 +67,9 @@ func (c *Client) loadConfig() error {
 		c.config.Endpoint = config.Endpoint
 		c.baseURL = config.Endpoint
 	}
+
+	logger.Debug("Loaded config from %s", configPath)
+	logger.Debug("Config: %+v", c.config)
 
 	return nil
 }
