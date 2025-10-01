@@ -37,6 +37,7 @@ type Client struct {
 	writeMux          sync.Mutex
 	clientType        string // Type of client (e.g., "newt", "olm")
 	tlsConfig         TLSConfig
+	configNeedsSave   bool // Flag to track if config needs to be saved
 }
 
 type ClientOption func(*Client)
