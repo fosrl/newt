@@ -39,5 +39,8 @@ cfg := Config{ServiceName: "newt", PromEnabled: true, AdminAddr: "127.0.0.1:0"}
 	if strings.Contains(body, "forbidden=") {
 		t.Fatalf("unexpected forbidden attribute leaked into metrics: %s", body)
 	}
+	if !strings.Contains(body, "site_id=\"x\"") {
+		t.Fatalf("expected allowed attribute site_id to be present in metrics, got: %s", body)
+	}
 }
 
