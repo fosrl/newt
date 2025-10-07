@@ -2,7 +2,7 @@ receivers:
   otlp:
     protocols:
       grpc:
-        endpoint: 0.0.0.0:4317
+        endpoint: ":4317"
 
 processors:
   memory_limiter:
@@ -10,7 +10,7 @@ processors:
     limit_percentage: 80
     spike_limit_percentage: 25
   resourcedetection:
-    detectors: [env, host]
+    detectors: [env, system]
     timeout: 5s
   batch: {}
   transform/promote:
@@ -19,12 +19,12 @@ processors:
     metric_statements:
       - context: datapoint
         statements:
-          - set(attributes["service_instance_id"], resource.attributes["service.instance.id"]) where IsSet(resource.attributes["service.instance.id"])
-          - set(attributes["site_id"], resource.attributes["site_id"]) where IsSet(resource.attributes["site_id"])
+          - set(attributes["service_instance_id"], resource.attributes["service.instance.id"]) where resource.attributes["service.instance.id"] != nil
+          - set(attributes["site_id"], resource.attributes["site_id"]) where resource.attributes["site_id"] != nil
 
 exporters:
   prometheus:
-    endpoint: 0.0.0.0:8889
+    endpoint: ":8889"
     send_timestamps: true
   # Falls du kein Remote-Write-Ziel hast, kommentiere es aus:
   # prometheusremotewrite:
