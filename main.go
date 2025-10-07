@@ -730,7 +730,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	client.RegisterHandler("newt/wg/reconnect", func(msg websocket.WSMessage) {
 		logger.Info("Received reconnect message")
 		if wgData.PublicKey != "" {
-			telemetry.IncReconnect(context.Background(), wgData.PublicKey, "server_request")
+			telemetry.IncReconnect(context.Background(), wgData.PublicKey, "server", telemetry.ReasonServerRequest)
 		}
 
 		// Close the WireGuard device and TUN
@@ -759,7 +759,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	client.RegisterHandler("newt/wg/terminate", func(msg websocket.WSMessage) {
 		logger.Info("Received termination message")
 		if wgData.PublicKey != "" {
-			telemetry.IncReconnect(context.Background(), wgData.PublicKey, "server_request")
+			telemetry.IncReconnect(context.Background(), wgData.PublicKey, "server", telemetry.ReasonServerRequest)
 		}
 
 		// Close the WireGuard device and TUN

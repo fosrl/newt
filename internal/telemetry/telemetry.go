@@ -195,7 +195,7 @@ func Init(ctx context.Context, cfg Config) (*Setup, error) {
 			AttributeFilter: func(kv attribute.KeyValue) bool {
 				k := string(kv.Key)
 				switch k {
-				case "tunnel_id", "transport", "direction", "protocol", "result", "reason", "error_type", "version", "commit", "site_id", "region":
+				case "tunnel_id", "transport", "direction", "protocol", "result", "reason", "initiator", "error_type", "version", "commit", "site_id", "region":
 					return true
 				default:
 					return false

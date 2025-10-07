@@ -173,7 +173,11 @@ func (c *Client) SendMessage(messageType string, data interface{}) error {
 
 	c.writeMux.Lock()
 	defer c.writeMux.Unlock()
-	return c.conn.WriteJSON(msg)
+	if err := c.conn.WriteJSON(msg); err != nil {
+		return err
+	}
+	telemetry.IncWSMessage(context.Background(), "out", "text")
+	return nil
 }
 
 func (c *Client) SendMessageInterval(messageType string, data interface{}, interval time.Duration) (stop func()) {
@@ -418,6 +422,7 @@ func (c *Client) establishConnection() error {
 	spanCtx, span := tr.Start(context.Background(), "ws.connect")
 	defer span.End()
 
+	start := time.Now()
 	dialer := websocket.DefaultDialer
 
 	// Use new TLS configuration method
@@ -440,24 +445,32 @@ func (c *Client) establishConnection() error {
 	}
 
 conn, _, err := dialer.DialContext(spanCtx, u.String(), nil)
+	lat := time.Since(start).Seconds()
 	if err != nil {
 		telemetry.IncConnAttempt(context.Background(), "websocket", "failure")
 		etype := classifyConnError(err)
 		telemetry.IncConnError(context.Background(), "websocket", etype)
+		telemetry.ObserveWSConnectLatency(context.Background(), lat, "failure", etype)
 		// Map handshake-related errors to reconnect reasons where appropriate
 		if etype == "tls" {
-			telemetry.IncReconnect(context.Background(), c.config.ID, telemetry.ReasonHandshakeError)
+			telemetry.IncReconnect(context.Background(), c.config.ID, "client", telemetry.ReasonHandshakeError)
 		} else if etype == "timeout" {
-			telemetry.IncReconnect(context.Background(), c.config.ID, telemetry.ReasonTimeout)
+			telemetry.IncReconnect(context.Background(), c.config.ID, "client", telemetry.ReasonTimeout)
 		} else {
-			telemetry.IncReconnect(context.Background(), c.config.ID, telemetry.ReasonError)
+			telemetry.IncReconnect(context.Background(), c.config.ID, "client", telemetry.ReasonError)
 		}
 		return fmt.Errorf("failed to connect to WebSocket: %w", err)
 	}
 
 	telemetry.IncConnAttempt(context.Background(), "websocket", "success")
+	telemetry.ObserveWSConnectLatency(context.Background(), lat, "success", "")
 	c.conn = conn
 	c.setConnected(true)
+	// Wire up pong handler for metrics
+	c.conn.SetPongHandler(func(appData string) error {
+		telemetry.IncWSMessage(context.Background(), "in", "pong")
+		return nil
+	})
 
 	// Start the ping monitor
 	go c.pingMonitor()
@@ -554,7 +567,10 @@ func (c *Client) pingMonitor() {
 				return
 			}
 			c.writeMux.Lock()
-			err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(c.pingTimeout))
+		err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(c.pingTimeout))
+		if err == nil {
+			telemetry.IncWSMessage(context.Background(), "out", "ping")
+		}
 			c.writeMux.Unlock()
 			if err != nil {
 				// Check if we're shutting down before logging error and reconnecting
@@ -595,6 +611,9 @@ func (c *Client) readPumpWithDisconnectDetection() {
 		default:
 			var msg WSMessage
 			err := c.conn.ReadJSON(&msg)
+			if err == nil {
+				telemetry.IncWSMessage(context.Background(), "in", "text")
+			}
 			if err != nil {
 				// Check if we're shutting down before logging error
 				select {

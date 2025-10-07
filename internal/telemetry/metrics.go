@@ -36,11 +36,23 @@ var (
 	mConnErrors   metric.Int64Counter
 
 	// Config/Restart
-	mConfigReloads metric.Int64Counter
-	mRestartCount  metric.Int64Counter
+	mConfigReloads     metric.Int64Counter
+	mRestartCount      metric.Int64Counter
+	mConfigApply       metric.Float64Histogram
+	mCertRotationTotal metric.Int64Counter
 
 	// Build info
 	mBuildInfo metric.Int64ObservableGauge
+
+	// WebSocket
+	mWSConnectLatency metric.Float64Histogram
+	mWSMessages       metric.Int64Counter
+
+	// Proxy
+	mProxyActiveConns      metric.Int64ObservableGauge
+	mProxyBufferBytes      metric.Int64ObservableGauge
+	mProxyAsyncBacklogByte metric.Int64ObservableGauge
+	mProxyDropsTotal       metric.Int64Counter
 
 	buildVersion string
 	buildCommit  string
@@ -115,10 +127,30 @@ func registerInstruments() error {
 			metric.WithDescription("Configuration reloads"))
 		mRestartCount, _ = meter.Int64Counter("newt_restart_count_total",
 			metric.WithDescription("Process restart count (incremented on start)"))
+		mConfigApply, _ = meter.Float64Histogram("newt_config_apply_seconds",
+			metric.WithDescription("Configuration apply duration in seconds"))
+		mCertRotationTotal, _ = meter.Int64Counter("newt_cert_rotation_total",
+			metric.WithDescription("Certificate rotation events (success/failure)"))
 
 		// Build info gauge (value 1 with version/commit attributes)
 		mBuildInfo, _ = meter.Int64ObservableGauge("newt_build_info",
 			metric.WithDescription("Newt build information (value is always 1)"))
+
+		// WebSocket
+		mWSConnectLatency, _ = meter.Float64Histogram("newt_websocket_connect_latency_seconds",
+			metric.WithDescription("WebSocket connect latency in seconds"))
+		mWSMessages, _ = meter.Int64Counter("newt_websocket_messages_total",
+			metric.WithDescription("WebSocket messages by direction and type"))
+
+		// Proxy
+		mProxyActiveConns, _ = meter.Int64ObservableGauge("newt_proxy_active_connections",
+			metric.WithDescription("Proxy active connections per tunnel and protocol"))
+		mProxyBufferBytes, _ = meter.Int64ObservableGauge("newt_proxy_buffer_bytes",
+			metric.WithDescription("Proxy buffer bytes (may approximate async backlog)"))
+		mProxyAsyncBacklogByte, _ = meter.Int64ObservableGauge("newt_proxy_async_backlog_bytes",
+			metric.WithDescription("Unflushed async byte backlog per tunnel and protocol"))
+		mProxyDropsTotal, _ = meter.Int64Counter("newt_proxy_drops_total",
+			metric.WithDescription("Proxy drops due to write errors"))
 
 		// Register a default callback for build info if version/commit set
 		meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
@@ -145,8 +177,10 @@ func registerInstruments() error {
 // heartbeat seconds, and active sessions.
 
 var (
-	obsOnce    sync.Once
-	obsStopper func()
+	obsOnce      sync.Once
+	obsStopper   func()
+	proxyObsOnce sync.Once
+	proxyStopper func()
 )
 
 // SetObservableCallback registers a single callback that will be invoked
@@ -165,6 +199,14 @@ func SetObservableCallback(cb func(context.Context, metric.Observer) error) {
 	obsOnce.Do(func() {
 		meter.RegisterCallback(cb, mSiteOnline, mSiteLastHeartbeat, mTunnelSessions)
 		obsStopper = func() { /* no-op; otel callbacks are unregistered when provider shuts down */ }
+	})
+}
+
+// SetProxyObservableCallback registers a callback to observe proxy gauges.
+func SetProxyObservableCallback(cb func(context.Context, metric.Observer) error) {
+	proxyObsOnce.Do(func() {
+		meter.RegisterCallback(cb, mProxyActiveConns, mProxyBufferBytes, mProxyAsyncBacklogByte)
+		proxyStopper = func() {}
 	})
 }
 
@@ -204,6 +246,62 @@ func AddTunnelBytesSet(ctx context.Context, n int64, attrs attribute.Set) {
 	mTunnelBytes.Add(ctx, n, metric.WithAttributeSet(attrs))
 }
 
+// --- WebSocket helpers ---
+
+func ObserveWSConnectLatency(ctx context.Context, seconds float64, result, errorType string) {
+	attrs := []attribute.KeyValue{
+		attribute.String("transport", "websocket"),
+		attribute.String("result", result),
+	}
+	if errorType != "" {
+		attrs = append(attrs, attribute.String("error_type", errorType))
+	}
+	mWSConnectLatency.Record(ctx, seconds, metric.WithAttributes(attrsWithSite(attrs...)...))
+}
+
+func IncWSMessage(ctx context.Context, direction, msgType string) {
+	mWSMessages.Add(ctx, 1, metric.WithAttributes(attrsWithSite(
+		attribute.String("direction", direction),
+		attribute.String("msg_type", msgType),
+	)...))
+}
+
+// --- Proxy helpers ---
+
+func ObserveProxyActiveConnsObs(o metric.Observer, value int64, attrs []attribute.KeyValue) {
+	o.ObserveInt64(mProxyActiveConns, value, metric.WithAttributes(attrs...))
+}
+
+func ObserveProxyBufferBytesObs(o metric.Observer, value int64, attrs []attribute.KeyValue) {
+	o.ObserveInt64(mProxyBufferBytes, value, metric.WithAttributes(attrs...))
+}
+
+func ObserveProxyAsyncBacklogObs(o metric.Observer, value int64, attrs []attribute.KeyValue) {
+	o.ObserveInt64(mProxyAsyncBacklogByte, value, metric.WithAttributes(attrs...))
+}
+
+func IncProxyDrops(ctx context.Context, tunnelID, protocol string) {
+	mProxyDropsTotal.Add(ctx, 1, metric.WithAttributes(attrsWithSite(
+		attribute.String("tunnel_id", tunnelID),
+		attribute.String("protocol", protocol),
+	)...))
+}
+
+// --- Config/PKI helpers ---
+
+func ObserveConfigApply(ctx context.Context, phase, result string, seconds float64) {
+	mConfigApply.Record(ctx, seconds, metric.WithAttributes(attrsWithSite(
+		attribute.String("phase", phase),
+		attribute.String("result", result),
+	)...))
+}
+
+func IncCertRotation(ctx context.Context, result string) {
+	mCertRotationTotal.Add(ctx, 1, metric.WithAttributes(attrsWithSite(
+		attribute.String("result", result),
+	)...))
+}
+
 func ObserveTunnelLatency(ctx context.Context, tunnelID, transport string, seconds float64) {
 	mTunnelLatency.Record(ctx, seconds, metric.WithAttributes(attrsWithSite(
 		attribute.String("tunnel_id", tunnelID),
@@ -211,9 +309,10 @@ func ObserveTunnelLatency(ctx context.Context, tunnelID, transport string, secon
 	)...))
 }
 
-func IncReconnect(ctx context.Context, tunnelID, reason string) {
+func IncReconnect(ctx context.Context, tunnelID, initiator, reason string) {
 	mReconnects.Add(ctx, 1, metric.WithAttributes(attrsWithSite(
 		attribute.String("tunnel_id", tunnelID),
+		attribute.String("initiator", initiator),
 		attribute.String("reason", reason),
 	)...))
 }

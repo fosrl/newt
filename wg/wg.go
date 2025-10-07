@@ -306,16 +306,24 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	telemetry.IncConfigReload(context.Background(), "success")
 	// Optional reconnect reason mapping: config change
 	if s.serverPubKey != "" {
-		telemetry.IncReconnect(context.Background(), s.serverPubKey, telemetry.ReasonConfigChange)
+		telemetry.IncReconnect(context.Background(), s.serverPubKey, "client", telemetry.ReasonConfigChange)
 	}
 
 	// Ensure the WireGuard interface and peers are configured
+	start := time.Now()
 	if err := s.ensureWireguardInterface(config); err != nil {
 		logger.Error("Failed to ensure WireGuard interface: %v", err)
+		telemetry.ObserveConfigApply(context.Background(), "interface", "failure", time.Since(start).Seconds())
+	} else {
+		telemetry.ObserveConfigApply(context.Background(), "interface", "success", time.Since(start).Seconds())
 	}
 
+	startPeers := time.Now()
 	if err := s.ensureWireguardPeers(config.Peers); err != nil {
 		logger.Error("Failed to ensure WireGuard peers: %v", err)
+		telemetry.ObserveConfigApply(context.Background(), "peer", "failure", time.Since(startPeers).Seconds())
+	} else {
+		telemetry.ObserveConfigApply(context.Background(), "peer", "success", time.Since(startPeers).Seconds())
 	}
 }
 
