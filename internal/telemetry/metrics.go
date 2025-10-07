@@ -207,10 +207,14 @@ var (
 //	})
 func SetObservableCallback(cb func(context.Context, metric.Observer) error) {
 	obsOnce.Do(func() {
-	if _, e := meter.RegisterCallback(cb, mSiteOnline, mSiteLastHeartbeat, mTunnelSessions); e != nil {
+		reg, e := meter.RegisterCallback(cb, mSiteOnline, mSiteLastHeartbeat, mTunnelSessions)
+		if e != nil {
 			otel.Handle(e)
+			obsStopper = func() {}
+			return
 		}
-		obsStopper = func() { /* no-op; otel callbacks are unregistered when provider shuts down */ }
+		// Provide a functional stopper mirroring proxy/build-info behavior
+		obsStopper = func() { _ = reg.Unregister() }
 	})
 }
 
