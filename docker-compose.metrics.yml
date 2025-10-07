@@ -11,6 +11,8 @@ services:
   newt:
     build: .
     image: newt:dev
+    env_file: 
+    - .env
     environment:
       OTEL_SERVICE_NAME: newt
       NEWT_METRICS_PROMETHEUS_ENABLED: "true"
@@ -19,13 +21,18 @@ services:
       OTEL_EXPORTER_OTLP_INSECURE: "true"
       OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: "cumulative"
       NEWT_ADMIN_ADDR: "0.0.0.0:2112"
+      # Base NEWT configuration
+      PANGOLIN_ENDPOINT: ${PANGOLIN_ENDPOINT}
+      NEWT_ID: ${NEWT_ID}
+      NEWT_SECRET: ${NEWT_SECRET}
+      LOG_LEVEL: "DEBUG"
     ports:
       - "2112:2112"
     depends_on:
       - collector
 
   prometheus:
-    image: prom/prometheus:v2.55.0
+    image: prom/prometheus:v3.6.0
     volumes:
       - ./examples/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
