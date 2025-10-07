@@ -1,0 +1,27 @@
+services:
+  newt:
+    image: your/newt:latest
+    environment:
+      - NEWT_METRICS_PROMETHEUS_ENABLED=false   # wichtig: direkte /metrics-Erfassung aus
+      - NEWT_METRICS_OTLP_ENABLED=true          # OTLP an den Collector
+      # optional:
+      # - NEWT_METRICS_INCLUDE_TUNNEL_ID=false
+    # Falls Newt selbst Ports exponiert, hier NICHT 2112 mappen
+    # ports: []
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./examples/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "8889:8889"   # Prometheus Exporter (wird von Prometheus gescraped)
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./examples/prometheus.with-collector.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+

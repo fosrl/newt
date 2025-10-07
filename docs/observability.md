@@ -190,6 +190,38 @@ Cardinality tips
   action: drop
 ```
 
+Quickstart: direkte Prometheus-Erfassung (empfohlen)
+
+```
+# Start (direkter /metrics-Scrape, keine Doppel-Erfassung)
+docker compose -f docker-compose.metrics.yml up -d
+
+# Smoke-Checks
+./scripts/smoke-metrics.sh
+# Tunnel-IDs ausblenden (optional):
+# EXPECT_TUNNEL_ID=false NEWT_METRICS_INCLUDE_TUNNEL_ID=false ./scripts/smoke-metrics.sh
+```
+
+- Prometheus UI: http://localhost:9090
+- Standard-Scrape-Intervall: 15s
+- Kein OTLP aktiv (NEWT_METRICS_OTLP_ENABLED=false in docker-compose.metrics.yml)
+
+Häufige PromQL-Schnelltests
+
+```
+# Online-Status einer Site in den letzten 5 Minuten
+max_over_time(newt_site_online{site_id="$site"}[5m])
+
+# TCP egress-Bytes pro Site/Tunnel (10m)
+sum by (site_id, tunnel_id) (increase(newt_tunnel_bytes_total{protocol="tcp",direction="egress"}[10m]))
+
+# WebSocket-Connect P95
+histogram_quantile(0.95, sum by (le, site_id) (rate(newt_websocket_connect_latency_seconds_bucket[5m])))
+
+# Reconnects nach Initiator
+increase(newt_tunnel_reconnects_total{site_id="$site"}[30m]) by (initiator, reason)
+```
+
 Troubleshooting
 
 - curl :2112/metrics – ensure endpoint is reachable and includes newt_* metrics
