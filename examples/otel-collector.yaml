@@ -1,0 +1,41 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  memory_limiter:
+    check_interval: 5s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+  batch: {}
+  transform/promote:
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(attributes["service_instance_id"], resource.attributes["service.instance.id"]) where IsMapKey(resource.attributes, "service.instance.id")
+          - set(attributes["site_id"], resource.attributes["site_id"]) where IsMapKey(resource.attributes, "site_id")
+  resourcedetection:
+    detectors: [env, host]
+    timeout: 5s
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    send_timestamps: true
+  prometheusremotewrite:
+    # Replace with your remote_write endpoint (Mimir/Cortex/VictoriaMetrics/Thanos Receive)
+    endpoint: http://mimir:9009/api/v1/push
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, batch, transform/promote]
+      exporters: [prometheus, prometheusremotewrite]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, batch]
+      exporters: []
+
