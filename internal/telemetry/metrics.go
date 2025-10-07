@@ -159,7 +159,7 @@ func registerInstruments() error {
 			metric.WithDescription("Proxy drops due to write errors"))
 
 		// Register a default callback for build info if version/commit set
-		if e := meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		if _, e := meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 			if buildVersion == "" && buildCommit == "" {
 				return nil
 			}
@@ -206,7 +206,7 @@ var (
 //	})
 func SetObservableCallback(cb func(context.Context, metric.Observer) error) {
 	obsOnce.Do(func() {
-	if e := meter.RegisterCallback(cb, mSiteOnline, mSiteLastHeartbeat, mTunnelSessions); e != nil {
+	if _, e := meter.RegisterCallback(cb, mSiteOnline, mSiteLastHeartbeat, mTunnelSessions); e != nil {
 			otel.Handle(e)
 		}
 		obsStopper = func() { /* no-op; otel callbacks are unregistered when provider shuts down */ }
@@ -216,7 +216,7 @@ func SetObservableCallback(cb func(context.Context, metric.Observer) error) {
 // SetProxyObservableCallback registers a callback to observe proxy gauges.
 func SetProxyObservableCallback(cb func(context.Context, metric.Observer) error) {
 	proxyObsOnce.Do(func() {
-	if e := meter.RegisterCallback(cb, mProxyActiveConns, mProxyBufferBytes, mProxyAsyncBacklogByte); e != nil {
+	if _, e := meter.RegisterCallback(cb, mProxyActiveConns, mProxyBufferBytes, mProxyAsyncBacklogByte); e != nil {
 			otel.Handle(e)
 		}
 		proxyStopper = func() {}
