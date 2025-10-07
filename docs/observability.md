@@ -36,16 +36,16 @@ Runtime behavior
 
 Metric catalog (initial)
 
-- newt_build_info (gauge) labels: version, commit; value is always 1
-- newt_site_registrations_total (counter) labels: result; site_id and region are resource attributes
-- newt_site_online (observable gauge) no labels (0/1)
-- newt_site_last_heartbeat_seconds (observable gauge) no labels
-- newt_tunnel_sessions (observable gauge) labels: tunnel_id, transport
-- newt_tunnel_bytes_total (counter) labels: tunnel_id, direction (in|out)
-- newt_tunnel_latency_seconds (histogram) labels: tunnel_id, transport
-- newt_tunnel_reconnects_total (counter) labels: tunnel_id, reason
-- newt_connection_attempts_total (counter) labels: transport, result
-- newt_connection_errors_total (counter) labels: transport, error_type
+- newt_build_info (gauge) labels: version, commit, site_id[, region]; value is always 1
+- newt_site_registrations_total (counter) labels: result, site_id[, region]
+- newt_site_online (observable gauge) labels: site_id (0/1)
+- newt_site_last_heartbeat_seconds (observable gauge) labels: site_id
+- newt_tunnel_sessions (observable gauge) labels: site_id, tunnel_id, transport (transport e.g. wireguard)
+- newt_tunnel_bytes_total (counter) labels: site_id, tunnel_id, protocol (tcp|udp), direction (in|out)
+- newt_tunnel_latency_seconds (histogram) labels: site_id, tunnel_id, transport (e.g., wireguard)
+- newt_tunnel_reconnects_total (counter) labels: site_id, tunnel_id, reason
+- newt_connection_attempts_total (counter) labels: site_id, transport, result
+- newt_connection_errors_total (counter) labels: site_id, transport, error_type
 
 Conventions
 
@@ -162,10 +162,14 @@ sum(newt_tunnel_sessions)
 Compatibility notes
 
 - Gauges do not use the _total suffix (e.g., newt_tunnel_sessions).
-- site_id and region are resource attributes (one process = one site). Only non-empty resource attributes are exported. tunnel_id is a metric label (WireGuard public key). Never expose secrets in labels.
+- site_id is emitted as both resource attribute and metric label on all newt_* series; region is included as a metric label only when set. tunnel_id is a metric label (WireGuard public key). Never expose secrets in labels.
 - Avoid double-scraping: scrape either Newt (/metrics) or the Collector's Prometheus exporter, not both.
 - Prometheus does not accept remote_write; use Mimir/Cortex/VM/Thanos-Receive for remote_write.
-- No free text in labels; use only the enumerated constants for reason and protocol.
+- No free text in labels; use only the enumerated constants for reason, protocol (tcp|udp), and transport (e.g., websocket|wireguard).
+
+Further reading
+
+- See docs/METRICS_RECOMMENDATIONS.md for roadmap, label guidance (transport vs protocol), and example alerts.
 
 Troubleshooting
 
