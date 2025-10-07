@@ -664,7 +664,10 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 		// Use reliable ping for initial connection test
 		logger.Debug("Testing initial connection with reliable ping...")
-		_, err = reliablePing(tnet, wgData.ServerIP, pingTimeout, 5)
+		lat, err := reliablePing(tnet, wgData.ServerIP, pingTimeout, 5)
+		if err == nil && wgData.PublicKey != "" {
+			telemetry.ObserveTunnelLatency(context.Background(), "", wgData.PublicKey, "wireguard", lat.Seconds())
+		}
 		if err != nil {
 			logger.Warn("Initial reliable ping failed, but continuing: %v", err)
 		} else {
@@ -677,13 +680,19 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		// as the pings will continue in the background
 		if !connected {
 			logger.Debug("Starting ping check")
-			pingStopChan = startPingCheck(tnet, wgData.ServerIP, client)
+			pingStopChan = startPingCheck(tnet, wgData.ServerIP, client, wgData.PublicKey)
 		}
 
 		// Create proxy manager
 		pm = proxy.NewProxyManager(tnet)
+		pm.SetAsyncBytes(metricsAsyncBytes)
+		// Set tunnel_id for metrics (WireGuard peer public key)
+		pm.SetTunnelID(wgData.PublicKey)
 
 		connected = true
+
+		// telemetry: record a successful site registration (omit region unless available)
+		telemetry.IncSiteRegistration(context.Background(), id, "", "success")
 
 		// add the targets if there are any
 		if len(wgData.Targets.TCP) > 0 {
@@ -718,9 +727,24 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 	client.RegisterHandler("newt/wg/reconnect", func(msg websocket.WSMessage) {
 		logger.Info("Received reconnect message")
+		if wgData.PublicKey != "" {
+			telemetry.IncReconnect(context.Background(), "", wgData.PublicKey, "server_request")
+		}
 
 		// Close the WireGuard device and TUN
 		closeWgTunnel()
+
+		// Clear metrics attrs and sessions for the tunnel
+		if pm != nil {
+			pm.ClearTunnelID()
+			state.Global().ClearTunnel(wgData.PublicKey)
+		}
+
+		// Clear metrics attrs and sessions for the tunnel
+		if pm != nil {
+			pm.ClearTunnelID()
+			state.Global().ClearTunnel(wgData.PublicKey)
+		}
 
 		// Mark as disconnected
 		connected = false
@@ -738,6 +762,9 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 	client.RegisterHandler("newt/wg/terminate", func(msg websocket.WSMessage) {
 		logger.Info("Received termination message")
+		if wgData.PublicKey != "" {
+			telemetry.IncReconnect(context.Background(), "", wgData.PublicKey, "server_request")
+		}
 
 		// Close the WireGuard device and TUN
 		closeWgTunnel()
