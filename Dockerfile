@@ -11,6 +11,11 @@ WORKDIR /app
 # Copy go mod and sum files
 COPY go.mod go.sum ./
 
+# Coolify specific Test - set Go proxy to direct to avoid issues
+# ENV GOSUMDB=off
+ENV GOPROXY=direct
+RUN go env | grep -E 'GOPROXY|GOSUMDB|GOPRIVATE'
+
 # Download all dependencies
 RUN go mod download
 
