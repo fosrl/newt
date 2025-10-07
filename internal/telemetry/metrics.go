@@ -46,6 +46,14 @@ var (
 	buildCommit  string
 )
 
+// attrsWithSite appends global site/region labels when present.
+func attrsWithSite(extra ...attribute.KeyValue) []attribute.KeyValue {
+	attrs := make([]attribute.KeyValue, 0, len(extra)+2)
+	attrs = append(attrs, extra...)
+	attrs = append(attrs, siteAttrs()...)
+	return attrs
+}
+
 func registerInstruments() error {
 	var err error
 	initOnce.Do(func() {
@@ -124,6 +132,7 @@ func registerInstruments() error {
 			if buildCommit != "" {
 				attrs = append(attrs, attribute.String("commit", buildCommit))
 			}
+			attrs = append(attrs, siteAttrs()...)
 			o.ObserveInt64(mBuildInfo, 1, metric.WithAttributes(attrs...))
 			return nil
 		}, mBuildInfo)
@@ -169,7 +178,9 @@ func RegisterBuildInfo(version, commit string) {
 
 // Config reloads
 func IncConfigReload(ctx context.Context, result string) {
-	mConfigReloads.Add(ctx, 1, metric.WithAttributes(attribute.String("result", result)))
+	mConfigReloads.Add(ctx, 1, metric.WithAttributes(attrsWithSite(
+		attribute.String("result", result),
+	)...))
 }
 
 // Helpers for counters/histograms
@@ -178,14 +189,14 @@ func IncSiteRegistration(ctx context.Context, result string) {
 	attrs := []attribute.KeyValue{
 		attribute.String("result", result),
 	}
-	mSiteRegistrations.Add(ctx, 1, metric.WithAttributes(attrs...))
+	mSiteRegistrations.Add(ctx, 1, metric.WithAttributes(attrsWithSite(attrs...)...))
 }
 
 func AddTunnelBytes(ctx context.Context, tunnelID, direction string, n int64) {
-	mTunnelBytes.Add(ctx, n, metric.WithAttributes(
+	mTunnelBytes.Add(ctx, n, metric.WithAttributes(attrsWithSite(
 		attribute.String("tunnel_id", tunnelID),
 		attribute.String("direction", direction),
-	))
+	)...))
 }
 
 // AddTunnelBytesSet adds bytes using a pre-built attribute.Set to avoid per-call allocations.
@@ -194,29 +205,29 @@ func AddTunnelBytesSet(ctx context.Context, n int64, attrs attribute.Set) {
 }
 
 func ObserveTunnelLatency(ctx context.Context, tunnelID, transport string, seconds float64) {
-	mTunnelLatency.Record(ctx, seconds, metric.WithAttributes(
+	mTunnelLatency.Record(ctx, seconds, metric.WithAttributes(attrsWithSite(
 		attribute.String("tunnel_id", tunnelID),
 		attribute.String("transport", transport),
-	))
+	)...))
 }
 
 func IncReconnect(ctx context.Context, tunnelID, reason string) {
-	mReconnects.Add(ctx, 1, metric.WithAttributes(
+	mReconnects.Add(ctx, 1, metric.WithAttributes(attrsWithSite(
 		attribute.String("tunnel_id", tunnelID),
 		attribute.String("reason", reason),
-	))
+	)...))
 }
 
 func IncConnAttempt(ctx context.Context, transport, result string) {
-	mConnAttempts.Add(ctx, 1, metric.WithAttributes(
+	mConnAttempts.Add(ctx, 1, metric.WithAttributes(attrsWithSite(
 		attribute.String("transport", transport),
 		attribute.String("result", result),
-	))
+	)...))
 }
 
 func IncConnError(ctx context.Context, transport, typ string) {
-	mConnErrors.Add(ctx, 1, metric.WithAttributes(
+	mConnErrors.Add(ctx, 1, metric.WithAttributes(attrsWithSite(
 		attribute.String("transport", transport),
 		attribute.String("error_type", typ),
-	))
+	)...))
 }

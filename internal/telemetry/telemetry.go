@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	promclient "github.com/prometheus/client_golang/prometheus"
@@ -63,16 +64,34 @@ type Config struct {
 //	OTEL_SERVICE_VERSION            (default: "")
 //	NEWT_ADMIN_ADDR                 (default: ":2112")
 func FromEnv() Config {
+	// Prefer explicit NEWT_* env vars, then fall back to OTEL_RESOURCE_ATTRIBUTES
+	site := getenv("NEWT_SITE_ID", "")
+	if site == "" {
+		site = getenv("NEWT_ID", "")
+	}
+	region := os.Getenv("NEWT_REGION")
+	if site == "" || region == "" {
+		if ra := os.Getenv("OTEL_RESOURCE_ATTRIBUTES"); ra != "" {
+			m := parseResourceAttributes(ra)
+			if site == "" {
+				site = m["site_id"]
+			}
+			if region == "" {
+				region = m["region"]
+			}
+		}
+	}
 	return Config{
 		ServiceName:          getenv("OTEL_SERVICE_NAME", "newt"),
 		ServiceVersion:       os.Getenv("OTEL_SERVICE_VERSION"),
-		Region:               os.Getenv("NEWT_REGION"),
+		SiteID:               site,
+		Region:               region,
 		PromEnabled:          getenv("NEWT_METRICS_PROMETHEUS_ENABLED", "true") == "true",
 		OTLPEnabled:          getenv("NEWT_METRICS_OTLP_ENABLED", "false") == "true",
 		OTLPEndpoint:         getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
 		OTLPInsecure:         getenv("OTEL_EXPORTER_OTLP_INSECURE", "true") == "true",
 		MetricExportInterval: getdur("OTEL_METRIC_EXPORT_INTERVAL", 15*time.Second),
-		AdminAddr:            getenv("NEWT_ADMIN_ADDR", "127.0.0.1:2112"),
+		AdminAddr:            getenv("NEWT_ADMIN_ADDR", "*********:2112"),
 	}
 }
 
@@ -109,6 +128,9 @@ func Init(ctx context.Context, cfg Config) (*Setup, error) {
 		resource.WithHost(),
 		resource.WithAttributes(attrs...),
 	)
+
+	// Seed global site/region for label propagation
+	UpdateSiteInfo(cfg.SiteID, cfg.Region)
 
 	s := &Setup{}
 
@@ -166,14 +188,14 @@ func Init(ctx context.Context, cfg Config) (*Setup, error) {
 			},
 		},
 	)))
-	// Attribute whitelist: only allow expected low-cardinality keys on newt_* instruments.
+// Attribute whitelist: only allow expected low-cardinality keys on newt_* instruments.
 	mpOpts = append(mpOpts, sdkmetric.WithView(sdkmetric.NewView(
 		sdkmetric.Instrument{Name: "newt_*"},
 		sdkmetric.Stream{
 			AttributeFilter: func(kv attribute.KeyValue) bool {
 				k := string(kv.Key)
 				switch k {
-				case "tunnel_id", "transport", "direction", "protocol", "result", "reason", "error_type", "version", "commit":
+				case "tunnel_id", "transport", "direction", "protocol", "result", "reason", "error_type", "version", "commit", "site_id", "region":
 					return true
 				default:
 					return false
@@ -252,6 +274,65 @@ func parseOTLPHeaders(h string) map[string]string {
 	}
 	return m
 }
+
+// parseResourceAttributes parses OTEL_RESOURCE_ATTRIBUTES formatted as k=v,k2=v2
+func parseResourceAttributes(s string) map[string]string {
+	m := map[string]string{}
+	if s == "" {
+		return m
+	}
+	parts := strings.Split(s, ",")
+	for _, p := range parts {
+		kv := strings.SplitN(strings.TrimSpace(p), "=", 2)
+		if len(kv) == 2 {
+			m[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+		}
+	}
+	return m
+}
+
+// Global site/region used to enrich metric labels.
+var siteIDVal atomic.Value
+var regionVal atomic.Value
+
+// UpdateSiteInfo updates the global site_id and region used for metric labels.
+func UpdateSiteInfo(siteID, region string) {
+	if siteID != "" {
+		siteIDVal.Store(siteID)
+	}
+	if region != "" {
+		regionVal.Store(region)
+	}
+}
+
+func getSiteID() string {
+	if v, ok := siteIDVal.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+func getRegion() string {
+	if v, ok := regionVal.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// siteAttrs returns label KVs for site_id and region (if set).
+func siteAttrs() []attribute.KeyValue {
+	var out []attribute.KeyValue
+	if s := getSiteID(); s != "" {
+		out = append(out, attribute.String("site_id", s))
+	}
+	if r := getRegion(); r != "" {
+		out = append(out, attribute.String("region", r))
+	}
+	return out
+}
+
+// SiteLabelKVs exposes site label KVs for other packages (e.g., proxy manager).
+func SiteLabelKVs() []attribute.KeyValue { return siteAttrs() }
 
 func getenv(k, d string) string {
 	if v := os.Getenv(k); v != "" {
