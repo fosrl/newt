@@ -42,16 +42,19 @@ func RegisterStateView(v StateView) {
 							if online {
 								val = 1
 							}
-							o.ObserveInt64(mSiteOnline, val, metric.WithAttributes(attribute.String("site_id", siteID)))
+							o.ObserveInt64(mSiteOnline, val)
 						}
 						if t, ok := sv.LastHeartbeat(siteID); ok {
 							secs := time.Since(t).Seconds()
-							o.ObserveFloat64(mSiteLastHeartbeat, secs, metric.WithAttributes(attribute.String("site_id", siteID)))
+							o.ObserveFloat64(mSiteLastHeartbeat, secs)
 						}
 						// If the view supports per-tunnel sessions, report them labeled by tunnel_id.
 						if tm, ok := any.(interface{ SessionsByTunnel() map[string]int64 }); ok {
 							for tid, n := range tm.SessionsByTunnel() {
-								o.ObserveInt64(mTunnelSessions, n, metric.WithAttributes(attribute.String("tunnel_id", tid)))
+								o.ObserveInt64(mTunnelSessions, n, metric.WithAttributes(
+									attribute.String("tunnel_id", tid),
+									attribute.String("transport", "tcp"),
+								))
 							}
 						}
 					}

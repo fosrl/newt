@@ -93,16 +93,21 @@ type Setup struct {
 // installs recommended histogram views for *_latency_seconds, and returns a Setup with
 // a Shutdown method to flush exporters.
 func Init(ctx context.Context, cfg Config) (*Setup, error) {
+	// Build resource with required attributes and only include optional ones when non-empty
+	attrs := []attribute.KeyValue{
+		semconv.ServiceName(cfg.ServiceName),
+		semconv.ServiceVersion(cfg.ServiceVersion),
+	}
+	if cfg.SiteID != "" {
+		attrs = append(attrs, attribute.String("site_id", cfg.SiteID))
+	}
+	if cfg.Region != "" {
+		attrs = append(attrs, attribute.String("region", cfg.Region))
+	}
 	res, _ := resource.New(ctx,
 		resource.WithFromEnv(),
 		resource.WithHost(),
-		resource.WithAttributes(
-			semconv.ServiceName(cfg.ServiceName),
-			semconv.ServiceVersion(cfg.ServiceVersion),
-			// Optional resource attributes
-			attribute.String("site_id", cfg.SiteID),
-			attribute.String("region", cfg.Region),
-		),
+		resource.WithAttributes(attrs...),
 	)
 
 	s := &Setup{}
@@ -168,7 +173,7 @@ func Init(ctx context.Context, cfg Config) (*Setup, error) {
 			AttributeFilter: func(kv attribute.KeyValue) bool {
 				k := string(kv.Key)
 				switch k {
-				case "tunnel_id", "transport", "direction", "protocol", "result", "reason", "error_type":
+				case "tunnel_id", "transport", "direction", "protocol", "result", "reason", "error_type", "version", "commit":
 					return true
 				default:
 					return false

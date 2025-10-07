@@ -246,7 +246,7 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 // ReportRTT allows reporting native RTTs to telemetry, rate-limited externally.
 func (s *WireGuardService) ReportRTT(seconds float64) {
 	if s.serverPubKey == "" { return }
-	telemetry.ObserveTunnelLatency(context.Background(), "", s.serverPubKey, "wireguard", seconds)
+	telemetry.ObserveTunnelLatency(context.Background(), s.serverPubKey, "wireguard", seconds)
 }
 
 func (s *WireGuardService) addTcpTarget(msg websocket.WSMessage) {

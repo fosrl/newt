@@ -36,7 +36,7 @@ func TestMetricsSmoke(t *testing.T) {
 	defer ts.Close()
 
 	// Record a simple metric and then fetch /metrics
-	IncConnAttempt(ctx, "site-1", "websocket", "success")
+	IncConnAttempt(ctx, "websocket", "success")
 	// Give the exporter a tick to collect
 	time.Sleep(100 * time.Millisecond)
 

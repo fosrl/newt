@@ -13,8 +13,8 @@ import (
 // low-cardinality label guidance from the issue description.
 //
 // Counters end with _total, durations are in seconds, sizes in bytes.
-// Only low-cardinality stable labels are supported: site_id, tunnel_id,
-// transport, direction, result, reason, error_type, region.
+// Only low-cardinality stable labels are supported: tunnel_id,
+// transport, direction, result, reason, error_type.
 var (
 	initOnce sync.Once
 
@@ -147,9 +147,9 @@ var (
 // Example inside your code (where you have access to current state):
 //
 //	telemetry.SetObservableCallback(func(ctx context.Context, o metric.Observer) error {
-//	    o.ObserveInt64(mSiteOnline, 1, attribute.String("site_id", siteID))
-//	    o.ObserveFloat64(mSiteLastHeartbeat, time.Since(lastHB).Seconds(), attribute.String("site_id", siteID))
-//	    o.ObserveInt64(mTunnelSessions, int64(len(activeSessions)), attribute.String("site_id", siteID))
+//	    o.ObserveInt64(mSiteOnline, 1)
+//	    o.ObserveFloat64(mSiteLastHeartbeat, time.Since(lastHB).Seconds())
+//	    o.ObserveInt64(mTunnelSessions, int64(len(activeSessions)))
 //	    return nil
 //	})
 func SetObservableCallback(cb func(context.Context, metric.Observer) error) {
@@ -174,20 +174,15 @@ func IncConfigReload(ctx context.Context, result string) {
 
 // Helpers for counters/histograms
 
-func IncSiteRegistration(ctx context.Context, siteID, region, result string) {
+func IncSiteRegistration(ctx context.Context, result string) {
 	attrs := []attribute.KeyValue{
-		attribute.String("site_id", siteID),
 		attribute.String("result", result),
-	}
-	if region != "" {
-		attrs = append(attrs, attribute.String("region", region))
 	}
 	mSiteRegistrations.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
-func AddTunnelBytes(ctx context.Context, siteID, tunnelID, direction string, n int64) {
+func AddTunnelBytes(ctx context.Context, tunnelID, direction string, n int64) {
 	mTunnelBytes.Add(ctx, n, metric.WithAttributes(
-		attribute.String("site_id", siteID),
 		attribute.String("tunnel_id", tunnelID),
 		attribute.String("direction", direction),
 	))
@@ -198,33 +193,29 @@ func AddTunnelBytesSet(ctx context.Context, n int64, attrs attribute.Set) {
 	mTunnelBytes.Add(ctx, n, metric.WithAttributeSet(attrs))
 }
 
-func ObserveTunnelLatency(ctx context.Context, siteID, tunnelID, transport string, seconds float64) {
+func ObserveTunnelLatency(ctx context.Context, tunnelID, transport string, seconds float64) {
 	mTunnelLatency.Record(ctx, seconds, metric.WithAttributes(
-		attribute.String("site_id", siteID),
 		attribute.String("tunnel_id", tunnelID),
 		attribute.String("transport", transport),
 	))
 }
 
-func IncReconnect(ctx context.Context, siteID, tunnelID, reason string) {
+func IncReconnect(ctx context.Context, tunnelID, reason string) {
 	mReconnects.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("site_id", siteID),
 		attribute.String("tunnel_id", tunnelID),
 		attribute.String("reason", reason),
 	))
 }
 
-func IncConnAttempt(ctx context.Context, siteID, transport, result string) {
+func IncConnAttempt(ctx context.Context, transport, result string) {
 	mConnAttempts.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("site_id", siteID),
 		attribute.String("transport", transport),
 		attribute.String("result", result),
 	))
 }
 
-func IncConnError(ctx context.Context, siteID, transport, typ string) {
+func IncConnError(ctx context.Context, transport, typ string) {
 	mConnErrors.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("site_id", siteID),
 		attribute.String("transport", transport),
 		attribute.String("error_type", typ),
 	))

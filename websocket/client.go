@@ -291,7 +291,7 @@ func (c *Client) getToken() (string, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		telemetry.IncConnError(context.Background(), c.config.ID, "auth", classifyConnError(err))
+		telemetry.IncConnError(context.Background(), "auth", classifyConnError(err))
 		return "", fmt.Errorf("failed to request new token: %w", err)
 	}
 	defer resp.Body.Close()
@@ -299,17 +299,17 @@ func (c *Client) getToken() (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		logger.Error("Failed to get token with status code: %d, body: %s", resp.StatusCode, string(body))
-		telemetry.IncConnAttempt(context.Background(), c.config.ID, "auth", "failure")
+		telemetry.IncConnAttempt(context.Background(), "auth", "failure")
 		bin := "http_other"
 		if resp.StatusCode >= 500 {
 			bin = "http_5xx"
 		} else if resp.StatusCode >= 400 {
 			bin = "http_4xx"
 		}
-		telemetry.IncConnError(context.Background(), c.config.ID, "auth", bin)
+		telemetry.IncConnError(context.Background(), "auth", bin)
 		// Reconnect reason mapping for auth failures
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			telemetry.IncReconnect(context.Background(), "", c.config.ID, telemetry.ReasonAuthError)
+			telemetry.IncReconnect(context.Background(), c.config.ID, telemetry.ReasonAuthError)
 		}
 		return "", fmt.Errorf("failed to get token with status code: %d, body: %s", resp.StatusCode, string(body))
 	}
@@ -329,7 +329,7 @@ func (c *Client) getToken() (string, error) {
 	}
 
 	logger.Debug("Received token: %s", tokenResp.Data.Token)
-	telemetry.IncConnAttempt(context.Background(), c.config.ID, "auth", "success")
+	telemetry.IncConnAttempt(context.Background(), "auth", "success")
 
 	return tokenResp.Data.Token, nil
 }
@@ -379,8 +379,8 @@ func (c *Client) establishConnection() error {
 	if err != nil {
 		// telemetry: connection attempt failed before dialing
 		// site_id isn't globally available here; use client ID as site_id (low cardinality)
-		telemetry.IncConnAttempt(context.Background(), c.config.ID, "websocket", "failure")
-		telemetry.IncConnError(context.Background(), c.config.ID, "websocket", classifyConnError(err))
+		telemetry.IncConnAttempt(context.Background(), "websocket", "failure")
+		telemetry.IncConnError(context.Background(), "websocket", classifyConnError(err))
 		return fmt.Errorf("failed to get token: %w", err)
 	}
 
@@ -441,21 +441,21 @@ func (c *Client) establishConnection() error {
 
 conn, _, err := dialer.DialContext(spanCtx, u.String(), nil)
 	if err != nil {
-		telemetry.IncConnAttempt(context.Background(), c.config.ID, "websocket", "failure")
+		telemetry.IncConnAttempt(context.Background(), "websocket", "failure")
 		etype := classifyConnError(err)
-		telemetry.IncConnError(context.Background(), c.config.ID, "websocket", etype)
+		telemetry.IncConnError(context.Background(), "websocket", etype)
 		// Map handshake-related errors to reconnect reasons where appropriate
 		if etype == "tls" {
-			telemetry.IncReconnect(context.Background(), "", c.config.ID, telemetry.ReasonHandshakeError)
+			telemetry.IncReconnect(context.Background(), c.config.ID, telemetry.ReasonHandshakeError)
 		} else if etype == "timeout" {
-			telemetry.IncReconnect(context.Background(), "", c.config.ID, telemetry.ReasonTimeout)
+			telemetry.IncReconnect(context.Background(), c.config.ID, telemetry.ReasonTimeout)
 		} else {
-			telemetry.IncReconnect(context.Background(), "", c.config.ID, telemetry.ReasonError)
+			telemetry.IncReconnect(context.Background(), c.config.ID, telemetry.ReasonError)
 		}
 		return fmt.Errorf("failed to connect to WebSocket: %w", err)
 	}
 
-	telemetry.IncConnAttempt(context.Background(), c.config.ID, "websocket", "success")
+	telemetry.IncConnAttempt(context.Background(), "websocket", "success")
 	c.conn = conn
 	c.setConnected(true)
 

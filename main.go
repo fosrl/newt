@@ -666,7 +666,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		logger.Debug("Testing initial connection with reliable ping...")
 		lat, err := reliablePing(tnet, wgData.ServerIP, pingTimeout, 5)
 		if err == nil && wgData.PublicKey != "" {
-			telemetry.ObserveTunnelLatency(context.Background(), "", wgData.PublicKey, "wireguard", lat.Seconds())
+			telemetry.ObserveTunnelLatency(context.Background(), wgData.PublicKey, "wireguard", lat.Seconds())
 		}
 		if err != nil {
 			logger.Warn("Initial reliable ping failed, but continuing: %v", err)
@@ -692,7 +692,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		connected = true
 
 		// telemetry: record a successful site registration (omit region unless available)
-		telemetry.IncSiteRegistration(context.Background(), id, "", "success")
+		telemetry.IncSiteRegistration(context.Background(), "success")
 
 		// add the targets if there are any
 		if len(wgData.Targets.TCP) > 0 {
@@ -728,7 +728,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	client.RegisterHandler("newt/wg/reconnect", func(msg websocket.WSMessage) {
 		logger.Info("Received reconnect message")
 		if wgData.PublicKey != "" {
-			telemetry.IncReconnect(context.Background(), "", wgData.PublicKey, "server_request")
+			telemetry.IncReconnect(context.Background(), wgData.PublicKey, "server_request")
 		}
 
 		// Close the WireGuard device and TUN
@@ -763,7 +763,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	client.RegisterHandler("newt/wg/terminate", func(msg websocket.WSMessage) {
 		logger.Info("Received termination message")
 		if wgData.PublicKey != "" {
-			telemetry.IncReconnect(context.Background(), "", wgData.PublicKey, "server_request")
+			telemetry.IncReconnect(context.Background(), wgData.PublicKey, "server_request")
 		}
 
 		// Close the WireGuard device and TUN

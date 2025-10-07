@@ -25,7 +25,7 @@ cfg := Config{ServiceName: "newt", PromEnabled: true, AdminAddr: "127.0.0.1:0", 
 	defer ts.Close()
 
 	// Trigger a counter
-	IncConnAttempt(ctx, "ignored", "websocket", "success")
+	IncConnAttempt(ctx, "websocket", "success")
 	time.Sleep(100 * time.Millisecond)
 
 	resp, err := http.Get(ts.URL)

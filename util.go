@@ -295,7 +295,7 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 							connectionLost = true
 							logger.Warn("Connection to server lost after %d failures. Continuous reconnection attempts will be made.", consecutiveFailures)
 							if tunnelID != "" {
-								telemetry.IncReconnect(context.Background(), "", tunnelID, telemetry.ReasonTimeout)
+								telemetry.IncReconnect(context.Background(), tunnelID, telemetry.ReasonTimeout)
 							}
 							stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
 							// Send registration message to the server for backward compatibility
@@ -325,7 +325,7 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 					recentLatencies = append(recentLatencies, latency)
 					// Record tunnel latency (limit sampling to this periodic check)
 					if tunnelID != "" {
-						telemetry.ObserveTunnelLatency(context.Background(), "", tunnelID, "wireguard", latency.Seconds())
+						telemetry.ObserveTunnelLatency(context.Background(), tunnelID, "wireguard", latency.Seconds())
 					}
 					if len(recentLatencies) > 10 {
 						recentLatencies = recentLatencies[1:]

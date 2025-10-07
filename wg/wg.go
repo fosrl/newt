@@ -306,7 +306,7 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	telemetry.IncConfigReload(context.Background(), "success")
 	// Optional reconnect reason mapping: config change
 	if s.serverPubKey != "" {
-		telemetry.IncReconnect(context.Background(), "", s.serverPubKey, telemetry.ReasonConfigChange)
+		telemetry.IncReconnect(context.Background(), s.serverPubKey, telemetry.ReasonConfigChange)
 	}
 
 	// Ensure the WireGuard interface and peers are configured
