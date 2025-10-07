@@ -132,11 +132,11 @@ func Init(ctx context.Context, cfg Config) (*Setup, error) {
 	s.shutdowns = append(s.shutdowns, mp.Shutdown)
 	// Optional tracing
 	if cfg.OTLPEnabled {
-		if tp, exp := setupTracing(ctx, cfg, res); tp != nil {
+		if tp, shutdown := setupTracing(ctx, cfg, res); tp != nil {
 			otel.SetTracerProvider(tp)
 			s.TracerProvider = tp
 			s.shutdowns = append(s.shutdowns, func(c context.Context) error {
-				return errors.Join(exp.Shutdown(c), tp.Shutdown(c))
+				return errors.Join(shutdown(c), tp.Shutdown(c))
 			})
 		}
 	}
@@ -209,7 +209,7 @@ func buildMeterProvider(res *resource.Resource, readers []sdkmetric.Reader) *sdk
 	return sdkmetric.NewMeterProvider(mpOpts...)
 }
 
-func setupTracing(ctx context.Context, cfg Config, res *resource.Resource) (*sdktrace.TracerProvider, *otlptracegrpc.Exporter) {
+func setupTracing(ctx context.Context, cfg Config, res *resource.Resource) (*sdktrace.TracerProvider, func(context.Context) error) {
 	topts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint)}
 	if hdrs := parseOTLPHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")); len(hdrs) > 0 { topts = append(topts, otlptracegrpc.WithHeaders(hdrs)) }
 	if cfg.OTLPInsecure { topts = append(topts, otlptracegrpc.WithInsecure()) } else if certFile := os.Getenv("OTEL_EXPORTER_OTLP_CERTIFICATE"); certFile != "" {
@@ -218,7 +218,7 @@ func setupTracing(ctx context.Context, cfg Config, res *resource.Resource) (*sdk
 	exp, err := otlptracegrpc.New(ctx, topts...)
 	if err != nil { return nil, nil }
 	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exp), sdktrace.WithResource(res))
-	return tp, exp
+	return tp, exp.Shutdown
 }
 
 // Shutdown flushes exporters and providers in reverse init order.

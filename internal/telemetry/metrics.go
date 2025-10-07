@@ -177,7 +177,7 @@ func registerBuildWSProxyInstruments() error {
 		otel.Handle(e)
 	} else {
 		// Provide a functional stopper that unregisters the callback
-		obsStopper = func() { _ = reg.Unregister(context.Background()) }
+		obsStopper = func() { _ = reg.Unregister() }
 	}
 	return nil
 }
@@ -224,7 +224,7 @@ func SetProxyObservableCallback(cb func(context.Context, metric.Observer) error)
 			return
 		}
 		// Provide a functional stopper to unregister later if needed
-		proxyStopper = func() { _ = reg.Unregister(context.Background()) }
+		proxyStopper = func() { _ = reg.Unregister() }
 	})
 }
 
