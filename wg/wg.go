@@ -3,6 +3,7 @@
 package wg
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,16 +14,19 @@ import (
 	"sync"
 	"time"
 
+	"math/rand"
+
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/network"
 	"github.com/fosrl/newt/websocket"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"
-	"golang.org/x/exp/rand"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
+	"github.com/fosrl/newt/internal/telemetry"
 )
 
 type WgConfig struct {
@@ -106,7 +110,7 @@ func FindAvailableUDPPort(minPort, maxPort uint16) (uint16, error) {
 	}
 
 	// Fisher-Yates shuffle to randomize the port order
-	rand.Seed(uint64(time.Now().UnixNano()))
+	rand.Seed(time.Now().UnixNano())
 	for i := len(portRange) - 1; i > 0; i-- {
 		j := rand.Intn(i + 1)
 		portRange[i], portRange[j] = portRange[j], portRange[i]
@@ -296,6 +300,13 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	if s.stopGetConfig != nil {
 		s.stopGetConfig()
 		s.stopGetConfig = nil
+	}
+
+	// telemetry: config reload success
+	telemetry.IncConfigReload(context.Background(), "success")
+	// Optional reconnect reason mapping: config change
+	if s.serverPubKey != "" {
+		telemetry.IncReconnect(context.Background(), "", s.serverPubKey, telemetry.ReasonConfigChange)
 	}
 
 	// Ensure the WireGuard interface and peers are configured
