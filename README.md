@@ -10,6 +10,7 @@ Newt is a fully user space [WireGuard](https://www.wireguard.com/) tunnel client
 Newt is used with Pangolin and Gerbil as part of the larger system. See documentation below:
 
 -   [Full Documentation](https://docs.fossorial.io)
+-   Observability Quickstart: see docs/observability.md (Prometheus/OTel Collector setup, smoke tests)
 
 ## Preview
 
@@ -106,6 +107,13 @@ Default locations:
 - **macOS**: `~/Library/Application Support/newt-client/config.json`
 - **Windows**: `%PROGRAMDATA%\newt\newt-client\config.json`
 - **Linux/Others**: `~/.config/newt-client/config.json`
+
+## Observability Quickstart
+
+For a quick start with Prometheus scraping and smoke checks, read the step-by-step guide in docs/observability.md. It includes:
+- docker-compose.metrics.yml for direct /metrics scraping (recommended)
+- docker-compose.metrics.collector.yml for the OTLP → Collector → Prometheus exporter path (no double-scrape)
+- scripts/smoke-metrics.sh for basic verification
 
 ## Examples
 
