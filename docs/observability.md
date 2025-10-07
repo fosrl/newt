@@ -176,7 +176,7 @@ Cardinality tips
 
 - tunnel_id can grow in larger fleets. Use relabeling to drop or retain a subset, for example:
 
-```
+```yaml
 # Drop all tunnel_id on bytes to reduce series
 - source_labels: [__name__]
   regex: newt_tunnel_bytes_total
@@ -192,7 +192,7 @@ Cardinality tips
 
 Quickstart: direkte Prometheus-Erfassung (empfohlen)
 
-```
+```sh
 # Start (direkter /metrics-Scrape, keine Doppel-Erfassung)
 docker compose -f docker-compose.metrics.yml up -d
 
@@ -202,13 +202,13 @@ docker compose -f docker-compose.metrics.yml up -d
 # EXPECT_TUNNEL_ID=false NEWT_METRICS_INCLUDE_TUNNEL_ID=false ./scripts/smoke-metrics.sh
 ```
 
-- Prometheus UI: http://localhost:9090
+- Prometheus UI: <http://localhost:9090>
 - Standard-Scrape-Intervall: 15s
 - Kein OTLP aktiv (NEWT_METRICS_OTLP_ENABLED=false in docker-compose.metrics.yml)
 
 Häufige PromQL-Schnelltests
 
-```
+```yaml
 # Online-Status einer Site in den letzten 5 Minuten
 max_over_time(newt_site_online{site_id="$site"}[5m])
 
