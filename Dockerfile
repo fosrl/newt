@@ -13,17 +13,17 @@ COPY go.mod go.sum ./
 
 # Coolify specific Test - set Go proxy to direct to avoid issues
 # ENV GOSUMDB=off
-ENV GOPROXY=direct
-RUN go env | grep -E 'GOPROXY|GOSUMDB|GOPRIVATE'
+ENV GOPROXY=https://goproxy.io,https://proxy.golang.org,direct
+RUN go env | grep -E 'GOPROXY|GOSUMDB|GOPRIVATE' && go mod download
 
 # Download all dependencies
-RUN go mod download
+#RUN go mod download
 
 # Copy the source code into the container
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -o /newt
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /newt
 
 FROM alpine:3.22 AS runner
 
