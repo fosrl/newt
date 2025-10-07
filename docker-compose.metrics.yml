@@ -38,3 +38,18 @@ services:
     ports:
       - "9090:9090"
 
+  grafana:
+    image: grafana/grafana:latest
+    container_name: newt-metrics-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    ports:
+      - "3005:3000"
+    depends_on:
+      - prometheus
+    volumes:
+      - ./examples/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./examples/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./examples/grafana/dashboards:/var/lib/grafana/dashboards:ro
