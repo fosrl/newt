@@ -1,4 +1,9 @@
+#ghcr.io/marcschaeferger/newt-private:1.0.0-otel
+#tademsh/newt:1.0.0-otel
 FROM golang:1.25-alpine AS builder
+
+# Install git and ca-certificates
+RUN apk --no-cache add ca-certificates git tzdata
 
 # Set the working directory inside the container
 WORKDIR /app
