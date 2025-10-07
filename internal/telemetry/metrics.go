@@ -95,12 +95,14 @@ func registerInstruments() error {
 			return
 		}
 		mTunnelBytes, err = meter.Int64Counter("newt_tunnel_bytes_total",
-			metric.WithDescription("Tunnel bytes in/out"))
+			metric.WithDescription("Tunnel bytes ingress/egress"),
+			metric.WithUnit("By"))
 		if err != nil {
 			return
 		}
 		mTunnelLatency, err = meter.Float64Histogram("newt_tunnel_latency_seconds",
-			metric.WithDescription("Per-tunnel latency in seconds"))
+			metric.WithDescription("Per-tunnel latency in seconds"),
+			metric.WithUnit("s"))
 		if err != nil {
 			return
 		}
@@ -128,7 +130,8 @@ func registerInstruments() error {
 		mRestartCount, _ = meter.Int64Counter("newt_restart_count_total",
 			metric.WithDescription("Process restart count (incremented on start)"))
 		mConfigApply, _ = meter.Float64Histogram("newt_config_apply_seconds",
-			metric.WithDescription("Configuration apply duration in seconds"))
+			metric.WithDescription("Configuration apply duration in seconds"),
+			metric.WithUnit("s"))
 		mCertRotationTotal, _ = meter.Int64Counter("newt_cert_rotation_total",
 			metric.WithDescription("Certificate rotation events (success/failure)"))
 
@@ -138,7 +141,8 @@ func registerInstruments() error {
 
 		// WebSocket
 		mWSConnectLatency, _ = meter.Float64Histogram("newt_websocket_connect_latency_seconds",
-			metric.WithDescription("WebSocket connect latency in seconds"))
+			metric.WithDescription("WebSocket connect latency in seconds"),
+			metric.WithUnit("s"))
 		mWSMessages, _ = meter.Int64Counter("newt_websocket_messages_total",
 			metric.WithDescription("WebSocket messages by direction and type"))
 
@@ -146,14 +150,16 @@ func registerInstruments() error {
 		mProxyActiveConns, _ = meter.Int64ObservableGauge("newt_proxy_active_connections",
 			metric.WithDescription("Proxy active connections per tunnel and protocol"))
 		mProxyBufferBytes, _ = meter.Int64ObservableGauge("newt_proxy_buffer_bytes",
-			metric.WithDescription("Proxy buffer bytes (may approximate async backlog)"))
+			metric.WithDescription("Proxy buffer bytes (may approximate async backlog)"),
+			metric.WithUnit("By"))
 		mProxyAsyncBacklogByte, _ = meter.Int64ObservableGauge("newt_proxy_async_backlog_bytes",
-			metric.WithDescription("Unflushed async byte backlog per tunnel and protocol"))
+			metric.WithDescription("Unflushed async byte backlog per tunnel and protocol"),
+			metric.WithUnit("By"))
 		mProxyDropsTotal, _ = meter.Int64Counter("newt_proxy_drops_total",
 			metric.WithDescription("Proxy drops due to write errors"))
 
 		// Register a default callback for build info if version/commit set
-		meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		if e := meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 			if buildVersion == "" && buildCommit == "" {
 				return nil
 			}
@@ -167,7 +173,10 @@ func registerInstruments() error {
 			attrs = append(attrs, siteAttrs()...)
 			o.ObserveInt64(mBuildInfo, 1, metric.WithAttributes(attrs...))
 			return nil
-		}, mBuildInfo)
+		}, mBuildInfo); e != nil {
+			// forward to global OTel error handler; Init will continue but build_info will be missing
+			otel.Handle(e)
+		}
 	})
 	return err
 }
@@ -197,7 +206,9 @@ var (
 //	})
 func SetObservableCallback(cb func(context.Context, metric.Observer) error) {
 	obsOnce.Do(func() {
-		meter.RegisterCallback(cb, mSiteOnline, mSiteLastHeartbeat, mTunnelSessions)
+	if e := meter.RegisterCallback(cb, mSiteOnline, mSiteLastHeartbeat, mTunnelSessions); e != nil {
+			otel.Handle(e)
+		}
 		obsStopper = func() { /* no-op; otel callbacks are unregistered when provider shuts down */ }
 	})
 }
@@ -205,7 +216,9 @@ func SetObservableCallback(cb func(context.Context, metric.Observer) error) {
 // SetProxyObservableCallback registers a callback to observe proxy gauges.
 func SetProxyObservableCallback(cb func(context.Context, metric.Observer) error) {
 	proxyObsOnce.Do(func() {
-		meter.RegisterCallback(cb, mProxyActiveConns, mProxyBufferBytes, mProxyAsyncBacklogByte)
+	if e := meter.RegisterCallback(cb, mProxyActiveConns, mProxyBufferBytes, mProxyAsyncBacklogByte); e != nil {
+			otel.Handle(e)
+		}
 		proxyStopper = func() {}
 	})
 }

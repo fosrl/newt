@@ -119,22 +119,22 @@ func (pm *ProxyManager) SetTunnelID(id string) {
 	site := telemetry.SiteLabelKVs()
 	e.attrInTCP = attribute.NewSet(append(site,
 		attribute.String("tunnel_id", id),
-		attribute.String("direction", "in"),
+		attribute.String("direction", "ingress"),
 		attribute.String("protocol", "tcp"),
 	)...)
 	e.attrOutTCP = attribute.NewSet(append(site,
 		attribute.String("tunnel_id", id),
-		attribute.String("direction", "out"),
+		attribute.String("direction", "egress"),
 		attribute.String("protocol", "tcp"),
 	)...)
 	e.attrInUDP = attribute.NewSet(append(site,
 		attribute.String("tunnel_id", id),
-		attribute.String("direction", "in"),
+		attribute.String("direction", "ingress"),
 		attribute.String("protocol", "udp"),
 	)...)
 	e.attrOutUDP = attribute.NewSet(append(site,
 		attribute.String("tunnel_id", id),
-		attribute.String("direction", "out"),
+		attribute.String("direction", "egress"),
 		attribute.String("protocol", "udp"),
 	)...)
 }

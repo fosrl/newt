@@ -195,7 +195,7 @@ func Init(ctx context.Context, cfg Config) (*Setup, error) {
 			AttributeFilter: func(kv attribute.KeyValue) bool {
 				k := string(kv.Key)
 				switch k {
-				case "tunnel_id", "transport", "direction", "protocol", "result", "reason", "initiator", "error_type", "version", "commit", "site_id", "region":
+				case "tunnel_id", "transport", "direction", "protocol", "result", "reason", "initiator", "error_type", "msg_type", "phase", "version", "commit", "site_id", "region":
 					return true
 				default:
 					return false
@@ -296,6 +296,8 @@ var siteIDVal atomic.Value
 var regionVal atomic.Value
 
 // UpdateSiteInfo updates the global site_id and region used for metric labels.
+// Thread-safe via atomic.Value: subsequent metric emissions will include
+// the new labels, prior emissions remain unchanged.
 func UpdateSiteInfo(siteID, region string) {
 	if siteID != "" {
 		siteIDVal.Store(siteID)

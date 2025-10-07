@@ -304,13 +304,11 @@ func (c *Client) getToken() (string, error) {
 		body, _ := io.ReadAll(resp.Body)
 		logger.Error("Failed to get token with status code: %d, body: %s", resp.StatusCode, string(body))
 		telemetry.IncConnAttempt(context.Background(), "auth", "failure")
-		bin := "http_other"
-		if resp.StatusCode >= 500 {
-			bin = "http_5xx"
-		} else if resp.StatusCode >= 400 {
-			bin = "http_4xx"
+		etype := "io_error"
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			etype = "auth_failed"
 		}
-		telemetry.IncConnError(context.Background(), "auth", bin)
+		telemetry.IncConnError(context.Background(), "auth", etype)
 		// Reconnect reason mapping for auth failures
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 			telemetry.IncReconnect(context.Background(), c.config.ID, "client", telemetry.ReasonAuthError)
@@ -338,7 +336,8 @@ func (c *Client) getToken() (string, error) {
 	return tokenResp.Data.Token, nil
 }
 
-// classifyConnError maps common errors to low-cardinality error_type labels
+// classifyConnError maps to fixed, low-cardinality error_type values.
+// Allowed enum: dial_timeout, tls_handshake, auth_failed, io_error
 func classifyConnError(err error) string {
 	if err == nil {
 		return ""
@@ -346,17 +345,14 @@ func classifyConnError(err error) string {
 	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "tls") || strings.Contains(msg, "certificate"):
-		return "tls"
-	case strings.Contains(msg, "timeout") || strings.Contains(msg, "i/o timeout"):
-		return "timeout"
-	case strings.Contains(msg, "no such host") || strings.Contains(msg, "dns"):
-		return "dns"
+		return "tls_handshake"
+	case strings.Contains(msg, "timeout") || strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "deadline exceeded"):
+		return "dial_timeout"
 	case strings.Contains(msg, "unauthorized") || strings.Contains(msg, "forbidden"):
-		return "auth"
-	case strings.Contains(msg, "broken pipe") || strings.Contains(msg, "connection reset") || strings.Contains(msg, "connection refused") || strings.Contains(msg, "use of closed network connection") || strings.Contains(msg, "network is unreachable"):
-		return "io"
+		return "auth_failed"
 	default:
-		return "other"
+		// Group remaining network/socket errors as io_error to avoid label explosion
+		return "io_error"
 	}
 }
 

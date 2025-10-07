@@ -58,7 +58,6 @@ func RegisterStateView(v StateView) {
 								o.ObserveInt64(mTunnelSessions, n, metric.WithAttributes(
 									attribute.String("site_id", getSiteID()),
 									attribute.String("tunnel_id", tid),
-									attribute.String("transport", "wireguard"),
 								))
 							}
 						}
