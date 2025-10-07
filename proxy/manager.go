@@ -15,6 +15,7 @@ import (
 	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )

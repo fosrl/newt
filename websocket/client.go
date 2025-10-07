@@ -313,7 +313,7 @@ func (c *Client) getToken() (string, error) {
 		telemetry.IncConnError(context.Background(), "auth", bin)
 		// Reconnect reason mapping for auth failures
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			telemetry.IncReconnect(context.Background(), c.config.ID, telemetry.ReasonAuthError)
+			telemetry.IncReconnect(context.Background(), c.config.ID, "client", telemetry.ReasonAuthError)
 		}
 		return "", fmt.Errorf("failed to get token with status code: %d, body: %s", resp.StatusCode, string(body))
 	}
