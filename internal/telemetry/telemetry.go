@@ -112,6 +112,12 @@ type Setup struct {
 // installs recommended histogram views for *_latency_seconds, and returns a Setup with
 // a Shutdown method to flush exporters.
 func Init(ctx context.Context, cfg Config) (*Setup, error) {
+	// Configure tunnel_id label inclusion from env (default true)
+	if getenv("NEWT_METRICS_INCLUDE_TUNNEL_ID", "true") == "true" {
+		includeTunnelIDVal.Store(true)
+	} else {
+		includeTunnelIDVal.Store(false)
+	}
 	// Build resource with required attributes and only include optional ones when non-empty
 	attrs := []attribute.KeyValue{
 		semconv.ServiceName(cfg.ServiceName),
@@ -294,6 +300,7 @@ func parseResourceAttributes(s string) map[string]string {
 // Global site/region used to enrich metric labels.
 var siteIDVal atomic.Value
 var regionVal atomic.Value
+var includeTunnelIDVal atomic.Value // bool; default true
 
 // UpdateSiteInfo updates the global site_id and region used for metric labels.
 // Thread-safe via atomic.Value: subsequent metric emissions will include
@@ -335,6 +342,14 @@ func siteAttrs() []attribute.KeyValue {
 
 // SiteLabelKVs exposes site label KVs for other packages (e.g., proxy manager).
 func SiteLabelKVs() []attribute.KeyValue { return siteAttrs() }
+
+// ShouldIncludeTunnelID returns whether tunnel_id labels should be emitted.
+func ShouldIncludeTunnelID() bool {
+	if v, ok := includeTunnelIDVal.Load().(bool); ok {
+		return v
+	}
+	return true
+}
 
 func getenv(k, d string) string {
 	if v := os.Getenv(k); v != "" {

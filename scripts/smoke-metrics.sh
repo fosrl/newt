@@ -26,6 +26,16 @@ probe "last_heartbeat with site_id" "^newt_site_last_heartbeat_seconds\{.*site_i
 probe "tunnel bytes ingress" "^newt_tunnel_bytes_total\{.*direction=\"ingress\".*protocol=\"(tcp|udp)\"" || true
 probe "tunnel bytes egress" "^newt_tunnel_bytes_total\{.*direction=\"egress\".*protocol=\"(tcp|udp)\"" || true
 
+# Optional: verify absence/presence of tunnel_id based on EXPECT_TUNNEL_ID (default true)
+EXPECT_TUNNEL_ID=${EXPECT_TUNNEL_ID:-true}
+if [ "$EXPECT_TUNNEL_ID" = "false" ]; then
+  echo "[probe] ensure tunnel_id label is absent when NEWT_METRICS_INCLUDE_TUNNEL_ID=false"
+  ! curl -sf "${METRICS_URL}" | grep -q "tunnel_id=\"" || { echo "[fail] tunnel_id present but EXPECT_TUNNEL_ID=false"; exit 1; }
+else
+  echo "[probe] ensure tunnel_id label is present (default)"
+  curl -sf "${METRICS_URL}" | grep -q "tunnel_id=\"" || { echo "[warn] tunnel_id not found (may be expected if no tunnel is active)"; }
+fi
+
 # WebSocket metrics (when OTLP/WS used)
 probe "websocket connect latency buckets" "^newt_websocket_connect_latency_seconds_bucket" || true
 probe "websocket messages total" "^newt_websocket_messages_total\{.*(direction|msg_type)=" || true

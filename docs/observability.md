@@ -49,8 +49,8 @@ Metric catalog (initial)
 
 Conventions
 
-- Durations in seconds, names end with _seconds
-- Sizes in bytes, names end with _bytes
+- Durations in seconds (unit: s), names end with _seconds
+- Sizes in bytes (unit: By), names end with _bytes
 - Counters end with _total
 - Labels must be low-cardinality and stable
 
@@ -163,6 +163,7 @@ Compatibility notes
 
 - Gauges do not use the _total suffix (e.g., newt_tunnel_sessions).
 - site_id is emitted as both resource attribute and metric label on all newt_* series; region is included as a metric label only when set. tunnel_id is a metric label (WireGuard public key). Never expose secrets in labels.
+- NEWT_METRICS_INCLUDE_TUNNEL_ID (default: true) toggles whether tunnel_id is included as a label on bytes/sessions/proxy/reconnect metrics. Disable in high-cardinality environments.
 - Avoid double-scraping: scrape either Newt (/metrics) or the Collector's Prometheus exporter, not both.
 - Prometheus does not accept remote_write; use Mimir/Cortex/VM/Thanos-Receive for remote_write.
 - No free text in labels; use only the enumerated constants for reason, protocol (tcp|udp), and transport (e.g., websocket|wireguard).

@@ -117,26 +117,29 @@ func (pm *ProxyManager) SetTunnelID(id string) {
 	e := pm.tunnels[id]
 	// include site labels if available
 	site := telemetry.SiteLabelKVs()
-	e.attrInTCP = attribute.NewSet(append(site,
-		attribute.String("tunnel_id", id),
+	build := func(base []attribute.KeyValue) attribute.Set {
+		if telemetry.ShouldIncludeTunnelID() {
+			base = append([]attribute.KeyValue{attribute.String("tunnel_id", id)}, base...)
+		}
+		base = append(site, base...)
+		return attribute.NewSet(base...)
+	}
+	e.attrInTCP = build([]attribute.KeyValue{
 		attribute.String("direction", "ingress"),
 		attribute.String("protocol", "tcp"),
-	)...)
-	e.attrOutTCP = attribute.NewSet(append(site,
-		attribute.String("tunnel_id", id),
+	})
+	e.attrOutTCP = build([]attribute.KeyValue{
 		attribute.String("direction", "egress"),
 		attribute.String("protocol", "tcp"),
-	)...)
-	e.attrInUDP = attribute.NewSet(append(site,
-		attribute.String("tunnel_id", id),
+	})
+	e.attrInUDP = build([]attribute.KeyValue{
 		attribute.String("direction", "ingress"),
 		attribute.String("protocol", "udp"),
-	)...)
-	e.attrOutUDP = attribute.NewSet(append(site,
-		attribute.String("tunnel_id", id),
+	})
+	e.attrOutUDP = build([]attribute.KeyValue{
 		attribute.String("direction", "egress"),
 		attribute.String("protocol", "udp"),
-	)...)
+	})
 }
 
 // ClearTunnelID clears cached attribute sets for the current tunnel.

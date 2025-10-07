@@ -1,25 +1,17 @@
 services:
-  collector:
-    image: otel/opentelemetry-collector-contrib:0.136.0
-    command: ["--config=/etc/otelcol/config.yaml"]
-    volumes:
-      - ./examples/otel-collector.yaml:/etc/otelcol/config.yaml:ro
-    ports:
-      - "4317:4317"   # OTLP gRPC in
-      - "8889:8889"   # Prometheus scrape out
+  # Recommended Variant A: Direct Prometheus scrape of Newt (/metrics)
+  # Optional: You may add the Collector service and enable OTLP export, but do NOT
+  # scrape both Newt and the Collector for the same process.
 
   newt:
     build: .
     image: newt:dev
-    env_file: 
-    - .env
+    env_file:
+      - .env
     environment:
       OTEL_SERVICE_NAME: newt
       NEWT_METRICS_PROMETHEUS_ENABLED: "true"
-      NEWT_METRICS_OTLP_ENABLED: "true"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "collector:4317"
-      OTEL_EXPORTER_OTLP_INSECURE: "true"
-      OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: "cumulative"
+      NEWT_METRICS_OTLP_ENABLED: "false"   # avoid double-scrape by default
       NEWT_ADMIN_ADDR: ":2112"
       # Base NEWT configuration
       PANGOLIN_ENDPOINT: ${PANGOLIN_ENDPOINT}
@@ -28,8 +20,16 @@ services:
       LOG_LEVEL: "DEBUG"
     ports:
       - "2112:2112"
-    depends_on:
-      - collector
+
+  # Optional Variant B: Enable the Collector and switch Prometheus scrape to it.
+  # collector:
+  #   image: otel/opentelemetry-collector-contrib:0.136.0
+  #   command: ["--config=/etc/otelcol/config.yaml"]
+  #   volumes:
+  #     - ./examples/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+  #   ports:
+  #     - "4317:4317"   # OTLP gRPC in
+  #     - "8889:8889"   # Prometheus scrape out
 
   prometheus:
     image: prom/prometheus:v3.6.0

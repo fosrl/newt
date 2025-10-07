@@ -248,10 +248,13 @@ func IncSiteRegistration(ctx context.Context, result string) {
 }
 
 func AddTunnelBytes(ctx context.Context, tunnelID, direction string, n int64) {
-	mTunnelBytes.Add(ctx, n, metric.WithAttributes(attrsWithSite(
-		attribute.String("tunnel_id", tunnelID),
+	attrs := []attribute.KeyValue{
 		attribute.String("direction", direction),
-	)...))
+	}
+	if ShouldIncludeTunnelID() && tunnelID != "" {
+		attrs = append(attrs, attribute.String("tunnel_id", tunnelID))
+	}
+	mTunnelBytes.Add(ctx, n, metric.WithAttributes(attrsWithSite(attrs...)...))
 }
 
 // AddTunnelBytesSet adds bytes using a pre-built attribute.Set to avoid per-call allocations.
@@ -316,18 +319,24 @@ func IncCertRotation(ctx context.Context, result string) {
 }
 
 func ObserveTunnelLatency(ctx context.Context, tunnelID, transport string, seconds float64) {
-	mTunnelLatency.Record(ctx, seconds, metric.WithAttributes(attrsWithSite(
-		attribute.String("tunnel_id", tunnelID),
+	attrs := []attribute.KeyValue{
 		attribute.String("transport", transport),
-	)...))
+	}
+	if ShouldIncludeTunnelID() && tunnelID != "" {
+		attrs = append(attrs, attribute.String("tunnel_id", tunnelID))
+	}
+	mTunnelLatency.Record(ctx, seconds, metric.WithAttributes(attrsWithSite(attrs...)...))
 }
 
 func IncReconnect(ctx context.Context, tunnelID, initiator, reason string) {
-	mReconnects.Add(ctx, 1, metric.WithAttributes(attrsWithSite(
-		attribute.String("tunnel_id", tunnelID),
+	attrs := []attribute.KeyValue{
 		attribute.String("initiator", initiator),
 		attribute.String("reason", reason),
-	)...))
+	}
+	if ShouldIncludeTunnelID() && tunnelID != "" {
+		attrs = append(attrs, attribute.String("tunnel_id", tunnelID))
+	}
+	mReconnects.Add(ctx, 1, metric.WithAttributes(attrsWithSite(attrs...)...))
 }
 
 func IncConnAttempt(ctx context.Context, transport, result string) {
