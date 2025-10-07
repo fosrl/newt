@@ -40,12 +40,12 @@ Metric catalog (initial)
 - newt_site_registrations_total (counter) labels: result, site_id[, region]
 - newt_site_online (observable gauge) labels: site_id (0/1)
 - newt_site_last_heartbeat_seconds (observable gauge) labels: site_id
-- newt_tunnel_sessions (observable gauge) labels: site_id, tunnel_id, transport (transport e.g. wireguard)
-- newt_tunnel_bytes_total (counter) labels: site_id, tunnel_id, protocol (tcp|udp), direction (in|out)
+- newt_tunnel_sessions (observable gauge) labels: site_id, tunnel_id [transport optional when known]
+- newt_tunnel_bytes_total (counter) labels: site_id, tunnel_id, protocol (tcp|udp), direction (ingress|egress)
 - newt_tunnel_latency_seconds (histogram) labels: site_id, tunnel_id, transport (e.g., wireguard)
-- newt_tunnel_reconnects_total (counter) labels: site_id, tunnel_id, reason
+- newt_tunnel_reconnects_total (counter) labels: site_id, tunnel_id, initiator (client|server), reason
 - newt_connection_attempts_total (counter) labels: site_id, transport, result
-- newt_connection_errors_total (counter) labels: site_id, transport, error_type
+- newt_connection_errors_total (counter) labels: site_id, transport, error_type (dial_timeout|tls_handshake|auth_failed|io_error)
 
 Conventions
 
@@ -170,6 +170,24 @@ Compatibility notes
 Further reading
 
 - See docs/METRICS_RECOMMENDATIONS.md for roadmap, label guidance (transport vs protocol), and example alerts.
+
+Cardinality tips
+
+- tunnel_id can grow in larger fleets. Use relabeling to drop or retain a subset, for example:
+
+```
+# Drop all tunnel_id on bytes to reduce series
+- source_labels: [__name__]
+  regex: newt_tunnel_bytes_total
+  action: keep
+- action: labeldrop
+  regex: tunnel_id
+
+# Or drop only high-churn tunnels
+- source_labels: [tunnel_id]
+  regex: .*
+  action: drop
+```
 
 Troubleshooting
 
