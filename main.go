@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -22,6 +24,9 @@ import (
 	"github.com/fosrl/newt/updates"
 	"github.com/fosrl/newt/websocket"
 
+	"github.com/fosrl/newt/internal/state"
+	"github.com/fosrl/newt/internal/telemetry"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
@@ -115,6 +120,15 @@ var (
 	preferEndpoint                     string
 	healthMonitor                      *healthcheck.Monitor
 	enforceHealthcheckCert             bool
+	// Build/version (can be overridden via -ldflags "-X main.newtVersion=...")
+	newtVersion = "version_replaceme"
+
+	// Observability/metrics flags
+	metricsEnabled    bool
+	otlpEnabled       bool
+	adminAddr         string
+	region            string
+	metricsAsyncBytes bool
 
 	// New mTLS configuration variables
 	tlsClientCert string
@@ -126,6 +140,10 @@ var (
 )
 
 func main() {
+	// Prepare context for graceful shutdown and signal handling
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// if PANGOLIN_ENDPOINT, NEWT_ID, and NEWT_SECRET are set as environment variables, they will be used as default values
 	endpoint = os.Getenv("PANGOLIN_ENDPOINT")
 	id = os.Getenv("NEWT_ID")
@@ -140,6 +158,13 @@ func main() {
 	acceptClientsEnv := os.Getenv("ACCEPT_CLIENTS")
 	useNativeInterfaceEnv := os.Getenv("USE_NATIVE_INTERFACE")
 	enforceHealthcheckCertEnv := os.Getenv("ENFORCE_HC_CERT")
+
+	// Metrics/observability env mirrors
+	metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED")
+	otlpEnabledEnv := os.Getenv("NEWT_METRICS_OTLP_ENABLED")
+	adminAddrEnv := os.Getenv("NEWT_ADMIN_ADDR")
+	regionEnv := os.Getenv("NEWT_REGION")
+	asyncBytesEnv := os.Getenv("NEWT_METRICS_ASYNC_BYTES")
 
 	keepInterface = keepInterfaceEnv == "true"
 	acceptClients = acceptClientsEnv == "true"
@@ -270,6 +295,43 @@ func main() {
 	}
 	if healthFile == "" {
 		flag.StringVar(&healthFile, "health-file", "", "Path to health file (if unset, health file won't be written)")
+	}
+
+	// Metrics/observability flags (mirror ENV if unset)
+	if metricsEnabledEnv == "" {
+		flag.BoolVar(&metricsEnabled, "metrics", true, "Enable Prometheus /metrics exporter")
+	} else {
+		if v, err := strconv.ParseBool(metricsEnabledEnv); err == nil {
+			metricsEnabled = v
+		} else {
+			metricsEnabled = true
+		}
+	}
+	if otlpEnabledEnv == "" {
+		flag.BoolVar(&otlpEnabled, "otlp", false, "Enable OTLP exporters (metrics/traces) to OTEL_EXPORTER_OTLP_ENDPOINT")
+	} else {
+		if v, err := strconv.ParseBool(otlpEnabledEnv); err == nil {
+			otlpEnabled = v
+		}
+	}
+	if adminAddrEnv == "" {
+		flag.StringVar(&adminAddr, "metrics-admin-addr", "127.0.0.1:2112", "Admin/metrics bind address")
+	} else {
+		adminAddr = adminAddrEnv
+	}
+	// Async bytes toggle
+	if asyncBytesEnv == "" {
+		flag.BoolVar(&metricsAsyncBytes, "metrics-async-bytes", false, "Enable async bytes counting (background flush; lower hot path overhead)")
+	} else {
+		if v, err := strconv.ParseBool(asyncBytesEnv); err == nil {
+			metricsAsyncBytes = v
+		}
+	}
+	// Optional region flag (resource attribute)
+	if regionEnv == "" {
+		flag.StringVar(&region, "region", "", "Optional region resource attribute (also NEWT_REGION)")
+	} else {
+		region = regionEnv
 	}
 
 	// do a --version check
