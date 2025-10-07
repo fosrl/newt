@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD033 -->
 # OpenTelemetry Observability for Newt
 
 This document describes how Newt exposes metrics using the OpenTelemetry (OTel) Go SDK, how to enable Prometheus scraping, and how to send data to an OpenTelemetry Collector for further export.
@@ -92,7 +93,7 @@ OTLP TLS example
 
 - Enable TLS to Collector with a custom CA and headers:
 
-```
+```sh
 NEWT_METRICS_OTLP_ENABLED=true \
 OTEL_EXPORTER_OTLP_ENDPOINT=collector:4317 \
 OTEL_EXPORTER_OTLP_INSECURE=false \
@@ -107,7 +108,7 @@ Important: Do not scrape both Newt (2112) and the Collector’s Prometheus expor
 
 A) Scrape Newt directly:
 
-```
+```yaml
 global:
   scrape_interval: 15s
 scrape_configs:
@@ -118,7 +119,7 @@ scrape_configs:
 
 B) Scrape the Collector’s Prometheus exporter:
 
-```
+```yaml
 global:
   scrape_interval: 15s
 scrape_configs:
@@ -142,19 +143,19 @@ PromQL snippets
 
 - Throughput in (5m):
 
-```
+```sh
 sum(rate(newt_tunnel_bytes_total{direction="in"}[5m]))
 ```
 
 - P95 latency (seconds):
 
-```
+```sh
 histogram_quantile(0.95, sum(rate(newt_tunnel_latency_seconds_bucket[5m])) by (le))
 ```
 
 - Active sessions:
 
-```
+```sh
 sum(newt_tunnel_sessions)
 ```
 
