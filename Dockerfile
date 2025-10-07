@@ -22,6 +22,9 @@ RUN apk --no-cache add ca-certificates tzdata
 COPY --from=builder /newt /usr/local/bin/
 COPY entrypoint.sh /
 
+# Admin/metrics endpoint (Prometheus scrape)
+EXPOSE 2112
+
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["newt"]
