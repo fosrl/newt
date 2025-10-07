@@ -118,143 +118,107 @@ func Init(ctx context.Context, cfg Config) (*Setup, error) {
 	} else {
 		includeTunnelIDVal.Store(false)
 	}
-	// Build resource with required attributes and only include optional ones when non-empty
+	res := buildResource(ctx, cfg)
+	UpdateSiteInfo(cfg.SiteID, cfg.Region)
+
+	s := &Setup{}
+	readers, promHandler, shutdowns, err := setupMetricExport(ctx, cfg, res)
+	if err != nil { return nil, err }
+	s.PrometheusHandler = promHandler
+	// Build provider
+	mp := buildMeterProvider(res, readers)
+	otel.SetMeterProvider(mp)
+	s.MeterProvider = mp
+	s.shutdowns = append(s.shutdowns, mp.Shutdown)
+	// Optional tracing
+	if cfg.OTLPEnabled {
+		if tp, exp := setupTracing(ctx, cfg, res); tp != nil {
+			otel.SetTracerProvider(tp)
+			s.TracerProvider = tp
+			s.shutdowns = append(s.shutdowns, func(c context.Context) error {
+				return errors.Join(exp.Shutdown(c), tp.Shutdown(c))
+			})
+		}
+	}
+	// Add metric exporter shutdowns
+	s.shutdowns = append(s.shutdowns, shutdowns...)
+	// Runtime metrics
+	_ = runtime.Start(runtime.WithMeterProvider(mp))
+	// Instruments
+	if err := registerInstruments(); err != nil { return nil, err }
+	if cfg.BuildVersion != "" || cfg.BuildCommit != "" { RegisterBuildInfo(cfg.BuildVersion, cfg.BuildCommit) }
+	return s, nil
+}
+
+func buildResource(ctx context.Context, cfg Config) *resource.Resource {
 	attrs := []attribute.KeyValue{
 		semconv.ServiceName(cfg.ServiceName),
 		semconv.ServiceVersion(cfg.ServiceVersion),
 	}
-	if cfg.SiteID != "" {
-		attrs = append(attrs, attribute.String("site_id", cfg.SiteID))
-	}
-	if cfg.Region != "" {
-		attrs = append(attrs, attribute.String("region", cfg.Region))
-	}
-	res, _ := resource.New(ctx,
-		resource.WithFromEnv(),
-		resource.WithHost(),
-		resource.WithAttributes(attrs...),
-	)
+	if cfg.SiteID != "" { attrs = append(attrs, attribute.String("site_id", cfg.SiteID)) }
+	if cfg.Region != "" { attrs = append(attrs, attribute.String("region", cfg.Region)) }
+	res, _ := resource.New(ctx, resource.WithFromEnv(), resource.WithHost(), resource.WithAttributes(attrs...))
+	return res
+}
 
-	// Seed global site/region for label propagation
-	UpdateSiteInfo(cfg.SiteID, cfg.Region)
-
-	s := &Setup{}
-
-	// Build metric readers/exporters
+func setupMetricExport(ctx context.Context, cfg Config, res *resource.Resource) ([]sdkmetric.Reader, http.Handler, []func(context.Context) error, error) {
 	var readers []sdkmetric.Reader
-
-	// Prometheus exporter exposes a native /metrics handler for scraping
+	var shutdowns []func(context.Context) error
+	var promHandler http.Handler
 	if cfg.PromEnabled {
 		reg := promclient.NewRegistry()
 		exp, err := prometheus.New(prometheus.WithRegisterer(reg))
-		if err != nil {
-			return nil, err
-		}
+		if err != nil { return nil, nil, nil, err }
 		readers = append(readers, exp)
-		s.PrometheusHandler = promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
+		promHandler = promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 	}
-
-	// Optional OTLP metric exporter (gRPC)
 	if cfg.OTLPEnabled {
 		mopts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(cfg.OTLPEndpoint)}
-		// Headers support via OTEL_EXPORTER_OTLP_HEADERS (k=v,k2=v2)
-		if hdrs := parseOTLPHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")); len(hdrs) > 0 {
-			mopts = append(mopts, otlpmetricgrpc.WithHeaders(hdrs))
-		}
-		if cfg.OTLPInsecure {
-			mopts = append(mopts, otlpmetricgrpc.WithInsecure())
-		} else if certFile := os.Getenv("OTEL_EXPORTER_OTLP_CERTIFICATE"); certFile != "" {
-			creds, cerr := credentials.NewClientTLSFromFile(certFile, "")
-			if cerr == nil {
-				mopts = append(mopts, otlpmetricgrpc.WithTLSCredentials(creds))
-			}
+		if hdrs := parseOTLPHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")); len(hdrs) > 0 { mopts = append(mopts, otlpmetricgrpc.WithHeaders(hdrs)) }
+		if cfg.OTLPInsecure { mopts = append(mopts, otlpmetricgrpc.WithInsecure()) } else if certFile := os.Getenv("OTEL_EXPORTER_OTLP_CERTIFICATE"); certFile != "" {
+			if creds, cerr := credentials.NewClientTLSFromFile(certFile, ""); cerr == nil { mopts = append(mopts, otlpmetricgrpc.WithTLSCredentials(creds)) }
 		}
 		mexp, err := otlpmetricgrpc.New(ctx, mopts...)
-		if err != nil {
-			return nil, err
-		}
+		if err != nil { return nil, nil, nil, err }
 		readers = append(readers, sdkmetric.NewPeriodicReader(mexp, sdkmetric.WithInterval(cfg.MetricExportInterval)))
-		s.shutdowns = append(s.shutdowns, mexp.Shutdown)
+		shutdowns = append(shutdowns, mexp.Shutdown)
 	}
+	return readers, promHandler, shutdowns, nil
+}
 
-	// Build provider options iteratively (WithReader is not variadic)
+func buildMeterProvider(res *resource.Resource, readers []sdkmetric.Reader) *sdkmetric.MeterProvider {
 	var mpOpts []sdkmetric.Option
 	mpOpts = append(mpOpts, sdkmetric.WithResource(res))
-	for _, r := range readers {
-		mpOpts = append(mpOpts, sdkmetric.WithReader(r))
-	}
-	// Default view for latency histograms in seconds.
+	for _, r := range readers { mpOpts = append(mpOpts, sdkmetric.WithReader(r)) }
 	mpOpts = append(mpOpts, sdkmetric.WithView(sdkmetric.NewView(
-		sdkmetric.Instrument{
-			Name: "newt_*_latency_seconds",
-		},
-		sdkmetric.Stream{
-			Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
-				Boundaries: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
-			},
-		},
+		sdkmetric.Instrument{Name: "newt_*_latency_seconds"},
+		sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}}},
 	)))
-// Attribute whitelist: only allow expected low-cardinality keys on newt_* instruments.
 	mpOpts = append(mpOpts, sdkmetric.WithView(sdkmetric.NewView(
 		sdkmetric.Instrument{Name: "newt_*"},
-		sdkmetric.Stream{
-			AttributeFilter: func(kv attribute.KeyValue) bool {
-				k := string(kv.Key)
-				switch k {
-				case "tunnel_id", "transport", "direction", "protocol", "result", "reason", "initiator", "error_type", "msg_type", "phase", "version", "commit", "site_id", "region":
-					return true
-				default:
-					return false
-				}
-			},
-		},
-	)))
-	mp := sdkmetric.NewMeterProvider(mpOpts...)
-	otel.SetMeterProvider(mp)
-	s.MeterProvider = mp
-	s.shutdowns = append(s.shutdowns, mp.Shutdown)
-
-	// Optional tracing (OTLP over gRPC)
-	if cfg.OTLPEnabled {
-		topts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint)}
-		if hdrs := parseOTLPHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")); len(hdrs) > 0 {
-			topts = append(topts, otlptracegrpc.WithHeaders(hdrs))
-		}
-		if cfg.OTLPInsecure {
-			topts = append(topts, otlptracegrpc.WithInsecure())
-		} else if certFile := os.Getenv("OTEL_EXPORTER_OTLP_CERTIFICATE"); certFile != "" {
-			creds, cerr := credentials.NewClientTLSFromFile(certFile, "")
-			if cerr == nil {
-				topts = append(topts, otlptracegrpc.WithTLSCredentials(creds))
+		sdkmetric.Stream{AttributeFilter: func(kv attribute.KeyValue) bool {
+			k := string(kv.Key)
+			switch k {
+			case "tunnel_id", "transport", "direction", "protocol", "result", "reason", "initiator", "error_type", "msg_type", "phase", "version", "commit", "site_id", "region":
+				return true
+			default:
+				return false
 			}
-		}
-		exp, err := otlptracegrpc.New(ctx, topts...)
-		if err == nil {
-			tp := sdktrace.NewTracerProvider(
-				sdktrace.WithBatcher(exp),
-				sdktrace.WithResource(res),
-			)
-			otel.SetTracerProvider(tp)
-			s.TracerProvider = tp
-			s.shutdowns = append(s.shutdowns, func(ctx context.Context) error {
-				return errors.Join(exp.Shutdown(ctx), tp.Shutdown(ctx))
-			})
-		}
-	}
+		}},
+	)))
+	return sdkmetric.NewMeterProvider(mpOpts...)
+}
 
-	// Export Go runtime metrics (goroutines, GC, mem, etc.)
-	_ = runtime.Start(runtime.WithMeterProvider(mp))
-
-	// Register instruments after provider is set
-	if err := registerInstruments(); err != nil {
-		return nil, err
+func setupTracing(ctx context.Context, cfg Config, res *resource.Resource) (*sdktrace.TracerProvider, *otlptracegrpc.Exporter) {
+	topts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint)}
+	if hdrs := parseOTLPHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")); len(hdrs) > 0 { topts = append(topts, otlptracegrpc.WithHeaders(hdrs)) }
+	if cfg.OTLPInsecure { topts = append(topts, otlptracegrpc.WithInsecure()) } else if certFile := os.Getenv("OTEL_EXPORTER_OTLP_CERTIFICATE"); certFile != "" {
+		if creds, cerr := credentials.NewClientTLSFromFile(certFile, ""); cerr == nil { topts = append(topts, otlptracegrpc.WithTLSCredentials(creds)) }
 	}
-	// Optional build info metric
-	if cfg.BuildVersion != "" || cfg.BuildCommit != "" {
-		RegisterBuildInfo(cfg.BuildVersion, cfg.BuildCommit)
-	}
-
-	return s, nil
+	exp, err := otlptracegrpc.New(ctx, topts...)
+	if err != nil { return nil, nil }
+	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exp), sdktrace.WithResource(res))
+	return tp, exp
 }
 
 // Shutdown flushes exporters and providers in reverse init order.

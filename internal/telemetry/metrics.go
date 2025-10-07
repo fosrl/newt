@@ -70,115 +70,116 @@ func registerInstruments() error {
 	var err error
 	initOnce.Do(func() {
 		meter = otel.Meter("newt")
-
-		// Site / Registration
-		mSiteRegistrations, err = meter.Int64Counter("newt_site_registrations_total",
-			metric.WithDescription("Total site registration attempts"))
-		if err != nil {
-			return
-		}
-		mSiteOnline, err = meter.Int64ObservableGauge("newt_site_online",
-			metric.WithDescription("Site online (0/1)"))
-		if err != nil {
-			return
-		}
-		mSiteLastHeartbeat, err = meter.Float64ObservableGauge("newt_site_last_heartbeat_seconds",
-			metric.WithDescription("Seconds since last site heartbeat"))
-		if err != nil {
-			return
-		}
-
-		// Tunnel / Sessions
-		mTunnelSessions, err = meter.Int64ObservableGauge("newt_tunnel_sessions",
-			metric.WithDescription("Active tunnel sessions"))
-		if err != nil {
-			return
-		}
-		mTunnelBytes, err = meter.Int64Counter("newt_tunnel_bytes_total",
-			metric.WithDescription("Tunnel bytes ingress/egress"),
-			metric.WithUnit("By"))
-		if err != nil {
-			return
-		}
-		mTunnelLatency, err = meter.Float64Histogram("newt_tunnel_latency_seconds",
-			metric.WithDescription("Per-tunnel latency in seconds"),
-			metric.WithUnit("s"))
-		if err != nil {
-			return
-		}
-		mReconnects, err = meter.Int64Counter("newt_tunnel_reconnects_total",
-			metric.WithDescription("Tunnel reconnect events"))
-		if err != nil {
-			return
-		}
-
-		// Connection / NAT
-		mConnAttempts, err = meter.Int64Counter("newt_connection_attempts_total",
-			metric.WithDescription("Connection attempts"))
-		if err != nil {
-			return
-		}
-		mConnErrors, err = meter.Int64Counter("newt_connection_errors_total",
-			metric.WithDescription("Connection errors by type"))
-		if err != nil {
-			return
-		}
-
-		// Config/Restart
-		mConfigReloads, _ = meter.Int64Counter("newt_config_reloads_total",
-			metric.WithDescription("Configuration reloads"))
-		mRestartCount, _ = meter.Int64Counter("newt_restart_count_total",
-			metric.WithDescription("Process restart count (incremented on start)"))
-		mConfigApply, _ = meter.Float64Histogram("newt_config_apply_seconds",
-			metric.WithDescription("Configuration apply duration in seconds"),
-			metric.WithUnit("s"))
-		mCertRotationTotal, _ = meter.Int64Counter("newt_cert_rotation_total",
-			metric.WithDescription("Certificate rotation events (success/failure)"))
-
-		// Build info gauge (value 1 with version/commit attributes)
-		mBuildInfo, _ = meter.Int64ObservableGauge("newt_build_info",
-			metric.WithDescription("Newt build information (value is always 1)"))
-
-		// WebSocket
-		mWSConnectLatency, _ = meter.Float64Histogram("newt_websocket_connect_latency_seconds",
-			metric.WithDescription("WebSocket connect latency in seconds"),
-			metric.WithUnit("s"))
-		mWSMessages, _ = meter.Int64Counter("newt_websocket_messages_total",
-			metric.WithDescription("WebSocket messages by direction and type"))
-
-		// Proxy
-		mProxyActiveConns, _ = meter.Int64ObservableGauge("newt_proxy_active_connections",
-			metric.WithDescription("Proxy active connections per tunnel and protocol"))
-		mProxyBufferBytes, _ = meter.Int64ObservableGauge("newt_proxy_buffer_bytes",
-			metric.WithDescription("Proxy buffer bytes (may approximate async backlog)"),
-			metric.WithUnit("By"))
-		mProxyAsyncBacklogByte, _ = meter.Int64ObservableGauge("newt_proxy_async_backlog_bytes",
-			metric.WithDescription("Unflushed async byte backlog per tunnel and protocol"),
-			metric.WithUnit("By"))
-		mProxyDropsTotal, _ = meter.Int64Counter("newt_proxy_drops_total",
-			metric.WithDescription("Proxy drops due to write errors"))
-
-		// Register a default callback for build info if version/commit set
-		if _, e := meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
-			if buildVersion == "" && buildCommit == "" {
-				return nil
-			}
-			attrs := []attribute.KeyValue{}
-			if buildVersion != "" {
-				attrs = append(attrs, attribute.String("version", buildVersion))
-			}
-			if buildCommit != "" {
-				attrs = append(attrs, attribute.String("commit", buildCommit))
-			}
-			attrs = append(attrs, siteAttrs()...)
-			o.ObserveInt64(mBuildInfo, 1, metric.WithAttributes(attrs...))
-			return nil
-		}, mBuildInfo); e != nil {
-			// forward to global OTel error handler; Init will continue but build_info will be missing
-			otel.Handle(e)
-		}
+		if e := registerSiteInstruments(); e != nil { err = e; return }
+		if e := registerTunnelInstruments(); e != nil { err = e; return }
+		if e := registerConnInstruments(); e != nil { err = e; return }
+		if e := registerConfigInstruments(); e != nil { err = e; return }
+		if e := registerBuildWSProxyInstruments(); e != nil { err = e; return }
 	})
 	return err
+}
+
+func registerSiteInstruments() error {
+	var err error
+	mSiteRegistrations, err = meter.Int64Counter("newt_site_registrations_total",
+		metric.WithDescription("Total site registration attempts"))
+	if err != nil { return err }
+	mSiteOnline, err = meter.Int64ObservableGauge("newt_site_online",
+		metric.WithDescription("Site online (0/1)"))
+	if err != nil { return err }
+	mSiteLastHeartbeat, err = meter.Float64ObservableGauge("newt_site_last_heartbeat_seconds",
+		metric.WithDescription("Seconds since last site heartbeat"))
+	if err != nil { return err }
+	return nil
+}
+
+func registerTunnelInstruments() error {
+	var err error
+	mTunnelSessions, err = meter.Int64ObservableGauge("newt_tunnel_sessions",
+		metric.WithDescription("Active tunnel sessions"))
+	if err != nil { return err }
+	mTunnelBytes, err = meter.Int64Counter("newt_tunnel_bytes_total",
+		metric.WithDescription("Tunnel bytes ingress/egress"),
+		metric.WithUnit("By"))
+	if err != nil { return err }
+	mTunnelLatency, err = meter.Float64Histogram("newt_tunnel_latency_seconds",
+		metric.WithDescription("Per-tunnel latency in seconds"),
+		metric.WithUnit("s"))
+	if err != nil { return err }
+	mReconnects, err = meter.Int64Counter("newt_tunnel_reconnects_total",
+		metric.WithDescription("Tunnel reconnect events"))
+	if err != nil { return err }
+	return nil
+}
+
+func registerConnInstruments() error {
+	var err error
+	mConnAttempts, err = meter.Int64Counter("newt_connection_attempts_total",
+		metric.WithDescription("Connection attempts"))
+	if err != nil { return err }
+	mConnErrors, err = meter.Int64Counter("newt_connection_errors_total",
+		metric.WithDescription("Connection errors by type"))
+	if err != nil { return err }
+	return nil
+}
+
+func registerConfigInstruments() error {
+	mConfigReloads, _ = meter.Int64Counter("newt_config_reloads_total",
+		metric.WithDescription("Configuration reloads"))
+	mRestartCount, _ = meter.Int64Counter("newt_restart_count_total",
+		metric.WithDescription("Process restart count (incremented on start)"))
+	mConfigApply, _ = meter.Float64Histogram("newt_config_apply_seconds",
+		metric.WithDescription("Configuration apply duration in seconds"),
+		metric.WithUnit("s"))
+	mCertRotationTotal, _ = meter.Int64Counter("newt_cert_rotation_total",
+		metric.WithDescription("Certificate rotation events (success/failure)"))
+	return nil
+}
+
+func registerBuildWSProxyInstruments() error {
+	// Build info gauge (value 1 with version/commit attributes)
+	mBuildInfo, _ = meter.Int64ObservableGauge("newt_build_info",
+		metric.WithDescription("Newt build information (value is always 1)"))
+	// WebSocket
+	mWSConnectLatency, _ = meter.Float64Histogram("newt_websocket_connect_latency_seconds",
+		metric.WithDescription("WebSocket connect latency in seconds"),
+		metric.WithUnit("s"))
+	mWSMessages, _ = meter.Int64Counter("newt_websocket_messages_total",
+		metric.WithDescription("WebSocket messages by direction and type"))
+	// Proxy
+	mProxyActiveConns, _ = meter.Int64ObservableGauge("newt_proxy_active_connections",
+		metric.WithDescription("Proxy active connections per tunnel and protocol"))
+	mProxyBufferBytes, _ = meter.Int64ObservableGauge("newt_proxy_buffer_bytes",
+		metric.WithDescription("Proxy buffer bytes (may approximate async backlog)"),
+		metric.WithUnit("By"))
+	mProxyAsyncBacklogByte, _ = meter.Int64ObservableGauge("newt_proxy_async_backlog_bytes",
+		metric.WithDescription("Unflushed async byte backlog per tunnel and protocol"),
+		metric.WithUnit("By"))
+	mProxyDropsTotal, _ = meter.Int64Counter("newt_proxy_drops_total",
+		metric.WithDescription("Proxy drops due to write errors"))
+	// Register a default callback for build info if version/commit set
+	reg, e := meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		if buildVersion == "" && buildCommit == "" {
+			return nil
+		}
+		attrs := []attribute.KeyValue{}
+		if buildVersion != "" {
+			attrs = append(attrs, attribute.String("version", buildVersion))
+		}
+		if buildCommit != "" {
+			attrs = append(attrs, attribute.String("commit", buildCommit))
+		}
+		attrs = append(attrs, siteAttrs()...)
+		o.ObserveInt64(mBuildInfo, 1, metric.WithAttributes(attrs...))
+		return nil
+	}, mBuildInfo)
+	if e != nil {
+		otel.Handle(e)
+	} else {
+		// Provide a functional stopper that unregisters the callback
+		obsStopper = func() { _ = reg.Unregister(context.Background()) }
+	}
+	return nil
 }
 
 // Observable registration: Newt can register a callback to report gauges.
@@ -216,10 +217,14 @@ func SetObservableCallback(cb func(context.Context, metric.Observer) error) {
 // SetProxyObservableCallback registers a callback to observe proxy gauges.
 func SetProxyObservableCallback(cb func(context.Context, metric.Observer) error) {
 	proxyObsOnce.Do(func() {
-	if _, e := meter.RegisterCallback(cb, mProxyActiveConns, mProxyBufferBytes, mProxyAsyncBacklogByte); e != nil {
+		reg, e := meter.RegisterCallback(cb, mProxyActiveConns, mProxyBufferBytes, mProxyAsyncBacklogByte)
+		if e != nil {
 			otel.Handle(e)
+			proxyStopper = func() {}
+			return
 		}
-		proxyStopper = func() {}
+		// Provide a functional stopper to unregister later if needed
+		proxyStopper = func() { _ = reg.Unregister(context.Background()) }
 	})
 }
 

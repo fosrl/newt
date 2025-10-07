@@ -37,34 +37,46 @@ func RegisterStateView(v StateView) {
 			if any := stateView.Load(); any != nil {
 				if sv, ok := any.(StateView); ok {
 					for _, siteID := range sv.ListSites() {
-						if online, ok := sv.Online(siteID); ok {
-							val := int64(0)
-							if online {
-								val = 1
-							}
-							o.ObserveInt64(mSiteOnline, val, metric.WithAttributes(
-								attribute.String("site_id", getSiteID()),
-							))
-						}
-						if t, ok := sv.LastHeartbeat(siteID); ok {
-							secs := time.Since(t).Seconds()
-							o.ObserveFloat64(mSiteLastHeartbeat, secs, metric.WithAttributes(
-								attribute.String("site_id", getSiteID()),
-							))
-						}
-						// If the view supports per-tunnel sessions, report them labeled by tunnel_id.
-						if tm, ok := any.(interface{ SessionsByTunnel() map[string]int64 }); ok {
-							for tid, n := range tm.SessionsByTunnel() {
-								o.ObserveInt64(mTunnelSessions, n, metric.WithAttributes(
-									attribute.String("site_id", getSiteID()),
-									attribute.String("tunnel_id", tid),
-								))
-							}
-						}
+						observeSiteOnlineFor(o, sv, siteID)
+						observeLastHeartbeatFor(o, sv, siteID)
+						observeSessionsFor(o, any)
 					}
 				}
 			}
 			return nil
 		})
+	}
+}
+
+func observeSiteOnlineFor(o metric.Observer, sv StateView, siteID string) {
+	if online, ok := sv.Online(siteID); ok {
+		val := int64(0)
+		if online { val = 1 }
+		o.ObserveInt64(mSiteOnline, val, metric.WithAttributes(
+			attribute.String("site_id", getSiteID()),
+		))
+	}
+}
+
+func observeLastHeartbeatFor(o metric.Observer, sv StateView, siteID string) {
+	if t, ok := sv.LastHeartbeat(siteID); ok {
+		secs := time.Since(t).Seconds()
+		o.ObserveFloat64(mSiteLastHeartbeat, secs, metric.WithAttributes(
+			attribute.String("site_id", getSiteID()),
+		))
+	}
+}
+
+func observeSessionsFor(o metric.Observer, any interface{}) {
+	if tm, ok := any.(interface{ SessionsByTunnel() map[string]int64 }); ok {
+		for tid, n := range tm.SessionsByTunnel() {
+			attrs := []attribute.KeyValue{
+				attribute.String("site_id", getSiteID()),
+			}
+			if ShouldIncludeTunnelID() && tid != "" {
+				attrs = append(attrs, attribute.String("tunnel_id", tid))
+			}
+			o.ObserveInt64(mTunnelSessions, n, metric.WithAttributes(attrs...))
+		}
 	}
 }
