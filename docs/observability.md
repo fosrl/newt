@@ -35,7 +35,8 @@ Runtime behavior
 
 Metric catalog (initial)
 
-- newt_site_registrations_total (counter) labels: result, region (optional); site_id is a resource attribute
+- newt_build_info (gauge) labels: version, commit; value is always 1
+- newt_site_registrations_total (counter) labels: result; site_id and region are resource attributes
 - newt_site_online (observable gauge) no labels (0/1)
 - newt_site_last_heartbeat_seconds (observable gauge) no labels
 - newt_tunnel_sessions (observable gauge) labels: tunnel_id, transport
@@ -101,6 +102,9 @@ OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer abc123,tenant=acme" \
 ```
 
 Prometheus scrape strategy (choose one)
+
+Important: Do not scrape both Newt (2112) and the Collector’s Prometheus exporter (8889) at the same time for the same process. Doing so will double-count cumulative counters.
+
 A) Scrape Newt directly:
 
 ```
@@ -157,7 +161,7 @@ sum(newt_tunnel_sessions)
 Compatibility notes
 
 - Gauges do not use the _total suffix (e.g., newt_tunnel_sessions).
-- site_id is a resource attribute (one process = one site). tunnel_id is a metric label (WireGuard public key). Never expose secrets in labels.
+- site_id and region are resource attributes (one process = one site). Only non-empty resource attributes are exported. tunnel_id is a metric label (WireGuard public key). Never expose secrets in labels.
 - Avoid double-scraping: scrape either Newt (/metrics) or the Collector's Prometheus exporter, not both.
 - Prometheus does not accept remote_write; use Mimir/Cortex/VM/Thanos-Receive for remote_write.
 - No free text in labels; use only the enumerated constants for reason and protocol.
