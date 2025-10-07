@@ -348,7 +348,52 @@ func main() {
 	loggerLevel := parseLogLevel(logLevel)
 	logger.GetLogger().SetLevel(parseLogLevel(logLevel))
 
-	newtVersion := "version_replaceme"
+	// Initialize telemetry after flags are parsed (so flags override env)
+	tcfg := telemetry.FromEnv()
+	tcfg.PromEnabled = metricsEnabled
+	tcfg.OTLPEnabled = otlpEnabled
+	if adminAddr != "" {
+		tcfg.AdminAddr = adminAddr
+	}
+	// Resource attributes (if available)
+	tcfg.SiteID = id
+	tcfg.Region = region
+	// Build info
+	tcfg.BuildVersion = newtVersion
+	tcfg.BuildCommit = os.Getenv("NEWT_COMMIT")
+
+	tel, telErr := telemetry.Init(ctx, tcfg)
+	if telErr != nil {
+		logger.Warn("Telemetry init failed: %v", telErr)
+	}
+	if tel != nil {
+		// Admin HTTP server (exposes /metrics when Prometheus exporter is enabled)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+		if tel.PrometheusHandler != nil {
+			mux.Handle("/metrics", tel.PrometheusHandler)
+		}
+		admin := &http.Server{
+			Addr:              tcfg.AdminAddr,
+			Handler:           otelhttp.NewHandler(mux, "newt-admin"),
+			ReadTimeout:       5 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			ReadHeaderTimeout: 5 * time.Second,
+			IdleTimeout:       30 * time.Second,
+		}
+		go func() {
+			if err := admin.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Warn("admin http error: %v", err)
+			}
+		}()
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = admin.Shutdown(ctx)
+		}()
+		defer func() { _ = tel.Shutdown(context.Background()) }()
+	}
+
 	if *version {
 		fmt.Println("Newt version " + newtVersion)
 		os.Exit(0)
