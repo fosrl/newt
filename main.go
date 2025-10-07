@@ -469,6 +469,8 @@ func main() {
 	}
 	endpoint = client.GetConfig().Endpoint // Update endpoint from config
 	id = client.GetConfig().ID             // Update ID from config
+	// Update site labels for metrics with the resolved ID
+	telemetry.UpdateSiteInfo(id, region)
 
 	// output env var values if set
 	logger.Debug("Endpoint: %v", endpoint)
@@ -733,12 +735,6 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 		// Close the WireGuard device and TUN
 		closeWgTunnel()
-
-		// Clear metrics attrs and sessions for the tunnel
-		if pm != nil {
-			pm.ClearTunnelID()
-			state.Global().ClearTunnel(wgData.PublicKey)
-		}
 
 		// Clear metrics attrs and sessions for the tunnel
 		if pm != nil {
