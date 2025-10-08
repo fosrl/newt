@@ -7,10 +7,10 @@ scrape_configs:
     static_configs:
       - targets: ['newt:2112']  # /metrics
     relabel_configs:
-      # optional: tunnel_id droppen
+    # optional: drop tunnel_id
       - action: labeldrop
         regex: 'tunnel_id'
-      # optional: nur bestimmte sites zulassen
+    # optional: allow only specific sites
       - action: keep
         source_labels: [site_id]
         regex: '(site-a|site-b)'

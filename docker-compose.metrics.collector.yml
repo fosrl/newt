@@ -5,11 +5,11 @@ services:
     env_file:
       - .env
     environment:
-      - NEWT_METRICS_PROMETHEUS_ENABLED=false   # wichtig: direkte /metrics-Erfassung aus
-      - NEWT_METRICS_OTLP_ENABLED=true          # OTLP an den Collector
+      - NEWT_METRICS_PROMETHEUS_ENABLED=false   # important: disable direct /metrics scraping
+      - NEWT_METRICS_OTLP_ENABLED=true          # OTLP to the Collector
       # optional:
       # - NEWT_METRICS_INCLUDE_TUNNEL_ID=false
-    # Falls Newt selbst Ports exponiert, hier NICHT 2112 mappen
+    # If Newt itself exposes ports, DO NOT map 2112 here
     # ports: []
 
   otel-collector:
@@ -19,7 +19,7 @@ services:
       - ./examples/otel-collector.yaml:/etc/otelcol/config.yaml:ro
     ports:
       - "4317:4317"   # OTLP gRPC
-      - "8889:8889"   # Prometheus Exporter (wird von Prometheus gescraped)
+      - "8889:8889"   # Prometheus Exporter (scraped by Prometheus)
 
   prometheus:
     image: prom/prometheus:latest
