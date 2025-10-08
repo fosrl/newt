@@ -91,6 +91,14 @@ func (s *stringSlice) Set(value string) error {
 	return nil
 }
 
+const (
+	fmtErrMarshaling        = "Error marshaling data: %v"
+	fmtReceivedMsg          = "Received: %+v"
+	topicWGRegister         = "newt/wg/register"
+	msgNoTunnelOrProxy      = "No tunnel IP or proxy manager available"
+	fmtErrParsingTargetData = "Error parsing target data: %v"
+)
+
 var (
 	endpoint                           string
 	id                                 string
@@ -398,7 +406,7 @@ func main() {
 		fmt.Println("Newt version " + newtVersion)
 		os.Exit(0)
 	} else {
-		logger.Info("Newt version " + newtVersion)
+		logger.Info("Newt version %s", newtVersion)
 	}
 
 	if err := updates.CheckForUpdate("fosrl", "newt", newtVersion); err != nil {
@@ -596,7 +604,7 @@ func main() {
 
 		jsonData, err := json.Marshal(msg.Data)
 		if err != nil {
-			logger.Info("Error marshaling data: %v", err)
+			logger.Info(fmtErrMarshaling, err)
 			return
 		}
 
@@ -605,7 +613,7 @@ func main() {
 			return
 		}
 
-		logger.Debug("Received: %+v", msg)
+		logger.Debug(fmtReceivedMsg, msg)
 		tun, tnet, err = netstack.CreateNetTUN(
 			[]netip.Addr{netip.MustParseAddr(wgData.TunnelIP)},
 			[]netip.Addr{netip.MustParseAddr(dns)},
@@ -788,7 +796,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 		jsonData, err := json.Marshal(msg.Data)
 		if err != nil {
-			logger.Info("Error marshaling data: %v", err)
+			logger.Info(fmtErrMarshaling, err)
 			return
 		}
 		if err := json.Unmarshal(jsonData, &exitNodeData); err != nil {
@@ -829,7 +837,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 				},
 			}
 
-			stopFunc = client.SendMessageInterval("newt/wg/register", map[string]interface{}{
+stopFunc = client.SendMessageInterval(topicWGRegister, map[string]interface{}{
 				"publicKey":   publicKey.String(),
 				"pingResults": pingResults,
 				"newtVersion": newtVersion,
@@ -932,7 +940,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		// Send the ping results to the cloud for selection
-		stopFunc = client.SendMessageInterval("newt/wg/register", map[string]interface{}{
+stopFunc = client.SendMessageInterval(topicWGRegister, map[string]interface{}{
 			"publicKey":   publicKey.String(),
 			"pingResults": pingResults,
 			"newtVersion": newtVersion,
@@ -942,17 +950,17 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	})
 
 	client.RegisterHandler("newt/tcp/add", func(msg websocket.WSMessage) {
-		logger.Debug("Received: %+v", msg)
+		logger.Debug(fmtReceivedMsg, msg)
 
 		// if there is no wgData or pm, we can't add targets
 		if wgData.TunnelIP == "" || pm == nil {
-			logger.Info("No tunnel IP or proxy manager available")
+			logger.Info(msgNoTunnelOrProxy)
 			return
 		}
 
 		targetData, err := parseTargetData(msg.Data)
 		if err != nil {
-			logger.Info("Error parsing target data: %v", err)
+			logger.Info(fmtErrParsingTargetData, err)
 			return
 		}
 
@@ -967,17 +975,17 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	})
 
 	client.RegisterHandler("newt/udp/add", func(msg websocket.WSMessage) {
-		logger.Info("Received: %+v", msg)
+		logger.Info(fmtReceivedMsg, msg)
 
 		// if there is no wgData or pm, we can't add targets
 		if wgData.TunnelIP == "" || pm == nil {
-			logger.Info("No tunnel IP or proxy manager available")
+			logger.Info(msgNoTunnelOrProxy)
 			return
 		}
 
 		targetData, err := parseTargetData(msg.Data)
 		if err != nil {
-			logger.Info("Error parsing target data: %v", err)
+			logger.Info(fmtErrParsingTargetData, err)
 			return
 		}
 
@@ -992,17 +1000,17 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	})
 
 	client.RegisterHandler("newt/udp/remove", func(msg websocket.WSMessage) {
-		logger.Info("Received: %+v", msg)
+		logger.Info(fmtReceivedMsg, msg)
 
 		// if there is no wgData or pm, we can't add targets
 		if wgData.TunnelIP == "" || pm == nil {
-			logger.Info("No tunnel IP or proxy manager available")
+			logger.Info(msgNoTunnelOrProxy)
 			return
 		}
 
 		targetData, err := parseTargetData(msg.Data)
 		if err != nil {
-			logger.Info("Error parsing target data: %v", err)
+			logger.Info(fmtErrParsingTargetData, err)
 			return
 		}
 
@@ -1017,17 +1025,17 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	})
 
 	client.RegisterHandler("newt/tcp/remove", func(msg websocket.WSMessage) {
-		logger.Info("Received: %+v", msg)
+		logger.Info(fmtReceivedMsg, msg)
 
 		// if there is no wgData or pm, we can't add targets
 		if wgData.TunnelIP == "" || pm == nil {
-			logger.Info("No tunnel IP or proxy manager available")
+			logger.Info(msgNoTunnelOrProxy)
 			return
 		}
 
 		targetData, err := parseTargetData(msg.Data)
 		if err != nil {
-			logger.Info("Error parsing target data: %v", err)
+			logger.Info(fmtErrParsingTargetData, err)
 			return
 		}
 
@@ -1111,7 +1119,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 		jsonData, err := json.Marshal(msg.Data)
 		if err != nil {
-			logger.Info("Error marshaling data: %v", err)
+			logger.Info(fmtErrMarshaling, err)
 			return
 		}
 		if err := json.Unmarshal(jsonData, &sshPublicKeyData); err != nil {
@@ -1268,9 +1276,9 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		if err := healthMonitor.EnableTarget(requestData.ID); err != nil {
-			logger.Error("Failed to enable health check target %s: %v", requestData.ID, err)
+			logger.Error("Failed to enable health check target %d: %v", requestData.ID, err)
 		} else {
-			logger.Info("Enabled health check target: %s", requestData.ID)
+			logger.Info("Enabled health check target: %d", requestData.ID)
 		}
 	})
 
@@ -1293,9 +1301,9 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		if err := healthMonitor.DisableTarget(requestData.ID); err != nil {
-			logger.Error("Failed to disable health check target %s: %v", requestData.ID, err)
+			logger.Error("Failed to disable health check target %d: %v", requestData.ID, err)
 		} else {
-			logger.Info("Disabled health check target: %s", requestData.ID)
+			logger.Info("Disabled health check target: %d", requestData.ID)
 		}
 	})
 
@@ -1340,7 +1348,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		}
 
 		// Send registration message to the server for backward compatibility
-		err := client.SendMessage("newt/wg/register", map[string]interface{}{
+		err := client.SendMessage(topicWGRegister, map[string]interface{}{
 			"publicKey":           publicKey.String(),
 			"newtVersion":         newtVersion,
 			"backwardsCompatible": true,
