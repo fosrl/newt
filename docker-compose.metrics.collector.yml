@@ -1,6 +1,9 @@
 services:
   newt:
-    image: your/newt:latest
+    build: .
+    image: newt:dev
+    env_file:
+      - .env
     environment:
       - NEWT_METRICS_PROMETHEUS_ENABLED=false   # wichtig: direkte /metrics-Erfassung aus
       - NEWT_METRICS_OTLP_ENABLED=true          # OTLP an den Collector
