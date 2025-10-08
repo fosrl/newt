@@ -91,7 +91,7 @@ func FromEnv() Config {
 		OTLPEndpoint:         getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
 		OTLPInsecure:         getenv("OTEL_EXPORTER_OTLP_INSECURE", "true") == "true",
 		MetricExportInterval: getdur("OTEL_METRIC_EXPORT_INTERVAL", 15*time.Second),
-		AdminAddr:            getenv("NEWT_ADMIN_ADDR", "*********:2112"),
+		AdminAddr:            getenv("NEWT_ADMIN_ADDR", ":2112"),
 	}
 }
 
@@ -123,7 +123,9 @@ func Init(ctx context.Context, cfg Config) (*Setup, error) {
 
 	s := &Setup{}
 	readers, promHandler, shutdowns, err := setupMetricExport(ctx, cfg, res)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	s.PrometheusHandler = promHandler
 	// Build provider
 	mp := buildMeterProvider(res, readers)
@@ -145,8 +147,12 @@ func Init(ctx context.Context, cfg Config) (*Setup, error) {
 	// Runtime metrics
 	_ = runtime.Start(runtime.WithMeterProvider(mp))
 	// Instruments
-	if err := registerInstruments(); err != nil { return nil, err }
-	if cfg.BuildVersion != "" || cfg.BuildCommit != "" { RegisterBuildInfo(cfg.BuildVersion, cfg.BuildCommit) }
+	if err := registerInstruments(); err != nil {
+		return nil, err
+	}
+	if cfg.BuildVersion != "" || cfg.BuildCommit != "" {
+		RegisterBuildInfo(cfg.BuildVersion, cfg.BuildCommit)
+	}
 	return s, nil
 }
 
@@ -155,8 +161,12 @@ func buildResource(ctx context.Context, cfg Config) *resource.Resource {
 		semconv.ServiceName(cfg.ServiceName),
 		semconv.ServiceVersion(cfg.ServiceVersion),
 	}
-	if cfg.SiteID != "" { attrs = append(attrs, attribute.String("site_id", cfg.SiteID)) }
-	if cfg.Region != "" { attrs = append(attrs, attribute.String("region", cfg.Region)) }
+	if cfg.SiteID != "" {
+		attrs = append(attrs, attribute.String("site_id", cfg.SiteID))
+	}
+	if cfg.Region != "" {
+		attrs = append(attrs, attribute.String("region", cfg.Region))
+	}
 	res, _ := resource.New(ctx, resource.WithFromEnv(), resource.WithHost(), resource.WithAttributes(attrs...))
 	return res
 }
@@ -168,18 +178,28 @@ func setupMetricExport(ctx context.Context, cfg Config, res *resource.Resource) 
 	if cfg.PromEnabled {
 		reg := promclient.NewRegistry()
 		exp, err := prometheus.New(prometheus.WithRegisterer(reg))
-		if err != nil { return nil, nil, nil, err }
+		if err != nil {
+			return nil, nil, nil, err
+		}
 		readers = append(readers, exp)
 		promHandler = promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 	}
 	if cfg.OTLPEnabled {
 		mopts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(cfg.OTLPEndpoint)}
-		if hdrs := parseOTLPHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")); len(hdrs) > 0 { mopts = append(mopts, otlpmetricgrpc.WithHeaders(hdrs)) }
-		if cfg.OTLPInsecure { mopts = append(mopts, otlpmetricgrpc.WithInsecure()) } else if certFile := os.Getenv("OTEL_EXPORTER_OTLP_CERTIFICATE"); certFile != "" {
-			if creds, cerr := credentials.NewClientTLSFromFile(certFile, ""); cerr == nil { mopts = append(mopts, otlpmetricgrpc.WithTLSCredentials(creds)) }
+		if hdrs := parseOTLPHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")); len(hdrs) > 0 {
+			mopts = append(mopts, otlpmetricgrpc.WithHeaders(hdrs))
+		}
+		if cfg.OTLPInsecure {
+			mopts = append(mopts, otlpmetricgrpc.WithInsecure())
+		} else if certFile := os.Getenv("OTEL_EXPORTER_OTLP_CERTIFICATE"); certFile != "" {
+			if creds, cerr := credentials.NewClientTLSFromFile(certFile, ""); cerr == nil {
+				mopts = append(mopts, otlpmetricgrpc.WithTLSCredentials(creds))
+			}
 		}
 		mexp, err := otlpmetricgrpc.New(ctx, mopts...)
-		if err != nil { return nil, nil, nil, err }
+		if err != nil {
+			return nil, nil, nil, err
+		}
 		readers = append(readers, sdkmetric.NewPeriodicReader(mexp, sdkmetric.WithInterval(cfg.MetricExportInterval)))
 		shutdowns = append(shutdowns, mexp.Shutdown)
 	}
@@ -189,7 +209,9 @@ func setupMetricExport(ctx context.Context, cfg Config, res *resource.Resource) 
 func buildMeterProvider(res *resource.Resource, readers []sdkmetric.Reader) *sdkmetric.MeterProvider {
 	var mpOpts []sdkmetric.Option
 	mpOpts = append(mpOpts, sdkmetric.WithResource(res))
-	for _, r := range readers { mpOpts = append(mpOpts, sdkmetric.WithReader(r)) }
+	for _, r := range readers {
+		mpOpts = append(mpOpts, sdkmetric.WithReader(r))
+	}
 	mpOpts = append(mpOpts, sdkmetric.WithView(sdkmetric.NewView(
 		sdkmetric.Instrument{Name: "newt_*_latency_seconds"},
 		sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}}},
@@ -211,12 +233,20 @@ func buildMeterProvider(res *resource.Resource, readers []sdkmetric.Reader) *sdk
 
 func setupTracing(ctx context.Context, cfg Config, res *resource.Resource) (*sdktrace.TracerProvider, func(context.Context) error) {
 	topts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint)}
-	if hdrs := parseOTLPHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")); len(hdrs) > 0 { topts = append(topts, otlptracegrpc.WithHeaders(hdrs)) }
-	if cfg.OTLPInsecure { topts = append(topts, otlptracegrpc.WithInsecure()) } else if certFile := os.Getenv("OTEL_EXPORTER_OTLP_CERTIFICATE"); certFile != "" {
-		if creds, cerr := credentials.NewClientTLSFromFile(certFile, ""); cerr == nil { topts = append(topts, otlptracegrpc.WithTLSCredentials(creds)) }
+	if hdrs := parseOTLPHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")); len(hdrs) > 0 {
+		topts = append(topts, otlptracegrpc.WithHeaders(hdrs))
+	}
+	if cfg.OTLPInsecure {
+		topts = append(topts, otlptracegrpc.WithInsecure())
+	} else if certFile := os.Getenv("OTEL_EXPORTER_OTLP_CERTIFICATE"); certFile != "" {
+		if creds, cerr := credentials.NewClientTLSFromFile(certFile, ""); cerr == nil {
+			topts = append(topts, otlptracegrpc.WithTLSCredentials(creds))
+		}
 	}
 	exp, err := otlptracegrpc.New(ctx, topts...)
-	if err != nil { return nil, nil }
+	if err != nil {
+		return nil, nil
+	}
 	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exp), sdktrace.WithResource(res))
 	return tp, exp.Shutdown
 }
