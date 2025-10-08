@@ -20,6 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"context"
+
 	"github.com/fosrl/newt/internal/telemetry"
 	"go.opentelemetry.io/otel"
 )
@@ -440,7 +441,7 @@ func (c *Client) establishConnection() error {
 		logger.Debug("WebSocket TLS certificate verification disabled via SKIP_TLS_VERIFY environment variable")
 	}
 
-conn, _, err := dialer.DialContext(spanCtx, u.String(), nil)
+	conn, _, err := dialer.DialContext(spanCtx, u.String(), nil)
 	lat := time.Since(start).Seconds()
 	if err != nil {
 		telemetry.IncConnAttempt(context.Background(), "websocket", "failure")
@@ -448,9 +449,9 @@ conn, _, err := dialer.DialContext(spanCtx, u.String(), nil)
 		telemetry.IncConnError(context.Background(), "websocket", etype)
 		telemetry.ObserveWSConnectLatency(context.Background(), lat, "failure", etype)
 		// Map handshake-related errors to reconnect reasons where appropriate
-		if etype == "tls" {
+		if etype == "tls_handshake" {
 			telemetry.IncReconnect(context.Background(), c.config.ID, "client", telemetry.ReasonHandshakeError)
-		} else if etype == "timeout" {
+		} else if etype == "dial_timeout" {
 			telemetry.IncReconnect(context.Background(), c.config.ID, "client", telemetry.ReasonTimeout)
 		} else {
 			telemetry.IncReconnect(context.Background(), c.config.ID, "client", telemetry.ReasonError)
@@ -563,10 +564,10 @@ func (c *Client) pingMonitor() {
 				return
 			}
 			c.writeMux.Lock()
-		err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(c.pingTimeout))
-		if err == nil {
-			telemetry.IncWSMessage(context.Background(), "out", "ping")
-		}
+			err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(c.pingTimeout))
+			if err == nil {
+				telemetry.IncWSMessage(context.Background(), "out", "ping")
+			}
 			c.writeMux.Unlock()
 			if err != nil {
 				// Check if we're shutting down before logging error and reconnecting
