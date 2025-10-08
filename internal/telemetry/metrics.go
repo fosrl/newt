@@ -224,7 +224,9 @@ func SetProxyObservableCallback(cb func(context.Context, metric.Observer) error)
 		reg, e := meter.RegisterCallback(cb, mProxyActiveConns, mProxyBufferBytes, mProxyAsyncBacklogByte)
 		if e != nil {
 			otel.Handle(e)
-			proxyStopper = func() {}
+			proxyStopper = func() {
+				// no-op: registration failed; keep stopper callable
+			}
 			return
 		}
 		// Provide a functional stopper to unregister later if needed
