@@ -210,7 +210,9 @@ func SetObservableCallback(cb func(context.Context, metric.Observer) error) {
 		reg, e := meter.RegisterCallback(cb, mSiteOnline, mSiteLastHeartbeat, mTunnelSessions)
 		if e != nil {
 			otel.Handle(e)
-			obsStopper = func() {}
+			obsStopper = func() {
+				// no-op: registration failed; keep stopper callable
+			}
 			return
 		}
 		// Provide a functional stopper mirroring proxy/build-info behavior

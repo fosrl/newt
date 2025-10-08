@@ -171,7 +171,7 @@ func buildResource(ctx context.Context, cfg Config) *resource.Resource {
 	return res
 }
 
-func setupMetricExport(ctx context.Context, cfg Config, res *resource.Resource) ([]sdkmetric.Reader, http.Handler, []func(context.Context) error, error) {
+func setupMetricExport(ctx context.Context, cfg Config, _ *resource.Resource) ([]sdkmetric.Reader, http.Handler, []func(context.Context) error, error) {
 	var readers []sdkmetric.Reader
 	var shutdowns []func(context.Context) error
 	var promHandler http.Handler

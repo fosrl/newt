@@ -39,7 +39,7 @@ func RegisterStateView(v StateView) {
 					for _, siteID := range sv.ListSites() {
 						observeSiteOnlineFor(o, sv, siteID)
 						observeLastHeartbeatFor(o, sv, siteID)
-						observeSessionsFor(o, any)
+						observeSessionsFor(o, siteID, sv)
 					}
 				}
 			}
@@ -51,9 +51,11 @@ func RegisterStateView(v StateView) {
 func observeSiteOnlineFor(o metric.Observer, sv StateView, siteID string) {
 	if online, ok := sv.Online(siteID); ok {
 		val := int64(0)
-		if online { val = 1 }
+		if online {
+			val = 1
+		}
 		o.ObserveInt64(mSiteOnline, val, metric.WithAttributes(
-			attribute.String("site_id", getSiteID()),
+			attribute.String("site_id", siteID),
 		))
 	}
 }
@@ -62,16 +64,16 @@ func observeLastHeartbeatFor(o metric.Observer, sv StateView, siteID string) {
 	if t, ok := sv.LastHeartbeat(siteID); ok {
 		secs := time.Since(t).Seconds()
 		o.ObserveFloat64(mSiteLastHeartbeat, secs, metric.WithAttributes(
-			attribute.String("site_id", getSiteID()),
+			attribute.String("site_id", siteID),
 		))
 	}
 }
 
-func observeSessionsFor(o metric.Observer, any interface{}) {
+func observeSessionsFor(o metric.Observer, siteID string, any interface{}) {
 	if tm, ok := any.(interface{ SessionsByTunnel() map[string]int64 }); ok {
 		for tid, n := range tm.SessionsByTunnel() {
 			attrs := []attribute.KeyValue{
-				attribute.String("site_id", getSiteID()),
+				attribute.String("site_id", siteID),
 			}
 			if ShouldIncludeTunnelID() && tid != "" {
 				attrs = append(attrs, attribute.String("tunnel_id", tid))
