@@ -952,22 +952,30 @@ func (s *WireGuardService) encryptPayload(payload []byte) (interface{}, error) {
 }
 
 func (s *WireGuardService) keepSendingUDPHolePunch(host string) {
+	logger.Info("Starting UDP hole punch routine to %s:21820", host)
+
 	// send initial hole punch
 	if err := s.sendUDPHolePunch(host + ":21820"); err != nil {
-		logger.Error("Failed to send initial UDP hole punch: %v", err)
+		logger.Debug("Failed to send initial UDP hole punch: %v", err)
 	}
 
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
+
+	timeout := time.NewTimer(15 * time.Second)
+	defer timeout.Stop()
 
 	for {
 		select {
 		case <-s.stopHolepunch:
 			logger.Info("Stopping UDP holepunch")
 			return
+		case <-timeout.C:
+			logger.Info("UDP holepunch routine timed out after 15 seconds")
+			return
 		case <-ticker.C:
 			if err := s.sendUDPHolePunch(host + ":21820"); err != nil {
-				logger.Error("Failed to send UDP hole punch: %v", err)
+				logger.Debug("Failed to send UDP hole punch: %v", err)
 			}
 		}
 	}

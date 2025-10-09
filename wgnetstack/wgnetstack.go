@@ -1076,10 +1076,16 @@ func (s *WireGuardService) keepSendingUDPHolePunch(host string) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
+	timeout := time.NewTimer(15 * time.Second)
+	defer timeout.Stop()
+
 	for {
 		select {
 		case <-s.stopHolepunch:
 			logger.Info("Stopping UDP holepunch")
+			return
+		case <-timeout.C:
+			logger.Info("UDP holepunch routine timed out after 15 seconds")
 			return
 		case <-ticker.C:
 			if err := s.sendUDPHolePunch(host + ":21820"); err != nil {
