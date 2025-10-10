@@ -9,8 +9,19 @@ services:
       - NEWT_METRICS_OTLP_ENABLED=true          # OTLP to the Collector
       # optional:
       # - NEWT_METRICS_INCLUDE_TUNNEL_ID=false
-    # If Newt itself exposes ports, DO NOT map 2112 here
-    # ports: []
+  # When using the Collector pattern, do NOT map the Newt admin/metrics port
+  # (2112) on the application service. Mapping 2112 here can cause port
+  # conflicts and may result in duplicated Prometheus scraping (app AND
+  # collector being scraped for the same metrics). Instead either:
+  #  - leave ports unset on the app service (recommended), or
+  #  - map 2112 only on a dedicated metrics/collector service that is
+  #    responsible for exposing metrics to Prometheus.
+  # Example: do NOT map here
+  # ports: []
+  # Example: map 2112 only on a collector service
+  # collector:
+  #   ports:
+  #     - "2112:2112"  # collector's prometheus exporter (scraped by Prometheus)
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
