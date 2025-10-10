@@ -71,14 +71,36 @@ func observeLastHeartbeatFor(o metric.Observer, sv StateView, siteID string) {
 
 func observeSessionsFor(o metric.Observer, siteID string, any interface{}) {
 	if tm, ok := any.(interface{ SessionsByTunnel() map[string]int64 }); ok {
-		for tid, n := range tm.SessionsByTunnel() {
-			attrs := []attribute.KeyValue{
-				attribute.String("site_id", siteID),
+		sessions := tm.SessionsByTunnel()
+		// If tunnel_id labels are enabled, preserve existing per-tunnel observations
+		if ShouldIncludeTunnelID() {
+			for tid, n := range sessions {
+				attrs := []attribute.KeyValue{
+					attribute.String("site_id", siteID),
+				}
+				if tid != "" {
+					attrs = append(attrs, attribute.String("tunnel_id", tid))
+				}
+				o.ObserveInt64(mTunnelSessions, n, metric.WithAttributes(attrs...))
 			}
-			if ShouldIncludeTunnelID() && tid != "" {
-				attrs = append(attrs, attribute.String("tunnel_id", tid))
-			}
-			o.ObserveInt64(mTunnelSessions, n, metric.WithAttributes(attrs...))
+			return
 		}
+		// When tunnel_id is disabled, collapse per-tunnel counts into a single site-level value
+		var total int64
+		for _, n := range sessions {
+			total += n
+		}
+		// If there are no per-tunnel entries, fall back to ActiveSessions() if available
+		if total == 0 {
+			if svAny := stateView.Load(); svAny != nil {
+				if sv, ok := svAny.(StateView); ok {
+					if n, ok2 := sv.ActiveSessions(siteID); ok2 {
+						total = n
+					}
+				}
+			}
+		}
+		o.ObserveInt64(mTunnelSessions, total, metric.WithAttributes(attribute.String("site_id", siteID)))
+		return
 	}
 }

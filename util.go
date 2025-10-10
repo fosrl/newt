@@ -225,6 +225,8 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 					}
 				}
 			case <-pingStopChan:
+				// Stop the goroutine when signaled
+				return
 			}
 		}
 	}()
@@ -293,12 +295,12 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 					// More lenient threshold for declaring connection lost under load
 					failureThreshold := 4
 					if consecutiveFailures >= failureThreshold && currentInterval < maxInterval {
-								if !connectionLost {
-									connectionLost = true
-									logger.Warn("Connection to server lost after %d failures. Continuous reconnection attempts will be made.", consecutiveFailures)
-									if tunnelID != "" {
-										telemetry.IncReconnect(context.Background(), tunnelID, "client", telemetry.ReasonTimeout)
-									}
+						if !connectionLost {
+							connectionLost = true
+							logger.Warn("Connection to server lost after %d failures. Continuous reconnection attempts will be made.", consecutiveFailures)
+							if tunnelID != "" {
+								telemetry.IncReconnect(context.Background(), tunnelID, "client", telemetry.ReasonTimeout)
+							}
 							stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
 							// Send registration message to the server for backward compatibility
 							err := client.SendMessage("newt/wg/register", map[string]interface{}{
