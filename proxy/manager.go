@@ -275,7 +275,7 @@ func (pm *ProxyManager) Start() error {
 			telemetry.ObserveProxyActiveConnsObs(o, e.activeTCP.Load(), e.attrOutTCP.ToSlice())
 			telemetry.ObserveProxyActiveConnsObs(o, e.activeUDP.Load(), e.attrOutUDP.ToSlice())
 			// backlog bytes (sum of unflushed counters)
-			b := int64(e.bytesInTCP.Load()+e.bytesOutTCP.Load()+e.bytesInUDP.Load()+e.bytesOutUDP.Load())
+			b := int64(e.bytesInTCP.Load() + e.bytesOutTCP.Load() + e.bytesInUDP.Load() + e.bytesOutUDP.Load())
 			telemetry.ObserveProxyAsyncBacklogObs(o, b, e.attrOutTCP.ToSlice())
 			telemetry.ObserveProxyBufferBytesObs(o, b, e.attrOutTCP.ToSlice())
 		}
@@ -598,13 +598,14 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 				continue
 			}
 
-				targetConn, err = net.DialUDP("udp", nil, targetUDPAddr)
-				if e := pm.getEntry(pm.currentTunnelID); e != nil {
-					e.activeUDP.Add(1)
-				}
+			targetConn, err = net.DialUDP("udp", nil, targetUDPAddr)
 			if err != nil {
 				logger.Error("Error connecting to target: %v", err)
 				continue
+			}
+			// Only increment activeUDP after a successful DialUDP
+			if e := pm.getEntry(pm.currentTunnelID); e != nil {
+				e.activeUDP.Add(1)
 			}
 
 			clientsMutex.Lock()
@@ -656,15 +657,15 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			}(clientKey, targetConn, remoteAddr)
 		}
 
-			written, err := targetConn.Write(buffer[:n])
-			if err != nil {
-				logger.Error("Error writing to target: %v", err)
-				telemetry.IncProxyDrops(context.Background(), pm.currentTunnelID, "udp")
-				targetConn.Close()
-				clientsMutex.Lock()
-				delete(clientConns, clientKey)
-				clientsMutex.Unlock()
-			} else if pm.currentTunnelID != "" && written > 0 {
+		written, err := targetConn.Write(buffer[:n])
+		if err != nil {
+			logger.Error("Error writing to target: %v", err)
+			telemetry.IncProxyDrops(context.Background(), pm.currentTunnelID, "udp")
+			targetConn.Close()
+			clientsMutex.Lock()
+			delete(clientConns, clientKey)
+			clientsMutex.Unlock()
+		} else if pm.currentTunnelID != "" && written > 0 {
 			if pm.asyncBytes {
 				if e := pm.getEntry(pm.currentTunnelID); e != nil {
 					e.bytesInUDP.Add(uint64(written))

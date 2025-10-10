@@ -18,4 +18,4 @@ scrape_configs:
   # WARNING: Do not enable this together with the 'newt' job above or you will double-count.
   # - job_name: 'otel-collector'
   #   static_configs:
-  #     - targets: ['collector:8889']
+  #     - targets: ['otel-collector:8889']

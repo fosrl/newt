@@ -125,7 +125,7 @@ global:
 scrape_configs:
   - job_name: otel-collector
     static_configs:
-      - targets: ["collector:8889"]
+      - targets: ["otel-collector:8889"]
 ```
 
 Reason mapping (source → reason)

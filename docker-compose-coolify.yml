@@ -1,5 +1,5 @@
 services:
-  collector:
+  otel-collector:
     image: otel/opentelemetry-collector:0.111.0
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
@@ -15,14 +15,14 @@ services:
       OTEL_SERVICE_NAME: newt
       NEWT_METRICS_PROMETHEUS_ENABLED: "true"
       NEWT_METRICS_OTLP_ENABLED: "true"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "collector:4317"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
       OTEL_EXPORTER_OTLP_INSECURE: "true"
       OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: "cumulative"
       NEWT_ADMIN_ADDR: "0.0.0.0:2112"
     ports:
       - "2112:2112"
     depends_on:
-      - collector
+      - otel-collector
 
   prometheus:
     image: prom/prometheus:v2.55.0
