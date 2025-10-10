@@ -118,6 +118,11 @@ func Init(ctx context.Context, cfg Config) (*Setup, error) {
 	} else {
 		includeTunnelIDVal.Store(false)
 	}
+        if getenv("NEWT_METRICS_INCLUDE_SITE_LABELS", "true") == "true" {
+                includeSiteLabelVal.Store(true)
+        } else {
+                includeSiteLabelVal.Store(false)
+        }
 	res := buildResource(ctx, cfg)
 	UpdateSiteInfo(cfg.SiteID, cfg.Region)
 
@@ -294,7 +299,10 @@ func parseResourceAttributes(s string) map[string]string {
 // Global site/region used to enrich metric labels.
 var siteIDVal atomic.Value
 var regionVal atomic.Value
-var includeTunnelIDVal atomic.Value // bool; default true
+var (
+	includeTunnelIDVal  atomic.Value // bool; default true
+	includeSiteLabelVal atomic.Value // bool; default false
+)
 
 // UpdateSiteInfo updates the global site_id and region used for metric labels.
 // Thread-safe via atomic.Value: subsequent metric emissions will include
@@ -335,7 +343,12 @@ func siteAttrs() []attribute.KeyValue {
 }
 
 // SiteLabelKVs exposes site label KVs for other packages (e.g., proxy manager).
-func SiteLabelKVs() []attribute.KeyValue { return siteAttrs() }
+func SiteLabelKVs() []attribute.KeyValue {
+	if !ShouldIncludeSiteLabels() {
+		return nil
+	}
+	return siteAttrs()
+}
 
 // ShouldIncludeTunnelID returns whether tunnel_id labels should be emitted.
 func ShouldIncludeTunnelID() bool {
@@ -343,6 +356,15 @@ func ShouldIncludeTunnelID() bool {
 		return v
 	}
 	return true
+}
+
+// ShouldIncludeSiteLabels returns whether site_id/region should be emitted as
+// metric labels in addition to resource attributes.
+func ShouldIncludeSiteLabels() bool {
+	if v, ok := includeSiteLabelVal.Load().(bool); ok {
+		return v
+	}
+	return false
 }
 
 func getenv(k, d string) string {

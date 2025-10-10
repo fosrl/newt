@@ -3,6 +3,8 @@ package telemetry
 import (
 	"context"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -37,9 +39,9 @@ var (
 
 	// Config/Restart
 	mConfigReloads     metric.Int64Counter
-	mRestartCount      metric.Int64Counter
 	mConfigApply       metric.Float64Histogram
 	mCertRotationTotal metric.Int64Counter
+	mProcessStartTime  metric.Float64ObservableGauge
 
 	// Build info
 	mBuildInfo metric.Int64ObservableGauge
@@ -50,6 +52,8 @@ var (
 	mWSDisconnects      metric.Int64Counter
 	mWSKeepaliveFailure metric.Int64Counter
 	mWSSessionDuration  metric.Float64Histogram
+	mWSConnected        metric.Int64ObservableGauge
+	mWSReconnects       metric.Int64Counter
 
 	// Proxy
 	mProxyActiveConns      metric.Int64ObservableGauge
@@ -58,16 +62,28 @@ var (
 	mProxyDropsTotal       metric.Int64Counter
 	mProxyAcceptsTotal     metric.Int64Counter
 	mProxyConnDuration     metric.Float64Histogram
+	mProxyConnectionsTotal metric.Int64Counter
 
-	buildVersion string
-	buildCommit  string
+	buildVersion     string
+	buildCommit      string
+	processStartUnix = float64(time.Now().UnixNano()) / 1e9
+	wsConnectedState atomic.Int64
 )
 
-// attrsWithSite appends global site/region labels when present.
+// Proxy connection lifecycle events.
+const (
+	ProxyConnectionOpened = "opened"
+	ProxyConnectionClosed = "closed"
+)
+
+// attrsWithSite appends site/region labels only when explicitly enabled to keep
+// label cardinality low by default.
 func attrsWithSite(extra ...attribute.KeyValue) []attribute.KeyValue {
-	attrs := make([]attribute.KeyValue, 0, len(extra)+2)
-	attrs = append(attrs, extra...)
-	attrs = append(attrs, siteAttrs()...)
+	attrs := make([]attribute.KeyValue, len(extra))
+	copy(attrs, extra)
+	if ShouldIncludeSiteLabels() {
+		attrs = append(attrs, siteAttrs()...)
+	}
 	return attrs
 }
 
@@ -111,8 +127,9 @@ func registerSiteInstruments() error {
 	if err != nil {
 		return err
 	}
-	mSiteLastHeartbeat, err = meter.Float64ObservableGauge("newt_site_last_heartbeat_seconds",
-		metric.WithDescription("Seconds since last site heartbeat"))
+	mSiteLastHeartbeat, err = meter.Float64ObservableGauge("newt_site_last_heartbeat_timestamp_seconds",
+		metric.WithDescription("Unix timestamp of the last site heartbeat"),
+		metric.WithUnit("s"))
 	if err != nil {
 		return err
 	}
@@ -164,13 +181,22 @@ func registerConnInstruments() error {
 func registerConfigInstruments() error {
 	mConfigReloads, _ = meter.Int64Counter("newt_config_reloads_total",
 		metric.WithDescription("Configuration reloads"))
-	mRestartCount, _ = meter.Int64Counter("newt_restart_count_total",
-		metric.WithDescription("Process restart count (incremented on start)"))
 	mConfigApply, _ = meter.Float64Histogram("newt_config_apply_seconds",
 		metric.WithDescription("Configuration apply duration in seconds"),
 		metric.WithUnit("s"))
 	mCertRotationTotal, _ = meter.Int64Counter("newt_cert_rotation_total",
 		metric.WithDescription("Certificate rotation events (success/failure)"))
+	mProcessStartTime, _ = meter.Float64ObservableGauge("process_start_time_seconds",
+		metric.WithDescription("Unix timestamp of the process start time"),
+		metric.WithUnit("s"))
+	if mProcessStartTime != nil {
+		if _, err := meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+			o.ObserveFloat64(mProcessStartTime, processStartUnix)
+			return nil
+		}, mProcessStartTime); err != nil {
+			otel.Handle(err)
+		}
+	}
 	return nil
 }
 
@@ -191,6 +217,10 @@ func registerBuildWSProxyInstruments() error {
 	mWSSessionDuration, _ = meter.Float64Histogram("newt_websocket_session_duration_seconds",
 		metric.WithDescription("Duration of established WebSocket sessions"),
 		metric.WithUnit("s"))
+	mWSConnected, _ = meter.Int64ObservableGauge("newt_websocket_connected",
+		metric.WithDescription("WebSocket connection state (1=connected, 0=disconnected)"))
+	mWSReconnects, _ = meter.Int64Counter("newt_websocket_reconnects_total",
+		metric.WithDescription("WebSocket reconnect attempts by reason"))
 	// Proxy
 	mProxyActiveConns, _ = meter.Int64ObservableGauge("newt_proxy_active_connections",
 		metric.WithDescription("Proxy active connections per tunnel and protocol"))
@@ -207,6 +237,8 @@ func registerBuildWSProxyInstruments() error {
 	mProxyConnDuration, _ = meter.Float64Histogram("newt_proxy_connection_duration_seconds",
 		metric.WithDescription("Duration of completed proxy connections"),
 		metric.WithUnit("s"))
+	mProxyConnectionsTotal, _ = meter.Int64Counter("newt_proxy_connections_total",
+		metric.WithDescription("Proxy connection lifecycle events by protocol"))
 	// Register a default callback for build info if version/commit set
 	reg, e := meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if buildVersion == "" && buildCommit == "" {
@@ -219,7 +251,9 @@ func registerBuildWSProxyInstruments() error {
 		if buildCommit != "" {
 			attrs = append(attrs, attribute.String("commit", buildCommit))
 		}
-		attrs = append(attrs, siteAttrs()...)
+		if ShouldIncludeSiteLabels() {
+			attrs = append(attrs, siteAttrs()...)
+		}
 		o.ObserveInt64(mBuildInfo, 1, metric.WithAttributes(attrs...))
 		return nil
 	}, mBuildInfo)
@@ -229,6 +263,17 @@ func registerBuildWSProxyInstruments() error {
 		// Provide a functional stopper that unregisters the callback
 		obsStopper = func() { _ = reg.Unregister() }
 	}
+	if mWSConnected != nil {
+		if regConn, err := meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+			val := wsConnectedState.Load()
+			o.ObserveInt64(mWSConnected, val, metric.WithAttributes(attrsWithSite()...))
+			return nil
+		}, mWSConnected); err != nil {
+			otel.Handle(err)
+		} else {
+			wsConnStopper = func() { _ = regConn.Unregister() }
+		}
+	}
 	return nil
 }
 
@@ -237,10 +282,11 @@ func registerBuildWSProxyInstruments() error {
 // heartbeat seconds, and active sessions.
 
 var (
-	obsOnce      sync.Once
-	obsStopper   func()
-	proxyObsOnce sync.Once
-	proxyStopper func()
+	obsOnce       sync.Once
+	obsStopper    func()
+	proxyObsOnce  sync.Once
+	proxyStopper  func()
+	wsConnStopper func()
 )
 
 // SetObservableCallback registers a single callback that will be invoked
@@ -251,7 +297,7 @@ var (
 //
 //	telemetry.SetObservableCallback(func(ctx context.Context, o metric.Observer) error {
 //	    o.ObserveInt64(mSiteOnline, 1)
-//	    o.ObserveFloat64(mSiteLastHeartbeat, time.Since(lastHB).Seconds())
+//	    o.ObserveFloat64(mSiteLastHeartbeat, float64(lastHB.Unix()))
 //	    o.ObserveInt64(mTunnelSessions, int64(len(activeSessions)))
 //	    return nil
 //	})
@@ -290,8 +336,6 @@ func SetProxyObservableCallback(cb func(context.Context, metric.Observer) error)
 func RegisterBuildInfo(version, commit string) {
 	buildVersion = version
 	buildCommit = commit
-	// Increment restart count on boot
-	mRestartCount.Add(context.Background(), 1)
 }
 
 // Config reloads
@@ -358,6 +402,25 @@ func IncWSKeepaliveFailure(ctx context.Context, reason string) {
 	)...))
 }
 
+// SetWSConnectionState updates the backing gauge for the WebSocket connected state.
+func SetWSConnectionState(connected bool) {
+	if connected {
+		wsConnectedState.Store(1)
+	} else {
+		wsConnectedState.Store(0)
+	}
+}
+
+// IncWSReconnect increments the WebSocket reconnect counter with a bounded reason label.
+func IncWSReconnect(ctx context.Context, reason string) {
+	if reason == "" {
+		reason = "unknown"
+	}
+	mWSReconnects.Add(ctx, 1, metric.WithAttributes(attrsWithSite(
+		attribute.String("reason", reason),
+	)...))
+}
+
 func ObserveWSSessionDuration(ctx context.Context, seconds float64, result string) {
 	mWSSessionDuration.Record(ctx, seconds, metric.WithAttributes(attrsWithSite(
 		attribute.String("result", result),
@@ -411,6 +474,21 @@ func ObserveProxyConnectionDuration(ctx context.Context, tunnelID, protocol, res
 		attrs = append(attrs, attribute.String("tunnel_id", tunnelID))
 	}
 	mProxyConnDuration.Record(ctx, seconds, metric.WithAttributes(attrsWithSite(attrs...)...))
+}
+
+// IncProxyConnectionEvent records proxy connection lifecycle events (opened/closed).
+func IncProxyConnectionEvent(ctx context.Context, tunnelID, protocol, event string) {
+	if event == "" {
+		event = "unknown"
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("protocol", protocol),
+		attribute.String("event", event),
+	}
+	if ShouldIncludeTunnelID() && tunnelID != "" {
+		attrs = append(attrs, attribute.String("tunnel_id", tunnelID))
+	}
+	mProxyConnectionsTotal.Add(ctx, 1, metric.WithAttributes(attrsWithSite(attrs...)...))
 }
 
 // --- Config/PKI helpers ---
