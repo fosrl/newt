@@ -7,7 +7,7 @@ scrape_configs:
     static_configs:
       - targets: ['otel-collector:8889']
 
-    # optional: Kardinalität begrenzen
+    # optional: limit metric cardinality
     relabel_configs:
       - action: labeldrop
         regex: 'tunnel_id'
