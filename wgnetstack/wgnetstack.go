@@ -190,6 +190,13 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 	// Load or generate private key
 	if generateAndSaveKeyTo != "" {
 		if _, err := os.Stat(generateAndSaveKeyTo); os.IsNotExist(err) {
+			// File doesn't exist, save the generated key
+			err = os.WriteFile(generateAndSaveKeyTo, []byte(key.String()), 0600)
+			if err != nil {
+				return nil, fmt.Errorf("failed to save private key: %v", err)
+			}
+		} else {
+			// File exists, read the existing key
 			keyData, err := os.ReadFile(generateAndSaveKeyTo)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read private key: %v", err)
@@ -197,11 +204,6 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 			key, err = wgtypes.ParseKey(strings.TrimSpace(string(keyData)))
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse private key: %v", err)
-			}
-		} else {
-			err = os.WriteFile(generateAndSaveKeyTo, []byte(key.String()), 0600)
-			if err != nil {
-				return nil, fmt.Errorf("failed to save private key: %v", err)
 			}
 		}
 	}
@@ -1083,10 +1085,16 @@ func (s *WireGuardService) keepSendingUDPHolePunch(host string) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
+	timeout := time.NewTimer(15 * time.Second)
+	defer timeout.Stop()
+
 	for {
 		select {
 		case <-s.stopHolepunch:
 			logger.Info("Stopping UDP holepunch")
+			return
+		case <-timeout.C:
+			logger.Info("UDP holepunch routine timed out after 15 seconds")
 			return
 		case <-ticker.C:
 			if err := s.sendUDPHolePunch(host + ":21820"); err != nil {

@@ -45,6 +45,7 @@ type Client struct {
 	tlsConfig         TLSConfig
 	metricsCtxMu      sync.RWMutex
 	metricsCtx        context.Context
+	configNeedsSave   bool // Flag to track if config needs to be saved
 }
 
 type ClientOption func(*Client)

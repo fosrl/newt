@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/fosrl/newt/logger"
 )
 
 func getConfigPath(clientType string) string {
@@ -33,14 +35,25 @@ func getConfigPath(clientType string) string {
 }
 
 func (c *Client) loadConfig() error {
+	originalConfig := *c.config // Store original config to detect changes
+	configPath := getConfigPath(c.clientType)
+
 	if c.config.ID != "" && c.config.Secret != "" && c.config.Endpoint != "" {
+		logger.Debug("Config already provided, skipping loading from file")
+		// Check if config file exists, if not, we should save it
+		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			logger.Info("Config file does not exist at %s, will create it", configPath)
+			c.configNeedsSave = true
+		}
 		return nil
 	}
 
-	configPath := getConfigPath(c.clientType)
+	logger.Info("Loading config from: %s", configPath)
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
+			logger.Info("Config file does not exist at %s, will create it with provided values", configPath)
+			c.configNeedsSave = true
 			return nil
 		}
 		return err
@@ -50,6 +63,12 @@ func (c *Client) loadConfig() error {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return err
 	}
+
+	// Track what was loaded from file vs provided by CLI
+	fileHadID := c.config.ID == ""
+	fileHadSecret := c.config.Secret == ""
+	fileHadCert := c.config.TlsClientCert == ""
+	fileHadEndpoint := c.config.Endpoint == ""
 
 	if c.config.ID == "" {
 		c.config.ID = config.ID
@@ -65,14 +84,37 @@ func (c *Client) loadConfig() error {
 		c.baseURL = config.Endpoint
 	}
 
+	// Check if CLI args provided values that override file values
+	if (!fileHadID && originalConfig.ID != "") ||
+		(!fileHadSecret && originalConfig.Secret != "") ||
+		(!fileHadCert && originalConfig.TlsClientCert != "") ||
+		(!fileHadEndpoint && originalConfig.Endpoint != "") {
+		logger.Info("CLI arguments provided, config will be updated")
+		c.configNeedsSave = true
+	}
+
+	logger.Debug("Loaded config from %s", configPath)
+	logger.Debug("Config: %+v", c.config)
+
 	return nil
 }
 
 func (c *Client) saveConfig() error {
+	if !c.configNeedsSave {
+		logger.Debug("Config has not changed, skipping save")
+		return nil
+	}
+
 	configPath := getConfigPath(c.clientType)
 	data, err := json.MarshalIndent(c.config, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(configPath, data, 0644)
+
+	logger.Info("Saving config to: %s", configPath)
+	err = os.WriteFile(configPath, data, 0644)
+	if err == nil {
+		c.configNeedsSave = false // Reset flag after successful save
+	}
+	return err
 }

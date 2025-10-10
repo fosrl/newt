@@ -23,6 +23,7 @@ import (
 	"golang.org/x/net/ipv4"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun/netstack"
+	"gopkg.in/yaml.v3"
 )
 
 const msgHealthFileWriteFailed = "Failed to write health file: %v"
@@ -573,4 +574,48 @@ func executeUpdownScript(action, proto, target string) (string, error) {
 	}
 
 	return target, nil
+}
+
+func sendBlueprint(client *websocket.Client) error {
+	if blueprintFile == "" {
+		return nil
+	}
+	// try to read the blueprint file
+	blueprintData, err := os.ReadFile(blueprintFile)
+	if err != nil {
+		logger.Error("Failed to read blueprint file: %v", err)
+	} else {
+		// first we should convert the yaml to json and error if the yaml is bad
+		var yamlObj interface{}
+		var blueprintJsonData string
+
+		err = yaml.Unmarshal(blueprintData, &yamlObj)
+		if err != nil {
+			logger.Error("Failed to parse blueprint YAML: %v", err)
+		} else {
+			// convert to json
+			jsonBytes, err := json.Marshal(yamlObj)
+			if err != nil {
+				logger.Error("Failed to convert blueprint to JSON: %v", err)
+			} else {
+				blueprintJsonData = string(jsonBytes)
+				logger.Debug("Converted blueprint to JSON: %s", blueprintJsonData)
+			}
+		}
+
+		// if we have valid json data, we can send it to the server
+		if blueprintJsonData == "" {
+			logger.Error("No valid blueprint JSON data to send to server")
+			return nil
+		}
+
+		logger.Info("Sending blueprint to server for application")
+
+		// send the blueprint data to the server
+		err = client.SendMessage("newt/blueprint/apply", map[string]interface{}{
+			"blueprint": blueprintJsonData,
+		})
+	}
+
+	return nil
 }

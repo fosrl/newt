@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/fosrl/newt/logger"
@@ -320,4 +321,129 @@ func getHostContainer(dockerContext context.Context, dockerClient *client.Client
 	}
 
 	return &hostContainer, nil
+}
+
+// EventCallback defines the function signature for handling Docker events
+type EventCallback func(containers []Container)
+
+// EventMonitor handles Docker event monitoring
+type EventMonitor struct {
+	client                   *client.Client
+	ctx                      context.Context
+	cancel                   context.CancelFunc
+	callback                 EventCallback
+	socketPath               string
+	enforceNetworkValidation bool
+}
+
+// NewEventMonitor creates a new Docker event monitor
+func NewEventMonitor(socketPath string, enforceNetworkValidation bool, callback EventCallback) (*EventMonitor, error) {
+	if socketPath == "" {
+		socketPath = "unix:///var/run/docker.sock"
+	}
+
+	if !strings.Contains(socketPath, "://") {
+		socketPath = "unix://" + socketPath
+	}
+
+	cli, err := client.NewClientWithOpts(
+		client.WithHost(socketPath),
+		client.WithAPIVersionNegotiation(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Docker client: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	return &EventMonitor{
+		client:                   cli,
+		ctx:                      ctx,
+		cancel:                   cancel,
+		callback:                 callback,
+		socketPath:               socketPath,
+		enforceNetworkValidation: enforceNetworkValidation,
+	}, nil
+}
+
+// Start begins monitoring Docker events
+func (em *EventMonitor) Start() error {
+	logger.Debug("Starting Docker event monitoring")
+
+	// Filter for container events we care about
+	eventFilters := filters.NewArgs()
+	eventFilters.Add("type", "container")
+	// eventFilters.Add("event", "create")
+	eventFilters.Add("event", "start")
+	eventFilters.Add("event", "stop")
+	// eventFilters.Add("event", "destroy")
+	// eventFilters.Add("event", "die")
+	// eventFilters.Add("event", "pause")
+	// eventFilters.Add("event", "unpause")
+
+	// Start listening for events
+	eventCh, errCh := em.client.Events(em.ctx, events.ListOptions{
+		Filters: eventFilters,
+	})
+
+	go func() {
+		defer func() {
+			if err := em.client.Close(); err != nil {
+				logger.Error("Error closing Docker client: %v", err)
+			}
+		}()
+
+		for {
+			select {
+			case event := <-eventCh:
+				logger.Debug("Docker event received: %s %s for container %s", event.Action, event.Type, event.Actor.ID[:12])
+
+				// Fetch updated container list and trigger callback
+				go em.handleEvent(event)
+
+			case err := <-errCh:
+				if err != nil && err != context.Canceled {
+					logger.Error("Docker event stream error: %v", err)
+					// Try to reconnect after a brief delay
+					time.Sleep(5 * time.Second)
+					if em.ctx.Err() == nil {
+						logger.Info("Attempting to reconnect to Docker event stream")
+						eventCh, errCh = em.client.Events(em.ctx, events.ListOptions{
+							Filters: eventFilters,
+						})
+					}
+				}
+				return
+
+			case <-em.ctx.Done():
+				logger.Info("Docker event monitoring stopped")
+				return
+			}
+		}
+	}()
+
+	return nil
+}
+
+// handleEvent processes a Docker event and triggers the callback with updated container list
+func (em *EventMonitor) handleEvent(event events.Message) {
+	// Add a small delay to ensure Docker has fully processed the event
+	time.Sleep(100 * time.Millisecond)
+
+	containers, err := ListContainers(em.socketPath, em.enforceNetworkValidation)
+	if err != nil {
+		logger.Error("Failed to list containers after Docker event %s: %v", event.Action, err)
+		return
+	}
+
+	logger.Debug("Triggering callback with %d containers after Docker event %s", len(containers), event.Action)
+	em.callback(containers)
+}
+
+// Stop stops the event monitoring
+func (em *EventMonitor) Stop() {
+	logger.Info("Stopping Docker event monitoring")
+	if em.cancel != nil {
+		em.cancel()
+	}
 }

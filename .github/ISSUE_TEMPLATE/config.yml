@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+    - name: Need help or have questions?
+      url: https://github.com/orgs/fosrl/discussions
+      about: Ask questions, get help, and discuss with other community members
+    - name: Request a Feature
+      url: https://github.com/orgs/fosrl/discussions/new?category=feature-requests
+      about: Feature requests should be opened as discussions so others can upvote and comment

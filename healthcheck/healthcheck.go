@@ -76,7 +76,7 @@ type Monitor struct {
 
 // NewMonitor creates a new health check monitor
 func NewMonitor(callback StatusChangeCallback, enforceCert bool) *Monitor {
-	logger.Info("Creating new health check monitor with certificate enforcement: %t", enforceCert)
+	logger.Debug("Creating new health check monitor with certificate enforcement: %t", enforceCert)
 
 	// Configure TLS settings based on certificate enforcement
 	transport := &http.Transport{
