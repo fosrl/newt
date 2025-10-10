@@ -45,14 +45,19 @@ var (
 	mBuildInfo metric.Int64ObservableGauge
 
 	// WebSocket
-	mWSConnectLatency metric.Float64Histogram
-	mWSMessages       metric.Int64Counter
+	mWSConnectLatency   metric.Float64Histogram
+	mWSMessages         metric.Int64Counter
+	mWSDisconnects      metric.Int64Counter
+	mWSKeepaliveFailure metric.Int64Counter
+	mWSSessionDuration  metric.Float64Histogram
 
 	// Proxy
 	mProxyActiveConns      metric.Int64ObservableGauge
 	mProxyBufferBytes      metric.Int64ObservableGauge
 	mProxyAsyncBacklogByte metric.Int64ObservableGauge
 	mProxyDropsTotal       metric.Int64Counter
+	mProxyAcceptsTotal     metric.Int64Counter
+	mProxyConnDuration     metric.Float64Histogram
 
 	buildVersion string
 	buildCommit  string
@@ -179,6 +184,13 @@ func registerBuildWSProxyInstruments() error {
 		metric.WithUnit("s"))
 	mWSMessages, _ = meter.Int64Counter("newt_websocket_messages_total",
 		metric.WithDescription("WebSocket messages by direction and type"))
+	mWSDisconnects, _ = meter.Int64Counter("newt_websocket_disconnects_total",
+		metric.WithDescription("WebSocket disconnects by reason/result"))
+	mWSKeepaliveFailure, _ = meter.Int64Counter("newt_websocket_keepalive_failures_total",
+		metric.WithDescription("WebSocket keepalive (ping/pong) failures"))
+	mWSSessionDuration, _ = meter.Float64Histogram("newt_websocket_session_duration_seconds",
+		metric.WithDescription("Duration of established WebSocket sessions"),
+		metric.WithUnit("s"))
 	// Proxy
 	mProxyActiveConns, _ = meter.Int64ObservableGauge("newt_proxy_active_connections",
 		metric.WithDescription("Proxy active connections per tunnel and protocol"))
@@ -190,6 +202,11 @@ func registerBuildWSProxyInstruments() error {
 		metric.WithUnit("By"))
 	mProxyDropsTotal, _ = meter.Int64Counter("newt_proxy_drops_total",
 		metric.WithDescription("Proxy drops due to write errors"))
+	mProxyAcceptsTotal, _ = meter.Int64Counter("newt_proxy_accept_total",
+		metric.WithDescription("Proxy connection accepts by protocol and result"))
+	mProxyConnDuration, _ = meter.Float64Histogram("newt_proxy_connection_duration_seconds",
+		metric.WithDescription("Duration of completed proxy connections"),
+		metric.WithUnit("s"))
 	// Register a default callback for build info if version/commit set
 	reg, e := meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if buildVersion == "" && buildCommit == "" {
@@ -328,6 +345,25 @@ func IncWSMessage(ctx context.Context, direction, msgType string) {
 	)...))
 }
 
+func IncWSDisconnect(ctx context.Context, reason, result string) {
+	mWSDisconnects.Add(ctx, 1, metric.WithAttributes(attrsWithSite(
+		attribute.String("reason", reason),
+		attribute.String("result", result),
+	)...))
+}
+
+func IncWSKeepaliveFailure(ctx context.Context, reason string) {
+	mWSKeepaliveFailure.Add(ctx, 1, metric.WithAttributes(attrsWithSite(
+		attribute.String("reason", reason),
+	)...))
+}
+
+func ObserveWSSessionDuration(ctx context.Context, seconds float64, result string) {
+	mWSSessionDuration.Record(ctx, seconds, metric.WithAttributes(attrsWithSite(
+		attribute.String("result", result),
+	)...))
+}
+
 // --- Proxy helpers ---
 
 func ObserveProxyActiveConnsObs(o metric.Observer, value int64, attrs []attribute.KeyValue) {
@@ -350,6 +386,31 @@ func IncProxyDrops(ctx context.Context, tunnelID, protocol string) {
 		attrs = append(attrs, attribute.String("tunnel_id", tunnelID))
 	}
 	mProxyDropsTotal.Add(ctx, 1, metric.WithAttributes(attrsWithSite(attrs...)...))
+}
+
+func IncProxyAccept(ctx context.Context, tunnelID, protocol, result, reason string) {
+	attrs := []attribute.KeyValue{
+		attribute.String("protocol", protocol),
+		attribute.String("result", result),
+	}
+	if reason != "" {
+		attrs = append(attrs, attribute.String("reason", reason))
+	}
+	if ShouldIncludeTunnelID() && tunnelID != "" {
+		attrs = append(attrs, attribute.String("tunnel_id", tunnelID))
+	}
+	mProxyAcceptsTotal.Add(ctx, 1, metric.WithAttributes(attrsWithSite(attrs...)...))
+}
+
+func ObserveProxyConnectionDuration(ctx context.Context, tunnelID, protocol, result string, seconds float64) {
+	attrs := []attribute.KeyValue{
+		attribute.String("protocol", protocol),
+		attribute.String("result", result),
+	}
+	if ShouldIncludeTunnelID() && tunnelID != "" {
+		attrs = append(attrs, attribute.String("tunnel_id", tunnelID))
+	}
+	mProxyConnDuration.Record(ctx, seconds, metric.WithAttributes(attrsWithSite(attrs...)...))
 }
 
 // --- Config/PKI helpers ---

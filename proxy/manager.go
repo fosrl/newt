@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -95,6 +96,32 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 		}
 	}
 	return n, err
+}
+
+func classifyProxyError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return "closed"
+	}
+	if ne, ok := err.(net.Error); ok {
+		if ne.Timeout() {
+			return "timeout"
+		}
+		if ne.Temporary() {
+			return "temporary"
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "refused"):
+		return "refused"
+	case strings.Contains(msg, "reset"):
+		return "reset"
+	default:
+		return "io_error"
+	}
 }
 
 // NewProxyManager creates a new proxy manager instance
@@ -467,72 +494,69 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			// Check if we're shutting down or the listener was closed
+			telemetry.IncProxyAccept(context.Background(), pm.currentTunnelID, "tcp", "failure", classifyProxyError(err))
 			if !pm.running {
 				return
 			}
-
-			// Check for specific network errors that indicate the listener is closed
 			if ne, ok := err.(net.Error); ok && !ne.Temporary() {
 				logger.Info("TCP listener closed, stopping proxy handler for %v", listener.Addr())
 				return
 			}
-
 			logger.Error("Error accepting TCP connection: %v", err)
-			// Don't hammer the CPU if we hit a temporary error
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
-		// Count sessions only once per accepted TCP connection
-		if pm.currentTunnelID != "" {
-			state.Global().IncSessions(pm.currentTunnelID)
-			if e := pm.getEntry(pm.currentTunnelID); e != nil {
+		tunnelID := pm.currentTunnelID
+		telemetry.IncProxyAccept(context.Background(), tunnelID, "tcp", "success", "")
+		if tunnelID != "" {
+			state.Global().IncSessions(tunnelID)
+			if e := pm.getEntry(tunnelID); e != nil {
 				e.activeTCP.Add(1)
 			}
 		}
 
-		go func() {
+		go func(tunnelID string, accepted net.Conn) {
+			connStart := time.Now()
 			target, err := net.Dial("tcp", targetAddr)
 			if err != nil {
 				logger.Error("Error connecting to target: %v", err)
-				conn.Close()
+				accepted.Close()
+				telemetry.IncProxyAccept(context.Background(), tunnelID, "tcp", "failure", classifyProxyError(err))
+				telemetry.ObserveProxyConnectionDuration(context.Background(), tunnelID, "tcp", "failure", time.Since(connStart).Seconds())
 				return
 			}
 
-			// already incremented on accept
-
-			// Create a WaitGroup to ensure both copy operations complete
+			entry := pm.getEntry(tunnelID)
+			if entry == nil {
+				entry = &tunnelEntry{}
+			}
 			var wg sync.WaitGroup
 			wg.Add(2)
 
-			// client -> target (direction=in)
-			go func() {
+			go func(ent *tunnelEntry) {
 				defer wg.Done()
-				e := pm.getEntry(pm.currentTunnelID)
-				cw := &countingWriter{ctx: context.Background(), w: target, set: e.attrInTCP, pm: pm, ent: e, out: false, proto: "tcp"}
-				_, _ = io.Copy(cw, conn)
+				cw := &countingWriter{ctx: context.Background(), w: target, set: ent.attrInTCP, pm: pm, ent: ent, out: false, proto: "tcp"}
+				_, _ = io.Copy(cw, accepted)
 				_ = target.Close()
-			}()
+			}(entry)
 
-			// target -> client (direction=out)
-			go func() {
+			go func(ent *tunnelEntry) {
 				defer wg.Done()
-				e := pm.getEntry(pm.currentTunnelID)
-				cw := &countingWriter{ctx: context.Background(), w: conn, set: e.attrOutTCP, pm: pm, ent: e, out: true, proto: "tcp"}
+				cw := &countingWriter{ctx: context.Background(), w: accepted, set: ent.attrOutTCP, pm: pm, ent: ent, out: true, proto: "tcp"}
 				_, _ = io.Copy(cw, target)
-				_ = conn.Close()
-			}()
+				_ = accepted.Close()
+			}(entry)
 
-			// Wait for both copies to complete then session -1
 			wg.Wait()
-			if pm.currentTunnelID != "" {
-				state.Global().DecSessions(pm.currentTunnelID)
-				if e := pm.getEntry(pm.currentTunnelID); e != nil {
+			if tunnelID != "" {
+				state.Global().DecSessions(tunnelID)
+				if e := pm.getEntry(tunnelID); e != nil {
 					e.activeTCP.Add(-1)
 				}
 			}
-		}()
+			telemetry.ObserveProxyConnectionDuration(context.Background(), tunnelID, "tcp", "success", time.Since(connStart).Seconds())
+		}(tunnelID, conn)
 	}
 }
 
@@ -595,16 +619,20 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			targetUDPAddr, err := net.ResolveUDPAddr("udp", targetAddr)
 			if err != nil {
 				logger.Error("Error resolving target address: %v", err)
+				telemetry.IncProxyAccept(context.Background(), pm.currentTunnelID, "udp", "failure", "resolve")
 				continue
 			}
 
 			targetConn, err = net.DialUDP("udp", nil, targetUDPAddr)
 			if err != nil {
 				logger.Error("Error connecting to target: %v", err)
+				telemetry.IncProxyAccept(context.Background(), pm.currentTunnelID, "udp", "failure", classifyProxyError(err))
 				continue
 			}
+			tunnelID := pm.currentTunnelID
+			telemetry.IncProxyAccept(context.Background(), tunnelID, "udp", "success", "")
 			// Only increment activeUDP after a successful DialUDP
-			if e := pm.getEntry(pm.currentTunnelID); e != nil {
+			if e := pm.getEntry(tunnelID); e != nil {
 				e.activeUDP.Add(1)
 			}
 
@@ -612,18 +640,21 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			clientConns[clientKey] = targetConn
 			clientsMutex.Unlock()
 
-			go func(clientKey string, targetConn *net.UDPConn, remoteAddr net.Addr) {
+			go func(clientKey string, targetConn *net.UDPConn, remoteAddr net.Addr, tunnelID string) {
+				start := time.Now()
+				result := "success"
 				defer func() {
 					// Always clean up when this goroutine exits
 					clientsMutex.Lock()
 					if storedConn, exists := clientConns[clientKey]; exists && storedConn == targetConn {
 						delete(clientConns, clientKey)
 						targetConn.Close()
-						if e := pm.getEntry(pm.currentTunnelID); e != nil {
+						if e := pm.getEntry(tunnelID); e != nil {
 							e.activeUDP.Add(-1)
 						}
 					}
 					clientsMutex.Unlock()
+					telemetry.ObserveProxyConnectionDuration(context.Background(), tunnelID, "udp", result, time.Since(start).Seconds())
 				}()
 
 				buffer := make([]byte, 65507)
@@ -631,6 +662,7 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 					n, _, err := targetConn.ReadFromUDP(buffer)
 					if err != nil {
 						logger.Error("Error reading from target: %v", err)
+						result = "failure"
 						return // defer will handle cleanup
 					}
 
@@ -651,10 +683,11 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 					if err != nil {
 						logger.Error("Error writing to client: %v", err)
 						telemetry.IncProxyDrops(context.Background(), pm.currentTunnelID, "udp")
+						result = "failure"
 						return // defer will handle cleanup
 					}
 				}
-			}(clientKey, targetConn, remoteAddr)
+			}(clientKey, targetConn, remoteAddr, tunnelID)
 		}
 
 		written, err := targetConn.Write(buffer[:n])

@@ -586,6 +586,10 @@ func main() {
 	// Register handlers for different message types
 	client.RegisterHandler("newt/wg/connect", func(msg websocket.WSMessage) {
 		logger.Info("Received registration message")
+		regResult := "success"
+		defer func() {
+			telemetry.IncSiteRegistration(ctx, regResult)
+		}()
 		if stopFunc != nil {
 			stopFunc()     // stop the ws from sending more requests
 			stopFunc = nil // reset stopFunc to nil to avoid double stopping
@@ -605,11 +609,13 @@ func main() {
 		jsonData, err := json.Marshal(msg.Data)
 		if err != nil {
 			logger.Info(fmtErrMarshaling, err)
+			regResult = "failure"
 			return
 		}
 
 		if err := json.Unmarshal(jsonData, &wgData); err != nil {
 			logger.Info("Error unmarshaling target data: %v", err)
+			regResult = "failure"
 			return
 		}
 
@@ -620,6 +626,7 @@ func main() {
 			mtuInt)
 		if err != nil {
 			logger.Error("Failed to create TUN device: %v", err)
+			regResult = "failure"
 		}
 
 		setDownstreamTNetstack(tnet)
@@ -633,6 +640,7 @@ func main() {
 		host, _, err := net.SplitHostPort(wgData.Endpoint)
 		if err != nil {
 			logger.Error("Failed to split endpoint: %v", err)
+			regResult = "failure"
 			return
 		}
 
@@ -641,6 +649,7 @@ func main() {
 		endpoint, err := resolveDomain(wgData.Endpoint)
 		if err != nil {
 			logger.Error("Failed to resolve endpoint: %v", err)
+			regResult = "failure"
 			return
 		}
 
@@ -656,12 +665,14 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		err = dev.IpcSet(config)
 		if err != nil {
 			logger.Error("Failed to configure WireGuard device: %v", err)
+			regResult = "failure"
 		}
 
 		// Bring up the device
 		err = dev.Up()
 		if err != nil {
 			logger.Error("Failed to bring up WireGuard device: %v", err)
+			regResult = "failure"
 		}
 
 		logger.Debug("WireGuard device created. Lets ping the server now...")
@@ -676,10 +687,11 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		logger.Debug("Testing initial connection with reliable ping...")
 		lat, err := reliablePing(tnet, wgData.ServerIP, pingTimeout, 5)
 		if err == nil && wgData.PublicKey != "" {
-			telemetry.ObserveTunnelLatency(context.Background(), wgData.PublicKey, "wireguard", lat.Seconds())
+			telemetry.ObserveTunnelLatency(ctx, wgData.PublicKey, "wireguard", lat.Seconds())
 		}
 		if err != nil {
 			logger.Warn("Initial reliable ping failed, but continuing: %v", err)
+			regResult = "failure"
 		} else {
 			logger.Info("Initial connection test successful")
 		}
@@ -700,9 +712,6 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 		pm.SetTunnelID(wgData.PublicKey)
 
 		connected = true
-
-		// telemetry: record a successful site registration (omit region unless available)
-		telemetry.IncSiteRegistration(context.Background(), "success")
 
 		// add the targets if there are any
 		if len(wgData.Targets.TCP) > 0 {
@@ -738,7 +747,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	client.RegisterHandler("newt/wg/reconnect", func(msg websocket.WSMessage) {
 		logger.Info("Received reconnect message")
 		if wgData.PublicKey != "" {
-			telemetry.IncReconnect(context.Background(), wgData.PublicKey, "server", telemetry.ReasonServerRequest)
+			telemetry.IncReconnect(ctx, wgData.PublicKey, "server", telemetry.ReasonServerRequest)
 		}
 
 		// Close the WireGuard device and TUN
@@ -767,7 +776,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 	client.RegisterHandler("newt/wg/terminate", func(msg websocket.WSMessage) {
 		logger.Info("Received termination message")
 		if wgData.PublicKey != "" {
-			telemetry.IncReconnect(context.Background(), wgData.PublicKey, "server", telemetry.ReasonServerRequest)
+			telemetry.IncReconnect(ctx, wgData.PublicKey, "server", telemetry.ReasonServerRequest)
 		}
 
 		// Close the WireGuard device and TUN
@@ -837,7 +846,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 				},
 			}
 
-stopFunc = client.SendMessageInterval(topicWGRegister, map[string]interface{}{
+			stopFunc = client.SendMessageInterval(topicWGRegister, map[string]interface{}{
 				"publicKey":   publicKey.String(),
 				"pingResults": pingResults,
 				"newtVersion": newtVersion,
@@ -940,7 +949,7 @@ stopFunc = client.SendMessageInterval(topicWGRegister, map[string]interface{}{
 		}
 
 		// Send the ping results to the cloud for selection
-stopFunc = client.SendMessageInterval(topicWGRegister, map[string]interface{}{
+		stopFunc = client.SendMessageInterval(topicWGRegister, map[string]interface{}{
 			"publicKey":   publicKey.String(),
 			"pingResults": pingResults,
 			"newtVersion": newtVersion,
