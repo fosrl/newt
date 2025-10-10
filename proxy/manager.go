@@ -509,6 +509,7 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 
 		tunnelID := pm.currentTunnelID
 		telemetry.IncProxyAccept(context.Background(), tunnelID, "tcp", "success", "")
+		telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "tcp", telemetry.ProxyConnectionOpened)
 		if tunnelID != "" {
 			state.Global().IncSessions(tunnelID)
 			if e := pm.getEntry(tunnelID); e != nil {
@@ -523,6 +524,7 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 				logger.Error("Error connecting to target: %v", err)
 				accepted.Close()
 				telemetry.IncProxyAccept(context.Background(), tunnelID, "tcp", "failure", classifyProxyError(err))
+				telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "tcp", telemetry.ProxyConnectionClosed)
 				telemetry.ObserveProxyConnectionDuration(context.Background(), tunnelID, "tcp", "failure", time.Since(connStart).Seconds())
 				return
 			}
@@ -556,6 +558,7 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 				}
 			}
 			telemetry.ObserveProxyConnectionDuration(context.Background(), tunnelID, "tcp", "success", time.Since(connStart).Seconds())
+			telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "tcp", telemetry.ProxyConnectionClosed)
 		}(tunnelID, conn)
 	}
 }
@@ -631,6 +634,7 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			}
 			tunnelID := pm.currentTunnelID
 			telemetry.IncProxyAccept(context.Background(), tunnelID, "udp", "success", "")
+			telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "udp", telemetry.ProxyConnectionOpened)
 			// Only increment activeUDP after a successful DialUDP
 			if e := pm.getEntry(tunnelID); e != nil {
 				e.activeUDP.Add(1)
@@ -655,6 +659,7 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 					}
 					clientsMutex.Unlock()
 					telemetry.ObserveProxyConnectionDuration(context.Background(), tunnelID, "udp", result, time.Since(start).Seconds())
+					telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "udp", telemetry.ProxyConnectionClosed)
 				}()
 
 				buffer := make([]byte, 65507)

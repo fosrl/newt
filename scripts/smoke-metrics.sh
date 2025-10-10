@@ -20,7 +20,7 @@ probe "newt_* presence" "^newt_" || true
 
 # Site gauges with site_id
 probe "site_online with site_id" "^newt_site_online\{.*site_id=\"[^\"]+\"" || true
-probe "last_heartbeat with site_id" "^newt_site_last_heartbeat_seconds\{.*site_id=\"[^\"]+\"" || true
+probe "last_heartbeat with site_id" "^newt_site_last_heartbeat_timestamp_seconds\{.*site_id=\"[^\"]+\"" || true
 
 # Bytes with direction ingress/egress and protocol
 probe "tunnel bytes ingress" "^newt_tunnel_bytes_total\{.*direction=\"ingress\".*protocol=\"(tcp|udp)\"" || true
@@ -39,11 +39,14 @@ fi
 # WebSocket metrics (when OTLP/WS used)
 probe "websocket connect latency buckets" "^newt_websocket_connect_latency_seconds_bucket" || true
 probe "websocket messages total" "^newt_websocket_messages_total\{.*(direction|msg_type)=" || true
+probe "websocket connected gauge" "^newt_websocket_connected" || true
+probe "websocket reconnects total" "^newt_websocket_reconnects_total\{" || true
 
 # Proxy metrics (when proxy active)
 probe "proxy active connections" "^newt_proxy_active_connections\{" || true
 probe "proxy buffer bytes" "^newt_proxy_buffer_bytes\{" || true
 probe "proxy drops total" "^newt_proxy_drops_total\{" || true
+probe "proxy connections total" "^newt_proxy_connections_total\{" || true
 
 # Config apply
 probe "config apply seconds buckets" "^newt_config_apply_seconds_bucket\{" || true

@@ -16,7 +16,7 @@ A global attribute filter (see `buildMeterProvider`) constrains exposed label ke
 exports stay bounded.
 
 - **Site lifecycle**: `newt_site_registrations_total`, `newt_site_online`, and
-  `newt_site_last_heartbeat_seconds` capture registration attempts and liveness. They
+  `newt_site_last_heartbeat_timestamp_seconds` capture registration attempts and liveness. They
   are fed either manually (`IncSiteRegistration`) or via the `TelemetryView` state
   callback that publishes observable gauges for the active site.
 - **Tunnel health and usage**: Counters and histograms track bytes, latency, reconnects,
@@ -27,17 +27,20 @@ exports stay bounded.
   `newt_connection_errors_total` are emitted throughout the WebSocket client to classify
   authentication, dial, and transport failures.
 - **Operations/configuration**: `newt_config_reloads_total`,
-  `newt_restart_count_total`, `newt_config_apply_seconds`, and
+  `process_start_time_seconds`, `newt_config_apply_seconds`, and
   `newt_cert_rotation_total` provide visibility into blueprint reloads, process boots,
   configuration timings, and certificate rotation outcomes.
 - **Build metadata**: `newt_build_info` records the binary version/commit together
-  with a monotonic restart counter when build information is supplied at startup.
-- **WebSocket control-plane**: `newt_websocket_connect_latency_seconds` and
-  `newt_websocket_messages_total` report connect latency and ping/pong/text activity.
+  with optional site metadata when build information is supplied at startup.
+- **WebSocket control-plane**: `newt_websocket_connect_latency_seconds`,
+  `newt_websocket_messages_total`, `newt_websocket_connected`, and
+  `newt_websocket_reconnects_total` report connect latency, ping/pong/text activity,
+  connection state, and reconnect reasons.
 - **Proxy data-plane**: Observable gauges (`newt_proxy_active_connections`,
-  `newt_proxy_buffer_bytes`, `newt_proxy_async_backlog_bytes`) and the
-  `newt_proxy_drops_total` counter are fed from the proxy manager to monitor backlog
-  and drop behaviour alongside per-protocol byte counters.
+  `newt_proxy_buffer_bytes`, `newt_proxy_async_backlog_bytes`) plus counters for
+  drops, accepts, connection lifecycle events (`newt_proxy_connections_total`), and
+  duration histograms (`newt_proxy_connection_duration_seconds`) surface backlog,
+  drop behaviour, and churn alongside per-protocol byte counters.
 
 Refer to `docs/observability.md` for a tabular catalogue with instrument types,
 attributes, and sample exposition lines.
@@ -61,8 +64,9 @@ The implementation adheres to most OTel Go recommendations:
   suffixes for counters and `_seconds`/`_bytes` unit conventions. Histograms are
   registered with explicit second-based buckets.
 - **Resource attributes** – Service name/version and optional `site_id`/`region`
-  populate the `resource.Resource` and are also injected as metric attributes for
-  compatibility with Prometheus queries.
+  populate the `resource.Resource`. Metric labels mirror these by default (and on
+  per-site gauges) but can be disabled with `NEWT_METRICS_INCLUDE_SITE_LABELS=false`
+  to avoid unnecessary cardinality growth.
 - **Attribute hygiene** – A single attribute filter (`sdkmetric.WithView`) enforces
   the allow-list of label keys to prevent accidental high-cardinality emission.
 - **Runtime metrics** – Go runtime instrumentation is enabled automatically through
@@ -83,10 +87,9 @@ The review identified a few actionable adjustments:
 2. **Surface config reload failures** – `telemetry.IncConfigReload` is invoked with
    `result="success"` only. Callers should record a failure result when blueprint
    parsing or application aborts before success counters are incremented.
-3. **Harmonise restart count behaviour** – `newt_restart_count_total` increments only
-   when build metadata is provided. Consider moving the increment out of
-   `RegisterBuildInfo` so the counter advances even for ad-hoc builds without version
-   strings.
+3. **Expose robust uptime** – Document using `time() - process_start_time_seconds`
+   to derive uptime now that the restart counter has been replaced with a timestamp
+   gauge.
 4. **Propagate contexts where available** – Many emitters call metric helpers with
    `context.Background()`. Passing real contexts (when inexpensive) would allow future
    exporters to correlate spans and metrics.
@@ -98,17 +101,17 @@ The review identified a few actionable adjustments:
 
 Prioritised additions that would close visibility gaps:
 
-1. **WebSocket disconnect outcomes** – A counter (e.g., `newt_websocket_disconnects_total`)
-   partitioned by `reason` would complement the existing connect latency histogram and
-   explain reconnect storms.
-2. **Keepalive/heartbeat failures** – Counting ping timeouts or heartbeat misses would
-   make `newt_site_last_heartbeat_seconds` actionable by providing discrete events.
-3. **Proxy connection lifecycle** – Add counters/histograms for proxy accept events and
-   connection durations to correlate drops with load and backlog metrics.
+1. **Config reload error taxonomy** – Split reload attempts into a dedicated
+   `newt_config_reload_errors_total{phase}` counter to make blueprint validation failures
+   visible alongside the existing success counter.
+2. **Config source visibility** – Export `newt_config_source_info{source,version}` so
+   operators can audit the active blueprint origin/commit during incidents.
+3. **Certificate expiry** – Emit `newt_cert_expiry_timestamp_seconds` (per cert) to
+   enable proactive alerts before mTLS credentials lapse.
 4. **Blueprint/config pull latency** – Measuring Pangolin blueprint fetch durations and
    HTTP status distribution would expose slow control-plane operations.
-5. **Certificate rotation attempts** – Complement `newt_cert_rotation_total` with a
-   duration histogram to observe slow PKI updates and detect stuck rotations.
+5. **Tunnel setup latency** – Histograms for DNS resolution and tunnel handshakes would
+   help correlate connect latency spikes with network dependencies.
 
 These metrics rely on data that is already available in the code paths mentioned
 above and would round out operational dashboards.

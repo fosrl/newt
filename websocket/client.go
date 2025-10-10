@@ -167,6 +167,7 @@ func (c *Client) Close() error {
 
 	// Set connection status to false
 	c.setConnected(false)
+	telemetry.SetWSConnectionState(false)
 
 	// Close the WebSocket connection gracefully
 	if c.conn != nil {
@@ -508,6 +509,7 @@ func (c *Client) establishConnection() error {
 		} else {
 			telemetry.IncReconnect(ctx, c.config.ID, "client", telemetry.ReasonError)
 		}
+		telemetry.IncWSReconnect(ctx, etype)
 		return fmt.Errorf("failed to connect to WebSocket: %w", err)
 	}
 
@@ -515,6 +517,7 @@ func (c *Client) establishConnection() error {
 	telemetry.ObserveWSConnectLatency(ctx, lat, "success", "")
 	c.conn = conn
 	c.setConnected(true)
+	telemetry.SetWSConnectionState(true)
 	c.setMetricsContext(ctx)
 	sessionStart := time.Now()
 	// Wire up pong handler for metrics
@@ -632,6 +635,7 @@ func (c *Client) pingMonitor() {
 				default:
 					logger.Error("Ping failed: %v", err)
 					telemetry.IncWSKeepaliveFailure(c.metricsContext(), "ping_write")
+					telemetry.IncWSReconnect(c.metricsContext(), "ping_write")
 					c.reconnect()
 					return
 				}
@@ -660,6 +664,7 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time) {
 			// Shutting down, don't reconnect
 			return
 		default:
+			telemetry.IncWSReconnect(ctx, disconnectReason)
 			c.reconnect()
 		}
 	}()
@@ -710,6 +715,7 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time) {
 
 func (c *Client) reconnect() {
 	c.setConnected(false)
+	telemetry.SetWSConnectionState(false)
 	if c.conn != nil {
 		c.conn.Close()
 		c.conn = nil
