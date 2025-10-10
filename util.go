@@ -25,6 +25,8 @@ import (
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
+const msgHealthFileWriteFailed = "Failed to write health file: %v"
+
 func fixKey(key string) string {
 	// Remove any whitespace
 	key = strings.TrimSpace(key)
@@ -177,7 +179,7 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 		if healthFile != "" {
 			err := os.WriteFile(healthFile, []byte("ok"), 0644)
 			if err != nil {
-				logger.Warn("Failed to write health file: %v", err)
+				logger.Warn(msgHealthFileWriteFailed, err)
 			}
 		}
 		return stopChan, nil
@@ -218,11 +220,11 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 					if healthFile != "" {
 						err := os.WriteFile(healthFile, []byte("ok"), 0644)
 						if err != nil {
-							logger.Warn("Failed to write health file: %v", err)
+							logger.Warn(msgHealthFileWriteFailed, err)
 						}
 					}
-					return
 				}
+			case <-pingStopChan:
 			}
 		}
 	}()
@@ -476,7 +478,8 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 			continue
 		}
 
-		if action == "add" {
+		switch action {
+		case "add":
 			target := parts[1] + ":" + parts[2]
 
 			// Call updown script if provided
@@ -502,7 +505,7 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 			// Add the new target
 			pm.AddTarget(proto, tunnelIP, port, processedTarget)
 
-		} else if action == "remove" {
+		case "remove":
 			logger.Info("Removing target with port %d", port)
 
 			target := parts[1] + ":" + parts[2]
@@ -520,6 +523,8 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 				logger.Error("Failed to remove target: %v", err)
 				return err
 			}
+		default:
+			logger.Info("Unknown action: %s", action)
 		}
 	}
 

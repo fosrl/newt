@@ -20,6 +20,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
+const errUnsupportedProtoFmt = "unsupported protocol: %s"
+
 // Target represents a proxy target with its address and port
 type Target struct {
 	Address string
@@ -74,13 +76,14 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 	n, err := cw.w.Write(p)
 	if n > 0 {
 		if cw.pm != nil && cw.pm.asyncBytes && cw.ent != nil {
-			if cw.proto == "tcp" {
+			switch cw.proto {
+			case "tcp":
 				if cw.out {
 					cw.ent.bytesOutTCP.Add(uint64(n))
 				} else {
 					cw.ent.bytesInTCP.Add(uint64(n))
 				}
-			} else if cw.proto == "udp" {
+			case "udp":
 				if cw.out {
 					cw.ent.bytesOutUDP.Add(uint64(n))
 				} else {
@@ -207,7 +210,7 @@ func (pm *ProxyManager) AddTarget(proto, listenIP string, port int, targetAddr s
 		}
 		pm.udpTargets[listenIP][port] = targetAddr
 	default:
-		return fmt.Errorf("unsupported protocol: %s", proto)
+		return fmt.Errorf(errUnsupportedProtoFmt, proto)
 	}
 
 	if pm.running {
@@ -256,7 +259,7 @@ func (pm *ProxyManager) RemoveTarget(proto, listenIP string, port int) error {
 			return fmt.Errorf("target not found: %s:%d", listenIP, port)
 		}
 	default:
-		return fmt.Errorf("unsupported protocol: %s", proto)
+		return fmt.Errorf(errUnsupportedProtoFmt, proto)
 	}
 	return nil
 }
@@ -443,7 +446,7 @@ func (pm *ProxyManager) startTarget(proto, listenIP string, port int, targetAddr
 		go pm.handleUDPProxy(conn, targetAddr)
 
 	default:
-		return fmt.Errorf("unsupported protocol: %s", proto)
+		return fmt.Errorf(errUnsupportedProtoFmt, proto)
 	}
 
 	logger.Info("Started %s proxy to %s", proto, targetAddr)

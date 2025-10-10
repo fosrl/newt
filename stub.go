@@ -8,25 +8,27 @@ import (
 )
 
 func setupClientsNative(client *websocket.Client, host string) {
-	return // This function is not implemented for non-Linux systems.
+	_ = client
+	_ = host
+	// No-op for non-Linux systems
 }
 
 func closeWgServiceNative() {
 	// No-op for non-Linux systems
-	return
 }
 
 func clientsOnConnectNative() {
 	// No-op for non-Linux systems
-	return
 }
 
 func clientsHandleNewtConnectionNative(publicKey, endpoint string) {
+	_ = publicKey
+	_ = endpoint
 	// No-op for non-Linux systems
-	return
 }
 
 func clientsAddProxyTargetNative(pm *proxy.ProxyManager, tunnelIp string) {
+	_ = pm
+	_ = tunnelIp
 	// No-op for non-Linux systems
-	return
 }
