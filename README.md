@@ -1,15 +1,18 @@
+<!-- markdownlint-disable MD033 -->
 # Newt
+
 [![PkgGoDev](https://pkg.go.dev/badge/github.com/fosrl/newt)](https://pkg.go.dev/github.com/fosrl/newt)
 [![GitHub License](https://img.shields.io/github/license/fosrl/newt)](https://github.com/fosrl/newt/blob/main/LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/fosrl/newt)](https://goreportcard.com/report/github.com/fosrl/newt)
 
 Newt is a fully user space [WireGuard](https://www.wireguard.com/) tunnel client and TCP/UDP proxy, designed to securely expose private resources controlled by Pangolin. By using Newt, you don't need to manage complex WireGuard tunnels and NATing.
 
-### Installation and Documentation
+## Installation and Documentation
 
 Newt is used with Pangolin and Gerbil as part of the larger system. See documentation below:
 
--   [Full Documentation](https://docs.fossorial.io)
+- [Full Documentation](https://docs.fossorial.io)
+- Observability Quickstart: see `docs/observability.md` — canonical Prometheus/OTel Collector quickstart and smoke tests
 
 ## Preview
 
@@ -91,9 +94,9 @@ All CLI arguments can be set using environment variables as an alternative to co
 
 ## Loading secrets from files
 
-You can use `CONFIG_FILE` to define a location of a config file to store the credentials between runs. 
+You can use `CONFIG_FILE` to define a location of a config file to store the credentials between runs.
 
-```
+```sh
 $ cat ~/.config/newt-client/config.json
 {
   "id": "spmzu8rbpzj1qq6",
@@ -103,19 +106,21 @@ $ cat ~/.config/newt-client/config.json
 }
 ```
 
-This file is also written to when newt first starts up. So you do not need to run every time with --id and secret if you have run it once! 
+This file is also written to when newt first starts up. So you do not need to run every time with --id and secret if you have run it once!
 
-Default locations: 
+Default locations:
 
 - **macOS**: `~/Library/Application Support/newt-client/config.json`
 - **Windows**: `%PROGRAMDATA%\newt\newt-client\config.json`
 - **Linux/Others**: `~/.config/newt-client/config.json`
 
+<!-- Observability Quickstart moved to docs/observability.md (canonical). -->
+
 ## Examples
 
 **Note**: When both environment variables and CLI arguments are provided, CLI arguments take precedence.
 
--   Example:
+- Example:
 
 ```bash
 newt \
@@ -162,16 +167,16 @@ When the `--accept-clients` flag is enabled (or `ACCEPT_CLIENTS=true` environmen
 
 In client acceptance mode, Newt:
 
--   **Creates a WireGuard service** that can accept incoming connections from other WireGuard clients
--   **Starts a connection testing server** (WGTester) that responds to connectivity checks from remote clients
--   **Manages peer configurations** dynamically based on Pangolin's instructions
--   **Enables bidirectional communication** between the Newt instance and connected clients
+- **Creates a WireGuard service** that can accept incoming connections from other WireGuard clients
+- **Starts a connection testing server** (WGTester) that responds to connectivity checks from remote clients
+- **Manages peer configurations** dynamically based on Pangolin's instructions
+- **Enables bidirectional communication** between the Newt instance and connected clients
 
 ### Use Cases
 
--   **Site-to-site connectivity**: Connect multiple locations through a central Newt instance
--   **Client access to private networks**: Allow remote clients to access resources behind the Newt instance
--   **Development environments**: Provide developers secure access to internal services
+- **Site-to-site connectivity**: Connect multiple locations through a central Newt instance
+- **Client access to private networks**: Allow remote clients to access resources behind the Newt instance
+- **Development environments**: Provide developers secure access to internal services
 
 ### Client Tunneling Modes
 
@@ -181,11 +186,11 @@ Newt supports two WireGuard tunneling modes:
 
 By default, Newt uses a fully userspace WireGuard implementation using [netstack](https://github.com/WireGuard/wireguard-go/blob/master/tun/netstack/examples/http_server.go). This mode:
 
--   **Does not require root privileges**
--   **Works on all supported platforms** (Linux, Windows, macOS)
--   **Does not require WireGuard kernel module** to be installed
--   **Runs entirely in userspace** - no system network interface is created
--   **Is containerization-friendly** - works seamlessly in Docker containers
+- **Does not require root privileges**
+- **Works on all supported platforms** (Linux, Windows, macOS)
+- **Does not require WireGuard kernel module** to be installed
+- **Runs entirely in userspace** - no system network interface is created
+- **Is containerization-friendly** - works seamlessly in Docker containers
 
 This is the recommended mode for most deployments, especially containerized environments.
 
@@ -195,11 +200,11 @@ In this mode, TCP and UDP is proxied out of newt from the remote client using TC
 
 When using the `--native` flag or setting `USE_NATIVE_INTERFACE=true`, Newt uses the native WireGuard kernel module. This mode:
 
--   **Requires root privileges** to create and manage network interfaces
--   **Only works on Linux** with the WireGuard kernel module installed
--   **Creates a real network interface** (e.g., `newt0`) on the system
--   **May offer better performance** for high-throughput scenarios
--   **Requires proper network permissions** and may conflict with existing network configurations
+- **Requires root privileges** to create and manage network interfaces
+- **Only works on Linux** with the WireGuard kernel module installed
+- **Creates a real network interface** (e.g., `newt0`) on the system
+- **May offer better performance** for high-throughput scenarios
+- **Requires proper network permissions** and may conflict with existing network configurations
 
 In this mode it functions like a traditional VPN interface - all data arrives on the interface and you must get it to the destination (or access things locally).
 
@@ -231,10 +236,10 @@ services:
 
 When client acceptance is enabled:
 
--   **WGTester Server**: Runs on `port + 1` (e.g., if WireGuard uses port 51820, WGTester uses 51821)
--   **Connection Testing**: Responds to UDP packets with magic header `0xDEADBEEF` for connectivity verification
--   **Dynamic Configuration**: Peer configurations are managed remotely through Pangolin
--   **Proxy Integration**: Can work with both userspace (netstack) and native WireGuard modes
+- **WGTester Server**: Runs on `port + 1` (e.g., if WireGuard uses port 51820, WGTester uses 51821)
+- **Connection Testing**: Responds to UDP packets with magic header `0xDEADBEEF` for connectivity verification
+- **Dynamic Configuration**: Peer configurations are managed remotely through Pangolin
+- **Proxy Integration**: Can work with both userspace (netstack) and native WireGuard modes
 
 **Note**: Client acceptance mode requires coordination with Pangolin for peer management and configuration distribution.
 
@@ -248,23 +253,22 @@ You can specify the Docker socket path using the `--docker-socket` CLI argument 
 
 Supported values include:
 
--   Local UNIX socket (default):
+- Local UNIX socket (default):
     >You must mount the socket file into the container using a volume, so Newt can access it.
 
     `unix:///var/run/docker.sock`
 
--   TCP socket (e.g., via Docker Socket Proxy):
+- TCP socket (e.g., via Docker Socket Proxy):
 
     `tcp://localhost:2375`
 
--   HTTP/HTTPS endpoints (e.g., remote Docker APIs):
+- HTTP/HTTPS endpoints (e.g., remote Docker APIs):
 
     `http://your-host:2375`
 
--   SSH connections (experimental, requires SSH setup):
+- SSH connections (experimental, requires SSH setup):
 
     `ssh://user@host`
-
 
 ```yaml
 services:
@@ -280,16 +284,17 @@ services:
             - NEWT_SECRET=nnisrfsdfc7prqsp9ewo1dvtvci50j5uiqotez00dgap0ii2
             - DOCKER_SOCKET=unix:///var/run/docker.sock
 ```
+
 >If you previously used just a path like `/var/run/docker.sock`, it still works — Newt assumes it is a UNIX socket by default.
 
 #### Hostnames vs IPs
 
 When the Docker Socket Integration is used, depending on the network which Newt is run with, either the hostname (generally considered the container name) or the IP address of the container will be sent to Pangolin. Here are some of the scenarios where IPs or hostname of the container will be utilised:
 
--   **Running in Network Mode 'host'**: IP addresses will be used
--   **Running in Network Mode 'bridge'**: IP addresses will be used
--   **Running in docker-compose without a network specification**: Docker compose creates a network for the compose by default, hostnames will be used
--   **Running on docker-compose with defined network**: Hostnames will be used
+- **Running in Network Mode 'host'**: IP addresses will be used
+- **Running in Network Mode 'bridge'**: IP addresses will be used
+- **Running in docker-compose without a network specification**: Docker compose creates a network for the compose by default, hostnames will be used
+- **Running on docker-compose with defined network**: Hostnames will be used
 
 ### Docker Enforce Network Validation
 
@@ -325,12 +330,12 @@ Newt supports mutual TLS (mTLS) authentication if the server is configured to re
 
 > This is the original method and still supported.
 
-* File must contain:
+- File must contain:
 
-  * Client private key
-  * Public certificate
-  * CA certificate
-* Encrypted `.p12` files are **not supported**
+  - Client private key
+  - Public certificate
+  - CA certificate
+- Encrypted `.p12` files are **not supported**
 
 Example:
 
@@ -346,9 +351,9 @@ newt \
 
 You can now provide separate files for:
 
-* `--tls-client-cert`: client certificate (`.crt` or `.pem`)
-* `--tls-client-key`: client private key (`.key` or `.pem`)
-* `--tls-ca-cert`: CA cert to verify the server
+- `--tls-client-cert`: client certificate (`.crt` or `.pem`)
+- `--tls-client-key`: client private key (`.key` or `.pem`)
+- `--tls-ca-cert`: CA cert to verify the server
 
 Example:
 
@@ -361,7 +366,6 @@ newt \
 --tls-client-key ./client.key \
 --tls-ca-cert ./ca.crt
 ```
-
 
 ```yaml
 services:

@@ -1,0 +1,7 @@
+newt_connection_attempts_total
+newt_websocket_connected
+newt_websocket_reconnects_total
+newt_proxy_connections_total
+newt_build_info
+
+process_start_time_seconds

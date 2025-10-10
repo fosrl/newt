@@ -1,0 +1,44 @@
+diff --git a/wgnetstack/wgnetstack.go b/wgnetstack/wgnetstack.go
+index 6684c40..09f160e 100644
+--- a/wgnetstack/wgnetstack.go
++++ b/wgnetstack/wgnetstack.go
+@@ -1,6 +1,7 @@
+ package wgnetstack
+ 
+ import (
++	"context"
+ 	"crypto/rand"
+ 	"encoding/base64"
+ 	"encoding/hex"
+@@ -26,6 +27,8 @@ import (
+ 	"golang.zx2c4.com/wireguard/tun"
+ 	"golang.zx2c4.com/wireguard/tun/netstack"
+ 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
++
++	"github.com/fosrl/newt/internal/telemetry"
+ )
+ 
+ type WgConfig struct {
+@@ -240,14 +243,20 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
+ 	return service, nil
+ }
+ 
++// ReportRTT allows reporting native RTTs to telemetry, rate-limited externally.
++func (s *WireGuardService) ReportRTT(seconds float64) {
++	if s.serverPubKey == "" { return }
++	telemetry.ObserveTunnelLatency(context.Background(), "", s.serverPubKey, "wireguard", seconds)
++}
++
+ func (s *WireGuardService) addTcpTarget(msg websocket.WSMessage) {
+ 	logger.Debug("Received: %+v", msg)
+ 
+ 	// if there is no wgData or pm, we can't add targets
+ 	if s.TunnelIP == "" || s.proxyManager == nil {
+ 		logger.Info("No tunnel IP or proxy manager available")
+-		return
+-	}
++	return
++}
+ 
+ 	targetData, err := parseTargetData(msg.Data)
+ 	if err != nil {

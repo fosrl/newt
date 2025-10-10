@@ -1,0 +1,55 @@
+services:
+  # Recommended Variant A: Direct Prometheus scrape of Newt (/metrics)
+  # Optional: You may add the Collector service and enable OTLP export, but do NOT
+  # scrape both Newt and the Collector for the same process.
+
+  newt:
+    build: .
+    image: newt:dev
+    env_file:
+      - .env
+    environment:
+      OTEL_SERVICE_NAME: newt
+      NEWT_METRICS_PROMETHEUS_ENABLED: "true"
+      NEWT_METRICS_OTLP_ENABLED: "false"   # avoid double-scrape by default
+      NEWT_ADMIN_ADDR: ":2112"
+      # Base NEWT configuration
+      PANGOLIN_ENDPOINT: ${PANGOLIN_ENDPOINT}
+      NEWT_ID: ${NEWT_ID}
+      NEWT_SECRET: ${NEWT_SECRET}
+      LOG_LEVEL: "DEBUG"
+    ports:
+      - "2112:2112"
+
+  # Optional Variant B: Enable the Collector and switch Prometheus scrape to it.
+  # collector:
+  #   image: otel/opentelemetry-collector-contrib:0.136.0
+  #   command: ["--config=/etc/otelcol/config.yaml"]
+  #   volumes:
+  #     - ./examples/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+  #   ports:
+  #     - "4317:4317"   # OTLP gRPC in
+  #     - "8889:8889"   # Prometheus scrape out
+
+  prometheus:
+    image: prom/prometheus:v3.6.0
+    volumes:
+      - ./examples/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:12.2.0
+    container_name: newt-metrics-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    ports:
+      - "3005:3000"
+    depends_on:
+      - prometheus
+    volumes:
+      - ./examples/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./examples/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./examples/grafana/dashboards:/var/lib/grafana/dashboards:ro
