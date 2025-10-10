@@ -17,9 +17,9 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/prometheus"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"google.golang.org/grpc/credentials"
 )
@@ -98,8 +98,8 @@ func FromEnv() Config {
 // Setup holds initialized telemetry providers and (optionally) a /metrics handler.
 // Call Shutdown when the process terminates to flush exporters.
 type Setup struct {
-	MeterProvider  *sdkmetric.MeterProvider
-	TracerProvider *sdktrace.TracerProvider
+	MeterProvider  *metric.MeterProvider
+	TracerProvider *trace.TracerProvider
 
 	PrometheusHandler http.Handler // nil if Prometheus exporter disabled
 
@@ -171,8 +171,8 @@ func buildResource(ctx context.Context, cfg Config) *resource.Resource {
 	return res
 }
 
-func setupMetricExport(ctx context.Context, cfg Config, _ *resource.Resource) ([]sdkmetric.Reader, http.Handler, []func(context.Context) error, error) {
-	var readers []sdkmetric.Reader
+func setupMetricExport(ctx context.Context, cfg Config, _ *resource.Resource) ([]metric.Reader, http.Handler, []func(context.Context) error, error) {
+	var readers []metric.Reader
 	var shutdowns []func(context.Context) error
 	var promHandler http.Handler
 	if cfg.PromEnabled {
@@ -200,25 +200,25 @@ func setupMetricExport(ctx context.Context, cfg Config, _ *resource.Resource) ([
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		readers = append(readers, sdkmetric.NewPeriodicReader(mexp, sdkmetric.WithInterval(cfg.MetricExportInterval)))
+		readers = append(readers, metric.NewPeriodicReader(mexp, metric.WithInterval(cfg.MetricExportInterval)))
 		shutdowns = append(shutdowns, mexp.Shutdown)
 	}
 	return readers, promHandler, shutdowns, nil
 }
 
-func buildMeterProvider(res *resource.Resource, readers []sdkmetric.Reader) *sdkmetric.MeterProvider {
-	var mpOpts []sdkmetric.Option
-	mpOpts = append(mpOpts, sdkmetric.WithResource(res))
+func buildMeterProvider(res *resource.Resource, readers []metric.Reader) *metric.MeterProvider {
+	var mpOpts []metric.Option
+	mpOpts = append(mpOpts, metric.WithResource(res))
 	for _, r := range readers {
-		mpOpts = append(mpOpts, sdkmetric.WithReader(r))
+		mpOpts = append(mpOpts, metric.WithReader(r))
 	}
-	mpOpts = append(mpOpts, sdkmetric.WithView(sdkmetric.NewView(
-		sdkmetric.Instrument{Name: "newt_*_latency_seconds"},
-		sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}}},
+	mpOpts = append(mpOpts, metric.WithView(metric.NewView(
+		metric.Instrument{Name: "newt_*_latency_seconds"},
+		metric.Stream{Aggregation: metric.AggregationExplicitBucketHistogram{Boundaries: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}}},
 	)))
-	mpOpts = append(mpOpts, sdkmetric.WithView(sdkmetric.NewView(
-		sdkmetric.Instrument{Name: "newt_*"},
-		sdkmetric.Stream{AttributeFilter: func(kv attribute.KeyValue) bool {
+	mpOpts = append(mpOpts, metric.WithView(metric.NewView(
+		metric.Instrument{Name: "newt_*"},
+		metric.Stream{AttributeFilter: func(kv attribute.KeyValue) bool {
 			k := string(kv.Key)
 			switch k {
 			case "tunnel_id", "transport", "direction", "protocol", "result", "reason", "initiator", "error_type", "msg_type", "phase", "version", "commit", "site_id", "region":
@@ -228,10 +228,10 @@ func buildMeterProvider(res *resource.Resource, readers []sdkmetric.Reader) *sdk
 			}
 		}},
 	)))
-	return sdkmetric.NewMeterProvider(mpOpts...)
+	return metric.NewMeterProvider(mpOpts...)
 }
 
-func setupTracing(ctx context.Context, cfg Config, res *resource.Resource) (*sdktrace.TracerProvider, func(context.Context) error) {
+func setupTracing(ctx context.Context, cfg Config, res *resource.Resource) (*trace.TracerProvider, func(context.Context) error) {
 	topts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint)}
 	if hdrs := parseOTLPHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")); len(hdrs) > 0 {
 		topts = append(topts, otlptracegrpc.WithHeaders(hdrs))
@@ -247,7 +247,7 @@ func setupTracing(ctx context.Context, cfg Config, res *resource.Resource) (*sdk
 	if err != nil {
 		return nil, nil
 	}
-	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exp), sdktrace.WithResource(res))
+	tp := trace.NewTracerProvider(trace.WithBatcher(exp), trace.WithResource(res))
 	return tp, exp.Shutdown
 }
 
