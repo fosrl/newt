@@ -144,7 +144,7 @@ PromQL snippets
 - Throughput in (5m):
 
 ```sh
-sum(rate(newt_tunnel_bytes_total{direction="in"}[5m]))
+sum(rate(newt_tunnel_bytes_total{direction="ingress"}[5m]))
 ```
 
 - P95 latency (seconds):
