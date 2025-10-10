@@ -62,8 +62,8 @@ func observeSiteOnlineFor(o metric.Observer, sv StateView, siteID string) {
 
 func observeLastHeartbeatFor(o metric.Observer, sv StateView, siteID string) {
 	if t, ok := sv.LastHeartbeat(siteID); ok {
-		secs := time.Since(t).Seconds()
-		o.ObserveFloat64(mSiteLastHeartbeat, secs, metric.WithAttributes(
+		ts := float64(t.UnixNano()) / 1e9
+		o.ObserveFloat64(mSiteLastHeartbeat, ts, metric.WithAttributes(
 			attribute.String("site_id", siteID),
 		))
 	}

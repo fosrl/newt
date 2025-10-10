@@ -14,17 +14,23 @@ import (
 
 // Test that disallowed attributes are filtered from the exposition.
 func TestAttributeFilterDropsUnknownKeys(t *testing.T) {
-	ctx := context.Background()
-cfg := Config{ServiceName: "newt", PromEnabled: true, AdminAddr: "127.0.0.1:0"}
+        ctx := context.Background()
+        resetMetricsForTest()
+        t.Setenv("NEWT_METRICS_INCLUDE_SITE_LABELS", "true")
+        cfg := Config{ServiceName: "newt", PromEnabled: true, AdminAddr: "127.0.0.1:0"}
 	tel, err := Init(ctx, cfg)
-	if err != nil { t.Fatalf("init: %v", err) }
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
 	defer func() { _ = tel.Shutdown(context.Background()) }()
 
-	if tel.PrometheusHandler == nil { t.Fatalf("prom handler nil") }
+	if tel.PrometheusHandler == nil {
+		t.Fatalf("prom handler nil")
+	}
 	ts := httptest.NewServer(tel.PrometheusHandler)
 	defer ts.Close()
 
-// Add samples with disallowed attribute keys
+	// Add samples with disallowed attribute keys
 	for _, k := range []string{"forbidden", "site_id", "host"} {
 		set := attribute.NewSet(attribute.String(k, "x"))
 		AddTunnelBytesSet(ctx, 123, set)
@@ -32,7 +38,9 @@ cfg := Config{ServiceName: "newt", PromEnabled: true, AdminAddr: "127.0.0.1:0"}
 	time.Sleep(50 * time.Millisecond)
 
 	resp, err := http.Get(ts.URL)
-	if err != nil { t.Fatalf("GET: %v", err) }
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	body := string(b)
@@ -43,4 +51,3 @@ cfg := Config{ServiceName: "newt", PromEnabled: true, AdminAddr: "127.0.0.1:0"}
 		t.Fatalf("expected allowed attribute site_id to be present in metrics, got: %s", body)
 	}
 }
-
