@@ -14,4 +14,3 @@ scrape_configs:
       # - action: keep
       #   source_labels: [site_id]
       #   regex: '(site-a|site-b)'
-
