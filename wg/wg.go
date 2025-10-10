@@ -280,6 +280,15 @@ func (s *WireGuardService) LoadRemoteConfig() error {
 }
 
 func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
+	ctx := context.Background()
+	if s.client != nil {
+		ctx = s.client.MetricsContext()
+	}
+	result := "success"
+	defer func() {
+		telemetry.IncConfigReload(ctx, result)
+	}()
+
 	var config WgConfig
 
 	logger.Debug("Received message: %v", msg)
@@ -288,11 +297,13 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	jsonData, err := json.Marshal(msg.Data)
 	if err != nil {
 		logger.Info("Error marshaling data: %v", err)
+		result = "failure"
 		return
 	}
 
 	if err := json.Unmarshal(jsonData, &config); err != nil {
 		logger.Info("Error unmarshaling target data: %v", err)
+		result = "failure"
 		return
 	}
 	s.config = config
@@ -303,27 +314,28 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	}
 
 	// telemetry: config reload success
-	telemetry.IncConfigReload(context.Background(), "success")
 	// Optional reconnect reason mapping: config change
 	if s.serverPubKey != "" {
-		telemetry.IncReconnect(context.Background(), s.serverPubKey, "client", telemetry.ReasonConfigChange)
+		telemetry.IncReconnect(ctx, s.serverPubKey, "client", telemetry.ReasonConfigChange)
 	}
 
 	// Ensure the WireGuard interface and peers are configured
 	start := time.Now()
 	if err := s.ensureWireguardInterface(config); err != nil {
 		logger.Error("Failed to ensure WireGuard interface: %v", err)
-		telemetry.ObserveConfigApply(context.Background(), "interface", "failure", time.Since(start).Seconds())
+		telemetry.ObserveConfigApply(ctx, "interface", "failure", time.Since(start).Seconds())
+		result = "failure"
 	} else {
-		telemetry.ObserveConfigApply(context.Background(), "interface", "success", time.Since(start).Seconds())
+		telemetry.ObserveConfigApply(ctx, "interface", "success", time.Since(start).Seconds())
 	}
 
 	startPeers := time.Now()
 	if err := s.ensureWireguardPeers(config.Peers); err != nil {
 		logger.Error("Failed to ensure WireGuard peers: %v", err)
-		telemetry.ObserveConfigApply(context.Background(), "peer", "failure", time.Since(startPeers).Seconds())
+		telemetry.ObserveConfigApply(ctx, "peer", "failure", time.Since(startPeers).Seconds())
+		result = "failure"
 	} else {
-		telemetry.ObserveConfigApply(context.Background(), "peer", "success", time.Since(startPeers).Seconds())
+		telemetry.ObserveConfigApply(ctx, "peer", "success", time.Since(startPeers).Seconds())
 	}
 }
 
