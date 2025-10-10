@@ -10,6 +10,10 @@ This document captures the current state of Newt metrics, prioritized fixes, and
      - Tunnel/Traffic: newt_tunnel_sessions, newt_tunnel_bytes_total, newt_tunnel_latency_seconds, newt_tunnel_reconnects_total
      - Connection lifecycle: newt_connection_attempts_total, newt_connection_errors_total
      - Operations: newt_config_reloads_total, newt_restart_count_total, newt_build_info
+     - Operations: newt_config_reloads_total, newt_restart_count_total, newt_config_apply_seconds, newt_cert_rotation_total
+     - Build metadata: newt_build_info
+     - Control plane: newt_websocket_connect_latency_seconds, newt_websocket_messages_total
+     - Proxy: newt_proxy_active_connections, newt_proxy_buffer_bytes, newt_proxy_async_backlog_bytes, newt_proxy_drops_total
      - Go runtime: GC, heap, goroutines via runtime instrumentation
 
 2) Main issues addressed now
@@ -27,6 +31,10 @@ This document captures the current state of Newt metrics, prioritized fixes, and
    - Some call sites still need initiator label on reconnect outcomes (client vs server). This is planned.
    - WebSocket and Proxy metrics (connect latency, messages, active connections, buffer/drops, async backlog) are planned additions.
    - Config apply duration and cert rotation counters are planned.
+   - Registration and config reload failures are not yet emitted; add failure code paths so result labels expose churn.
+   - Restart counter increments only when build metadata is provided; consider decoupling to count all boots.
+   - Metric helpers often use `context.Background()`. Where lightweight contexts exist (e.g., HTTP handlers), propagate them to ease future correlation.
+   - Tracing coverage is limited to admin HTTP and WebSocket connect spans; extend to blueprint fetches, proxy accept loops, and WireGuard updates when OTLP is enabled.
 
 4) Roadmap (phased)
 
@@ -40,6 +48,10 @@ This document captures the current state of Newt metrics, prioritized fixes, and
      - Proxy: newt_proxy_active_connections, newt_proxy_buffer_bytes, newt_proxy_drops_total, newt_proxy_async_backlog_bytes
      - Reconnect: add initiator label (client/server)
      - Config & PKI: newt_config_apply_seconds{phase,result}; newt_cert_rotation_total{result}
+     - WebSocket disconnect and keepalive failure counters
+     - Proxy connection lifecycle metrics (accept totals, duration histogram)
+     - Pangolin blueprint/config fetch latency and status metrics
+     - Certificate rotation duration histogram to complement success/failure counter
 
 5) Operational guidance
 
@@ -64,9 +76,3 @@ This document captures the current state of Newt metrics, prioritized fixes, and
 
    - Direct scrape variant requires no attribute promotion since site_id is already a metric label.
    - Transform/promote variant remains optional for environments that rely on resource-to-label promotion.
-
-8) Testing
-
-- curl :2112/metrics | grep ^newt_
-- Verify presence of site_id across series; region appears when set.
-- Ensure disallowed attributes are filtered; allowed (site_id) retained.
