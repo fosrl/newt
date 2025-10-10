@@ -34,18 +34,30 @@ Runtime behavior
 - When OTLP is enabled, metrics and traces are exported to OTLP gRPC endpoint
 - Go runtime metrics (goroutines, GC, memory) are exported automatically
 
-Metric catalog (initial)
+Metric catalog (current)
 
-- newt_build_info (gauge) labels: version, commit, site_id[, region]; value is always 1
-- newt_site_registrations_total (counter) labels: result, site_id[, region]
-- newt_site_online (observable gauge) labels: site_id (0/1)
-- newt_site_last_heartbeat_seconds (observable gauge) labels: site_id
-- newt_tunnel_sessions (observable gauge) labels: site_id, tunnel_id [transport optional when known]
-- newt_tunnel_bytes_total (counter) labels: site_id, tunnel_id, protocol (tcp|udp), direction (ingress|egress)
-- newt_tunnel_latency_seconds (histogram) labels: site_id, tunnel_id, transport (e.g., wireguard)
-- newt_tunnel_reconnects_total (counter) labels: site_id, tunnel_id, initiator (client|server), reason
-- newt_connection_attempts_total (counter) labels: site_id, transport, result
-- newt_connection_errors_total (counter) labels: site_id, transport, error_type (dial_timeout|tls_handshake|auth_failed|io_error)
+| Metric | Instrument | Key attributes | Purpose | Example |
+| --- | --- | --- | --- | --- |
+| `newt_build_info` | Observable gauge (Int64) | `version`, `commit`, `site_id`, `region` (optional) | Emits build metadata with value `1` for scrape-time verification. | `newt_build_info{version="1.5.0",site_id="acme-edge-1"} 1` |
+| `newt_site_registrations_total` | Counter (Int64) | `result` (`success`/`failure`), `site_id`, `region` (optional) | Counts Pangolin registration attempts. | `newt_site_registrations_total{result="success",site_id="acme-edge-1"} 1` |
+| `newt_site_online` | Observable gauge (Int64) | `site_id` | Reports whether the site is currently connected (`1`) or offline (`0`). | `newt_site_online{site_id="acme-edge-1"} 1` |
+| `newt_site_last_heartbeat_seconds` | Observable gauge (Float64) | `site_id` | Time since the most recent Pangolin heartbeat. | `newt_site_last_heartbeat_seconds{site_id="acme-edge-1"} 2.4` |
+| `newt_tunnel_sessions` | Observable gauge (Int64) | `site_id`, `tunnel_id` (when enabled) | Counts active tunnel sessions per peer; collapses to per-site when tunnel IDs are disabled. | `newt_tunnel_sessions{site_id="acme-edge-1",tunnel_id="wgpub..."} 3` |
+| `newt_tunnel_bytes_total` | Counter (Int64) | `direction` (`ingress`/`egress`), `protocol` (`tcp`/`udp`), `tunnel_id` (optional), `site_id`, `region` (optional) | Measures proxied traffic volume across tunnels. | `newt_tunnel_bytes_total{direction="ingress",protocol="tcp",site_id="acme-edge-1"} 4096` |
+| `newt_tunnel_latency_seconds` | Histogram (Float64) | `transport` (e.g., `wireguard`), `tunnel_id` (optional), `site_id`, `region` (optional) | Captures RTT or configuration-driven latency samples. | `newt_tunnel_latency_seconds_bucket{transport="wireguard",le="0.5"} 42` |
+| `newt_tunnel_reconnects_total` | Counter (Int64) | `initiator` (`client`/`server`), `reason` (enumerated), `tunnel_id` (optional), `site_id`, `region` (optional) | Tracks reconnect causes for troubleshooting flaps. | `newt_tunnel_reconnects_total{initiator="client",reason="timeout",site_id="acme-edge-1"} 5` |
+| `newt_connection_attempts_total` | Counter (Int64) | `transport` (`auth`/`websocket`), `result`, `site_id`, `region` (optional) | Measures control-plane dial attempts and their outcomes. | `newt_connection_attempts_total{transport="websocket",result="success",site_id="acme-edge-1"} 8` |
+| `newt_connection_errors_total` | Counter (Int64) | `transport`, `error_type`, `site_id`, `region` (optional) | Buckets connection failures by normalized error class. | `newt_connection_errors_total{transport="websocket",error_type="tls_handshake",site_id="acme-edge-1"} 1` |
+| `newt_config_reloads_total` | Counter (Int64) | `result`, `site_id`, `region` (optional) | Counts remote blueprint/config reloads. | `newt_config_reloads_total{result="success",site_id="acme-edge-1"} 3` |
+| `newt_restart_count_total` | Counter (Int64) | `site_id`, `region` (optional) | Increments once per process boot to detect restarts. | `newt_restart_count_total{site_id="acme-edge-1"} 1` |
+| `newt_config_apply_seconds` | Histogram (Float64) | `phase` (`interface`/`peer`), `result`, `site_id`, `region` (optional) | Measures time spent applying WireGuard configuration phases. | `newt_config_apply_seconds_sum{phase="peer",result="success",site_id="acme-edge-1"} 0.48` |
+| `newt_cert_rotation_total` | Counter (Int64) | `result`, `site_id`, `region` (optional) | Tracks client certificate rotation attempts. | `newt_cert_rotation_total{result="success",site_id="acme-edge-1"} 2` |
+| `newt_websocket_connect_latency_seconds` | Histogram (Float64) | `transport="websocket"`, `result`, `error_type` (on failure), `site_id`, `region` (optional) | Measures WebSocket dial latency and exposes failure buckets. | `newt_websocket_connect_latency_seconds_bucket{result="success",le="0.5",site_id="acme-edge-1"} 9` |
+| `newt_websocket_messages_total` | Counter (Int64) | `direction` (`in`/`out`), `msg_type` (`text`/`ping`/`pong`), `site_id`, `region` (optional) | Accounts for control WebSocket traffic volume by type. | `newt_websocket_messages_total{direction="out",msg_type="ping",site_id="acme-edge-1"} 12` |
+| `newt_proxy_active_connections` | Observable gauge (Int64) | `protocol` (`tcp`/`udp`), `direction` (`ingress`/`egress`), `tunnel_id` (optional), `site_id`, `region` (optional) | Current proxy connections per tunnel and protocol. | `newt_proxy_active_connections{protocol="tcp",direction="egress",site_id="acme-edge-1"} 4` |
+| `newt_proxy_buffer_bytes` | Observable gauge (Int64) | `protocol`, `direction`, `tunnel_id` (optional), `site_id`, `region` (optional) | Volume of buffered data awaiting flush in proxy queues. | `newt_proxy_buffer_bytes{protocol="udp",direction="egress",site_id="acme-edge-1"} 2048` |
+| `newt_proxy_async_backlog_bytes` | Observable gauge (Int64) | `protocol`, `direction`, `tunnel_id` (optional), `site_id`, `region` (optional) | Tracks async write backlog when deferred flushing is enabled. | `newt_proxy_async_backlog_bytes{protocol="tcp",direction="egress",site_id="acme-edge-1"} 512` |
+| `newt_proxy_drops_total` | Counter (Int64) | `protocol`, `tunnel_id` (optional), `site_id`, `region` (optional) | Counts proxy drop events caused by downstream write errors. | `newt_proxy_drops_total{protocol="udp",site_id="acme-edge-1"} 1` |
 
 Conventions
 
