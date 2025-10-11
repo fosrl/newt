@@ -1,0 +1,41 @@
+services:
+  newt:
+    build: .
+    image: newt:dev
+    env_file:
+      - .env
+    environment:
+      - NEWT_METRICS_PROMETHEUS_ENABLED=false   # important: disable direct /metrics scraping
+      - NEWT_METRICS_OTLP_ENABLED=true          # OTLP to the Collector
+      # optional:
+      # - NEWT_METRICS_INCLUDE_TUNNEL_ID=false
+  # When using the Collector pattern, do NOT map the Newt admin/metrics port
+  # (2112) on the application service. Mapping 2112 here can cause port
+  # conflicts and may result in duplicated Prometheus scraping (app AND
+  # collector being scraped for the same metrics). Instead either:
+  #  - leave ports unset on the app service (recommended), or
+  #  - map 2112 only on a dedicated metrics/collector service that is
+  #    responsible for exposing metrics to Prometheus.
+  # Example: do NOT map here
+  # ports: []
+  # Example: map 2112 only on a collector service
+  # collector:
+  #   ports:
+  #     - "2112:2112"  # collector's prometheus exporter (scraped by Prometheus)
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./examples/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "8889:8889"   # Prometheus Exporter (scraped by Prometheus)
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./examples/prometheus.with-collector.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+

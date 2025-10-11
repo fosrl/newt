@@ -1,0 +1,61 @@
+# Variant A: Direct scrape of Newt (/metrics) via Prometheus (no Collector needed)
+# Note: Newt already exposes labels like site_id, protocol, direction. Do not promote
+# resource attributes into labels when scraping Newt directly.
+#
+# Example Prometheus scrape config:
+# global:
+#   scrape_interval: 15s
+# scrape_configs:
+#   - job_name: newt
+#     static_configs:
+#       - targets: ["newt:2112"]
+#
+# Variant B: Use OTEL Collector (Newt -> OTLP -> Collector -> Prometheus)
+# This pipeline scrapes metrics from the Collector's Prometheus exporter.
+# Labels are already on datapoints; promotion from resource is OPTIONAL and typically NOT required.
+# If you enable transform/promote below, ensure you do not duplicate labels.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: ":4317"
+
+processors:
+  memory_limiter:
+    check_interval: 5s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+  resourcedetection:
+    detectors: [env, system]
+    timeout: 5s
+  batch: {}
+  # OPTIONAL: Only enable if you need to promote resource attributes to labels.
+  # WARNING: Newt already provides site_id as a label; avoid double-promotion.
+  # transform/promote:
+  #   error_mode: ignore
+  #   metric_statements:
+  #     - context: datapoint
+  #       statements:
+  #         - set(attributes["service_instance_id"], resource.attributes["service.instance.id"]) where resource.attributes["service.instance.id"] != nil
+  #         - set(attributes["site_id"], resource.attributes["site_id"]) where resource.attributes["site_id"] != nil
+
+exporters:
+  prometheus:
+    endpoint: ":8889"
+    send_timestamps: true
+  # prometheusremotewrite:
+  #   endpoint: http://mimir:9009/api/v1/push
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, batch] # add transform/promote if you really need it
+      exporters: [prometheus]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, batch]
+      exporters: [debug]
