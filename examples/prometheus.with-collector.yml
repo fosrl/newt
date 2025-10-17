@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # IMPORTANT: Do not scrape Newt directly; scrape only the Collector!
+  - job_name: 'otel-collector'
+    static_configs:
+      - targets: ['otel-collector:8889']
+
+    # optional: limit metric cardinality
+    relabel_configs:
+      - action: labeldrop
+        regex: 'tunnel_id'
+      # - action: keep
+      #   source_labels: [site_id]
+      #   regex: '(site-a|site-b)'
