@@ -391,6 +391,7 @@ func main() {
 	}
 	if tel != nil {
 		// Admin HTTP server (exposes /metrics when Prometheus exporter is enabled)
+		logger.Info("Starting metrics server on %s", tcfg.AdminAddr)
 		mux := http.NewServeMux()
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
 		if tel.PrometheusHandler != nil {
