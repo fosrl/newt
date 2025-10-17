@@ -11,7 +11,7 @@ on:
 jobs:
     release:
         name: Build and Release
-        runs-on: ubuntu-latest
+        runs-on: amd64-runner
 
         steps:
             - name: Checkout code
