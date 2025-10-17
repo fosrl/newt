@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 
 	"math/rand"
 
+	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/websocket"
@@ -23,6 +25,8 @@ import (
 	"golang.zx2c4.com/wireguard/tun/netstack"
 	"gopkg.in/yaml.v3"
 )
+
+const msgHealthFileWriteFailed = "Failed to write health file: %v"
 
 func fixKey(key string) string {
 	// Remove any whitespace
@@ -176,7 +180,7 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 		if healthFile != "" {
 			err := os.WriteFile(healthFile, []byte("ok"), 0644)
 			if err != nil {
-				logger.Warn("Failed to write health file: %v", err)
+				logger.Warn(msgHealthFileWriteFailed, err)
 			}
 		}
 		return stopChan, nil
@@ -217,11 +221,13 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 					if healthFile != "" {
 						err := os.WriteFile(healthFile, []byte("ok"), 0644)
 						if err != nil {
-							logger.Warn("Failed to write health file: %v", err)
+							logger.Warn(msgHealthFileWriteFailed, err)
 						}
 					}
-					return
 				}
+			case <-pingStopChan:
+				// Stop the goroutine when signaled
+				return
 			}
 		}
 	}()
@@ -230,7 +236,7 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 	return stopChan, fmt.Errorf("initial ping attempts failed, continuing in background")
 }
 
-func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Client) chan struct{} {
+func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Client, tunnelID string) chan struct{} {
 	maxInterval := 6 * time.Second
 	currentInterval := pingInterval
 	consecutiveFailures := 0
@@ -293,6 +299,9 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 						if !connectionLost {
 							connectionLost = true
 							logger.Warn("Connection to server lost after %d failures. Continuous reconnection attempts will be made.", consecutiveFailures)
+							if tunnelID != "" {
+								telemetry.IncReconnect(context.Background(), tunnelID, "client", telemetry.ReasonTimeout)
+							}
 							stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
 							// Send registration message to the server for backward compatibility
 							err := client.SendMessage("newt/wg/register", map[string]interface{}{
@@ -319,6 +328,10 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 				} else {
 					// Track recent latencies
 					recentLatencies = append(recentLatencies, latency)
+					// Record tunnel latency (limit sampling to this periodic check)
+					if tunnelID != "" {
+						telemetry.ObserveTunnelLatency(context.Background(), tunnelID, "wireguard", latency.Seconds())
+					}
 					if len(recentLatencies) > 10 {
 						recentLatencies = recentLatencies[1:]
 					}
@@ -468,7 +481,8 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 			continue
 		}
 
-		if action == "add" {
+		switch action {
+		case "add":
 			target := parts[1] + ":" + parts[2]
 
 			// Call updown script if provided
@@ -494,7 +508,7 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 			// Add the new target
 			pm.AddTarget(proto, tunnelIP, port, processedTarget)
 
-		} else if action == "remove" {
+		case "remove":
 			logger.Info("Removing target with port %d", port)
 
 			target := parts[1] + ":" + parts[2]
@@ -512,6 +526,8 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 				logger.Error("Failed to remove target: %v", err)
 				return err
 			}
+		default:
+			logger.Info("Unknown action: %s", action)
 		}
 	}
 

@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'newt'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['newt:2112']  # /metrics
+    relabel_configs:
+    # optional: drop tunnel_id
+      - action: labeldrop
+        regex: 'tunnel_id'
+    # optional: allow only specific sites
+      - action: keep
+        source_labels: [site_id]
+        regex: '(site-a|site-b)'
+
+  # WARNING: Do not enable this together with the 'newt' job above or you will double-count.
+  # - job_name: 'otel-collector'
+  #   static_configs:
+  #     - targets: ['otel-collector:8889']
