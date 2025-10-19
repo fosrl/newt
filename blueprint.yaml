@@ -12,9 +12,9 @@ resources:
       sso-roles:
       - Member
       sso-users:
-      - owen@fossorial.io
+      - owen@pangolin.net
       whitelist-users:
-      - owen@fossorial.io
+      - owen@pangolin.net
     targets:
     # - site: glossy-plains-viscacha-rat
     - hostname: localhost

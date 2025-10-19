@@ -9,7 +9,7 @@ Newt is a fully user space [WireGuard](https://www.wireguard.com/) tunnel client
 
 Newt is used with Pangolin and Gerbil as part of the larger system. See documentation below:
 
--   [Full Documentation](https://docs.fossorial.io)
+-   [Full Documentation](https://docs.pangolin.net)
 
 ## Preview
 
@@ -145,7 +145,7 @@ $ cat ~/.config/newt-client/config.json
 {
   "id": "spmzu8rbpzj1qq6",
   "secret": "f6v61mjutwme2kkydbw3fjo227zl60a2tsf5psw9r25hgae3",
-  "endpoint": "https://pangolin.fossorial.io",
+  "endpoint": "https://app.pangolin.net",
   "tlsClientCert": ""
 }
 ```
