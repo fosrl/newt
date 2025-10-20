@@ -6,17 +6,14 @@ on:
 permissions:
   contents: read
   packages: write
-  id-token: write
+  id-token: write   # for keyless OIDC
 
 env:
-  # >>> CHANGE THIS PER REPO <<<
   SOURCE_IMAGE: docker.io/fosrl/newt
-
-  # GHCR target under THIS GitHub repo
   DEST_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
 
 jobs:
-  mirror-and-sign:
+  mirror-and-dual-sign:
     runs-on: ubuntu-latest
     steps:
       - name: Install skopeo + jq
@@ -26,7 +23,7 @@ jobs:
           skopeo --version
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad
+        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
 
       - name: Input check
         run: |
@@ -34,14 +31,21 @@ jobs:
           echo "Source : ${SOURCE_IMAGE}"
           echo "Target : ${DEST_IMAGE}"
 
-      - name: Login to GHCR
+      # Auth for skopeo (containers-auth)
+      - name: Skopeo login to GHCR
         run: |
           skopeo login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
 
-      # Optional (private/rate-limited pulls)
-      # - name: Login to Docker Hub
-      #   if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
-      #   run: skopeo login docker.io -u "${{ secrets.DOCKERHUB_USERNAME }}" -p "${{ secrets.DOCKERHUB_TOKEN }}"
+      # >>> IMPORTANT: Auth for cosign (docker-config) <<<
+      - name: Docker login to GHCR (for cosign)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # Optional (if Docker Hub private / tight limits)
+      # - name: Login to Docker Hub (skopeo and cosign share this via docker login)
+      #   run: |
+      #     echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login docker.io -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+      #     skopeo login docker.io -u "${{ secrets.DOCKERHUB_USERNAME }}" -p "${{ secrets.DOCKERHUB_TOKEN }}"
 
       - name: List source tags
         run: |
@@ -61,16 +65,21 @@ jobs:
           fi
           echo "Existing destination tags: $(wc -l < dst-tags.txt)"
 
-      - name: Mirror & dual-sign (keyless + key)
+      - name: Mirror, dual-sign, and verify
         env:
-          # keyless:
-          COSIGN_YES: "true"                        # auto-confirm
-          # key-based:
+          # keyless
+          COSIGN_YES: "true"
+          # key-based
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
+          # verify
+          COSIGN_PUBLIC_KEY:  ${{ secrets.COSIGN_PUBLIC_KEY }}
         run: |
           set -euo pipefail
-          copied=0; skipped=0; signed_keyless=0; signed_key=0; errs=0
+          copied=0; skipped=0; v_ok=0; errs=0
+
+          issuer="https://token.actions.githubusercontent.com"
+          id_regex="^https://github.com/${{ github.repository }}/.+"
 
           while read -r tag; do
             [ -z "$tag" ] && continue
@@ -89,47 +98,42 @@ jobs:
             fi
             copied=$((copied+1))
 
-            # digest-based signing (stable ref)
             digest="$(skopeo inspect --retry-times 3 docker://"${DEST_IMAGE}:${tag}" | jq -r '.Digest')"
             ref="${DEST_IMAGE}@${digest}"
 
             echo "==> cosign sign (keyless) --recursive ${ref}"
-            if cosign sign --recursive "${ref}"; then
-              signed_keyless=$((signed_keyless+1))
-            else
+            if ! cosign sign --recursive "${ref}"; then
               echo "::warning title=Keyless sign failed::${ref}"
               errs=$((errs+1))
             fi
 
             echo "==> cosign sign (key) --recursive ${ref}"
-            if cosign sign --key env://COSIGN_PRIVATE_KEY --recursive "${ref}"; then
-              signed_key=$((signed_key+1))
-            else
+            if ! cosign sign --key env://COSIGN_PRIVATE_KEY --recursive "${ref}"; then
               echo "::warning title=Key sign failed::${ref}"
               errs=$((errs+1))
+            fi
+
+            echo "==> cosign verify (public key) ${ref}"
+            if ! cosign verify --key env://COSIGN_PUBLIC_KEY "${ref}" -o text; then
+              echo "::warning title=Verify(pubkey) failed::${ref}"
+              errs=$((errs+1))
+            fi
+
+            echo "==> cosign verify (keyless policy) ${ref}"
+            if ! cosign verify \
+                 --certificate-oidc-issuer "${issuer}" \
+                 --certificate-identity-regexp "${id_regex}" \
+                 "${ref}" -o text; then
+              echo "::warning title=Verify(keyless) failed::${ref}"
+              errs=$((errs+1))
+            else
+              v_ok=$((v_ok+1))
             fi
           done < src-tags.txt
 
           echo "---- Summary ----"
-          echo "Copied           : $copied"
-          echo "Skipped (exists) : $skipped"
-          echo "Signed (keyless) : $signed_keyless"
-          echo "Signed (key)     : $signed_key"
-          echo "Errors           : $errs"
+          echo "Copied        : $copied"
+          echo "Skipped       : $skipped"
+          echo "Verified OK   : $v_ok"
+          echo "Errors        : $errs"
 
-      # Optional: immediate verify using your public key (one sample tag if present)
-      - name: Optional verify (public key) for the newest mirrored tag
-        if: always()
-        env:
-          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
-        run: |
-          set -euo pipefail
-          last_tag="$(tail -n 1 src-tags.txt || true)"
-          if [ -n "$last_tag" ] && grep -Fxq "$last_tag" dst-tags.txt; then
-            digest="$(skopeo inspect docker://"${DEST_IMAGE}:${last_tag}" | jq -r '.Digest')"
-            ref="${DEST_IMAGE}@${digest}"
-            echo "Verifying ${ref} with COSIGN_PUBLIC_KEY..."
-            cosign verify --key env://COSIGN_PUBLIC_KEY "${ref}" -o text || true
-          else
-            echo "No mirrored tag to verify in this run."
-          fi
