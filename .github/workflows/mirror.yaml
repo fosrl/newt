@@ -1,0 +1,135 @@
+name: Mirror & Sign (Docker Hub to GHCR)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  # >>> CHANGE THIS PER REPO <<<
+  SOURCE_IMAGE: docker.io/fosrl/newt
+
+  # GHCR target under THIS GitHub repo
+  DEST_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+
+jobs:
+  mirror-and-sign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install skopeo + jq
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y skopeo jq
+          skopeo --version
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad
+
+      - name: Input check
+        run: |
+          test -n "${SOURCE_IMAGE}" || (echo "SOURCE_IMAGE is empty" && exit 1)
+          echo "Source : ${SOURCE_IMAGE}"
+          echo "Target : ${DEST_IMAGE}"
+
+      - name: Login to GHCR
+        run: |
+          skopeo login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+
+      # Optional (private/rate-limited pulls)
+      # - name: Login to Docker Hub
+      #   if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+      #   run: skopeo login docker.io -u "${{ secrets.DOCKERHUB_USERNAME }}" -p "${{ secrets.DOCKERHUB_TOKEN }}"
+
+      - name: List source tags
+        run: |
+          set -euo pipefail
+          skopeo list-tags --retry-times 3 docker://"${SOURCE_IMAGE}" \
+            | jq -r '.Tags[]' | sort -u > src-tags.txt
+          echo "Found source tags: $(wc -l < src-tags.txt)"
+          head -n 20 src-tags.txt || true
+
+      - name: List destination tags (skip existing)
+        run: |
+          set -euo pipefail
+          if skopeo list-tags --retry-times 3 docker://"${DEST_IMAGE}" >/tmp/dst.json 2>/dev/null; then
+            jq -r '.Tags[]' /tmp/dst.json | sort -u > dst-tags.txt
+          else
+            : > dst-tags.txt
+          fi
+          echo "Existing destination tags: $(wc -l < dst-tags.txt)"
+
+      - name: Mirror & dual-sign (keyless + key)
+        env:
+          # keyless:
+          COSIGN_YES: "true"                        # auto-confirm
+          # key-based:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          copied=0; skipped=0; signed_keyless=0; signed_key=0; errs=0
+
+          while read -r tag; do
+            [ -z "$tag" ] && continue
+
+            if grep -Fxq "$tag" dst-tags.txt; then
+              echo "::notice ::Skip (exists) ${DEST_IMAGE}:${tag}"
+              skipped=$((skipped+1))
+              continue
+            fi
+
+            echo "==> Copy ${SOURCE_IMAGE}:${tag} → ${DEST_IMAGE}:${tag}"
+            if ! skopeo copy --all --retry-times 3 \
+                 docker://"${SOURCE_IMAGE}:${tag}" docker://"${DEST_IMAGE}:${tag}"; then
+              echo "::warning title=Copy failed::${SOURCE_IMAGE}:${tag}"
+              errs=$((errs+1)); continue
+            fi
+            copied=$((copied+1))
+
+            # digest-based signing (stable ref)
+            digest="$(skopeo inspect --retry-times 3 docker://"${DEST_IMAGE}:${tag}" | jq -r '.Digest')"
+            ref="${DEST_IMAGE}@${digest}"
+
+            echo "==> cosign sign (keyless) --recursive ${ref}"
+            if cosign sign --recursive "${ref}"; then
+              signed_keyless=$((signed_keyless+1))
+            else
+              echo "::warning title=Keyless sign failed::${ref}"
+              errs=$((errs+1))
+            fi
+
+            echo "==> cosign sign (key) --recursive ${ref}"
+            if cosign sign --key env://COSIGN_PRIVATE_KEY --recursive "${ref}"; then
+              signed_key=$((signed_key+1))
+            else
+              echo "::warning title=Key sign failed::${ref}"
+              errs=$((errs+1))
+            fi
+          done < src-tags.txt
+
+          echo "---- Summary ----"
+          echo "Copied           : $copied"
+          echo "Skipped (exists) : $skipped"
+          echo "Signed (keyless) : $signed_keyless"
+          echo "Signed (key)     : $signed_key"
+          echo "Errors           : $errs"
+
+      # Optional: immediate verify using your public key (one sample tag if present)
+      - name: Optional verify (public key) for the newest mirrored tag
+        if: always()
+        env:
+          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          last_tag="$(tail -n 1 src-tags.txt || true)"
+          if [ -n "$last_tag" ] && grep -Fxq "$last_tag" dst-tags.txt; then
+            digest="$(skopeo inspect docker://"${DEST_IMAGE}:${last_tag}" | jq -r '.Digest')"
+            ref="${DEST_IMAGE}@${digest}"
+            echo "Verifying ${ref} with COSIGN_PUBLIC_KEY..."
+            cosign verify --key env://COSIGN_PUBLIC_KEY "${ref}" -o text || true
+          else
+            echo "No mirrored tag to verify in this run."
+          fi
