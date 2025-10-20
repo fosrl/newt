@@ -15,16 +15,16 @@ jobs:
 
         steps:
             - name: Checkout code
-              uses: actions/checkout@v5
+              uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
             - name: Set up QEMU
-              uses: docker/setup-qemu-action@v3
+              uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
 
             - name: Set up Docker Buildx
-              uses: docker/setup-buildx-action@v3
+              uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
             - name: Log in to Docker Hub
-              uses: docker/login-action@v3
+              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
               with:
                   username: ${{ secrets.DOCKER_HUB_USERNAME }}
                   password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
@@ -34,7 +34,7 @@ jobs:
               run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
 
             - name: Install Go
-              uses: actions/setup-go@v6
+              uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
               with:
                   go-version: 1.25
 
@@ -58,7 +58,7 @@ jobs:
                   make go-build-release
 
             - name: Upload artifacts from /bin
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
               with:
                   name: binaries
                   path: bin/
