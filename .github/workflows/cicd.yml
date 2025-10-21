@@ -1,64 +1,160 @@
 name: CI/CD Pipeline
 
+# CI/CD workflow for building, publishing, mirroring, signing container images and building release binaries.
+# Actions are pinned to specific SHAs to reduce supply-chain risk. This workflow triggers on tag push events.
+
 permissions:
   contents: read
+  packages: write      # for GHCR push
+  id-token: write      # for Cosign Keyless (OIDC) Signing
+
+# Required secrets:
+# - DOCKER_HUB_USERNAME / DOCKER_HUB_ACCESS_TOKEN: push to Docker Hub
+# - GITHUB_TOKEN: used for GHCR login and OIDC keyless signing
+# - COSIGN_PRIVATE_KEY / COSIGN_PASSWORD / COSIGN_PUBLIC_KEY: for key-based signing
 
 on:
-    push:
-        tags:
-            - "*"
+  push:
+    tags:
+      - "*"
+
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-    release:
-        name: Build and Release
-        runs-on: amd64-runner
+  release:
+    name: Build and Release
+    runs-on: amd64-runner
+    # Job-level timeout to avoid runaway or stuck runs
+    timeout-minutes: 120
+    env:
+      # Target images
+      DOCKERHUB_IMAGE: docker.io/${{ secrets.DOCKER_HUB_USERNAME }}/${{ github.event.repository.name }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
 
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@v5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-            - name: Set up QEMU
-              uses: docker/setup-qemu-action@v3
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
 
-            - name: Set up Docker Buildx
-              uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
-            - name: Log in to Docker Hub
-              uses: docker/login-action@v3
-              with:
-                  username: ${{ secrets.DOCKER_HUB_USERNAME }}
-                  password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+      - name: Log in to Docker Hub
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
 
-            - name: Extract tag name
-              id: get-tag
-              run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+      - name: Extract tag name
+        id: get-tag
+        run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+        shell: bash
 
-            - name: Install Go
-              uses: actions/setup-go@v6
-              with:
-                  go-version: 1.25
+      - name: Install Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: 1.25
 
-            - name: Update version in main.go
-              run: |
-                  TAG=${{ env.TAG }}
-                  if [ -f main.go ]; then
-                    sed -i 's/version_replaceme/'"$TAG"'/' main.go
-                    echo "Updated main.go with version $TAG"
-                  else
-                    echo "main.go not found"
-                  fi
+      - name: Update version in main.go
+        run: |
+          TAG=${{ env.TAG }}
+          if [ -f main.go ]; then
+            sed -i 's/version_replaceme/'"$TAG"'/' main.go
+            echo "Updated main.go with version $TAG"
+          else
+            echo "main.go not found"
+          fi
+        shell: bash
 
-            - name: Build and push Docker images
-              run: |
-                  TAG=${{ env.TAG }}
-                  make docker-build-release tag=$TAG
+      - name: Build and push Docker images (Docker Hub)
+        run: |
+          TAG=${{ env.TAG }}
+          make docker-build-release tag=$TAG
+          echo "Built & pushed to: ${{ env.DOCKERHUB_IMAGE }}:${TAG}"
+        shell: bash
 
-            - name: Build binaries
-              run: |
-                  make go-build-release
+      - name: Login in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-            - name: Upload artifacts from /bin
-              uses: actions/upload-artifact@v4
-              with:
-                  name: binaries
-                  path: bin/
+      - name: Install skopeo + jq
+        # skopeo: copy/inspect images between registries
+        # jq: JSON parsing tool used to extract digest values
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y skopeo jq
+          skopeo --version
+        shell: bash
+
+      - name: Copy tag from Docker Hub to GHCR
+        # Mirror the already-built image (all architectures) to GHCR so we can sign it
+        run: |
+          set -euo pipefail
+          TAG=${{ env.TAG }}
+          echo "Copying ${{ env.DOCKERHUB_IMAGE }}:${TAG} -> ${{ env.GHCR_IMAGE }}:${TAG}"
+          skopeo copy --all --retry-times 3 \
+            docker://$DOCKERHUB_IMAGE:$TAG \
+            docker://$GHCR_IMAGE:$TAG
+        shell: bash
+
+      - name: Install cosign
+        # cosign is used to sign and verify container images (key and keyless)
+        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
+
+      - name: Dual-sign and verify (GHCR & Docker Hub)
+        # Sign each image by digest using keyless (OIDC) and key-based signing,
+        # then verify both the public key signature and the keyless OIDC signature.
+        env:
+          TAG: ${{ env.TAG }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+
+          issuer="https://token.actions.githubusercontent.com"
+          id_regex="^https://github.com/${{ github.repository }}/.+"  # accept this repo (all workflows/refs)
+
+          for IMAGE in "${GHCR_IMAGE}" "${DOCKERHUB_IMAGE}"; do
+            echo "Processing ${IMAGE}:${TAG}"
+
+            DIGEST="$(skopeo inspect --retry-times 3 docker://${IMAGE}:${TAG} | jq -r '.Digest')"
+            REF="${IMAGE}@${DIGEST}"
+            echo "Resolved digest: ${REF}"
+
+            echo "==> cosign sign (keyless) --recursive ${REF}"
+            cosign sign --recursive "${REF}"
+
+            echo "==> cosign sign (key) --recursive ${REF}"
+            cosign sign --key env://COSIGN_PRIVATE_KEY --recursive "${REF}"
+
+            echo "==> cosign verify (public key) ${REF}"
+            cosign verify --key env://COSIGN_PUBLIC_KEY "${REF}" -o text
+
+            echo "==> cosign verify (keyless policy) ${REF}"
+            cosign verify \
+              --certificate-oidc-issuer "${issuer}" \
+              --certificate-identity-regexp "${id_regex}" \
+              "${REF}" -o text
+          done
+        shell: bash
+
+      - name: Build binaries
+        run: |
+          make go-build-release
+        shell: bash
+
+      - name: Upload artifacts from /bin
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: binaries
+          path: bin/
