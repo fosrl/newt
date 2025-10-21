@@ -25,7 +25,7 @@ concurrency:
 jobs:
   release:
     name: Build and Release
-    runs-on: ubuntu-latest
+    runs-on: amd64-runner
     # Job-level timeout to avoid runaway or stuck runs
     timeout-minutes: 120
     env:
