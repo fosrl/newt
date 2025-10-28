@@ -78,13 +78,6 @@ jobs:
           echo "Built & pushed to: ${{ env.DOCKERHUB_IMAGE }}:${TAG}"
         shell: bash
 
-      - name: Login in to GHCR
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Install skopeo + jq
         # skopeo: copy/inspect images between registries
         # jq: JSON parsing tool used to extract digest values
@@ -92,6 +85,11 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y skopeo jq
           skopeo --version
+        shell: bash
+
+      - name: Login to GHCR
+        run: |
+            skopeo login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
         shell: bash
 
       - name: Copy tag from Docker Hub to GHCR
