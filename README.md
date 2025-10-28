@@ -135,6 +135,7 @@ All CLI arguments can be set using environment variables as an alternative to co
 -   `TLS_CLIENT_CERT`: Path to client certificate for mTLS (equivalent to `--tls-client-cert`)
 -   `TLS_CLIENT_KEY`: Path to private key for mTLS (equivalent to `--tls-client-key`)
 -   `TLS_CA_CERT`: Path to CA certificate to verify server (equivalent to `--tls-ca-cert`)
+-   `SKIP_TLS_VERIFY`: Skip TLS verification for server connections. Default: false
 
 ## Loading secrets from files
 
