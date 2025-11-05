@@ -1,0 +1,180 @@
+// Example: Using Network-Level Proxying with ProxyManager
+//
+// This demonstrates how to use the subnet-based proxy features
+// to intercept and proxy entire network ranges through the host.
+//
+// File: network_proxy_example.go.txt (rename to .go when implementing)
+
+package main
+
+import (
+	"net/netip"
+	"time"
+
+	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/netstack2"
+	"github.com/fosrl/newt/proxy"
+)
+
+func main() {
+	// Example 1: Basic Network Proxy Setup
+	// This shows how to proxy a small subnet range
+	
+	// Create the netstack device (typically done during tunnel setup)
+	localAddrs := []netip.Addr{
+		netip.MustParseAddr("10.0.0.1"),
+	}
+	dnsServers := []netip.Addr{
+		netip.MustParseAddr("8.8.8.8"),
+	}
+	
+	_, net, err := netstack2.CreateNetTUN(localAddrs, dnsServers, 1420)
+	if err != nil {
+		logger.Error("Failed to create netTUN: %v", err)
+		return
+	}
+	
+	// Create proxy manager
+	pm := proxy.NewProxyManager(net)
+	
+	// Add traditional port-based proxies (existing functionality)
+	pm.AddTarget("tcp", "0.0.0.0", 8080, "192.168.1.100:80")
+	pm.AddTarget("udp", "0.0.0.0", 53, "8.8.8.8:53")
+	
+	// Add network-level proxies (new functionality)
+	// Any packets destined for 10.0.0.0/30 will be intercepted and proxied
+	err = pm.AddNetworkTarget("10.0.0.0/30")
+	if err != nil {
+		logger.Error("Failed to add network target: %v", err)
+		return
+	}
+	
+	// You can add multiple subnet ranges
+	pm.AddNetworkTarget("192.168.100.0/24")
+	pm.AddNetworkTarget("172.16.0.0/16")
+	
+	// Start the proxy manager (starts both port-based and network proxies)
+	if err := pm.Start(); err != nil {
+		logger.Error("Failed to start proxy manager: %v", err)
+		return
+	}
+	
+	logger.Info("Proxy manager started successfully")
+	pm.PrintTargets()
+	
+	// The proxy manager will now:
+	// 1. Accept connections on port 8080 and 53 (traditional proxying)
+	// 2. Intercept all packets to 10.0.0.0-10.0.0.3 (network proxying)
+	// 3. Intercept all packets to 192.168.100.0/24 (network proxying)
+	// 4. Intercept all packets to 172.16.0.0/16 (network proxying)
+	
+	// Keep running
+	time.Sleep(time.Hour)
+	
+	// Clean up
+	pm.Stop()
+}
+
+// Example 2: Dynamic Network Proxy Management
+func dynamicProxyExample() {
+	// Assume we already have net and pm set up...
+	var pm *proxy.ProxyManager
+	
+	// Add a network proxy dynamically
+	if err := pm.AddNetworkTarget("10.1.0.0/24"); err != nil {
+		logger.Error("Failed to add network target: %v", err)
+		return
+	}
+	
+	// Later, remove it dynamically
+	if err := pm.RemoveNetworkTarget("10.1.0.0/24"); err != nil {
+		logger.Error("Failed to remove network target: %v", err)
+		return
+	}
+	
+	// Print current status
+	pm.PrintTargets()
+}
+
+// Example 3: Use Case - SNAT for Private Networks
+func snatExample() {
+	// Use case: You have a WireGuard tunnel with client IP 10.0.0.2
+	// You want to allow the client to access your private network 192.168.1.0/24
+	// but the private network doesn't have routes back to 10.0.0.2
+	
+	var pm *proxy.ProxyManager
+	
+	// Solution: Proxy the entire private network subnet
+	// Packets from 10.0.0.2 -> 192.168.1.x will be proxied through the host
+	// Response packets will come back through the host and be injected to the tunnel
+	pm.AddNetworkTarget("192.168.1.0/24")
+	
+	// Now the client can access 192.168.1.x without needing routing setup
+	// The host acts as a SNAT gateway for that subnet
+}
+
+// Example 4: Multiple Tunnel Scenario with Telemetry
+func multiTunnelExample() {
+	var pm *proxy.ProxyManager
+	
+	// Set tunnel ID for telemetry tracking
+	pm.SetTunnelID("peer_abc123_public_key")
+	
+	// Add network targets
+	pm.AddNetworkTarget("10.2.0.0/24")
+	
+	// All network proxy connections will be tracked with this tunnel ID
+	// Metrics like bytes transferred, active connections, etc.
+	
+	// When tunnel disconnects
+	pm.ClearTunnelID()
+}
+
+// Example 5: Checking Active Connections
+func monitoringExample() {
+	var pm *proxy.ProxyManager
+	
+	// The PrintTargets method shows:
+	// - All TCP port targets
+	// - All UDP port targets  
+	// - All network subnet targets
+	// - Number of active network connections
+	pm.PrintTargets()
+	
+	// Output example:
+	// Current TCP Targets:
+	// TCP 0.0.0.0:8080 -> 192.168.1.100:80
+	// Current UDP Targets:
+	// UDP 0.0.0.0:53 -> 8.8.8.8:53
+	// Current Network Targets:
+	// Network 10.0.0.0/30 -> (proxied through host)
+	// Network 192.168.100.0/24 -> (proxied through host)
+	// Active Network Connections: 5
+}
+
+// Important Notes:
+//
+// 1. TCP Limitations:
+//    The network proxy creates simplified TCP headers without proper
+//    sequence/ack number tracking. This works for most cases but may
+//    have issues with:
+//    - TCP retransmissions
+//    - Out-of-order packets
+//    - Advanced TCP features (SACK, window scaling, etc.)
+//
+// 2. Performance:
+//    Each packet is processed in Go userspace, so performance may be
+//    lower than kernel-level routing for high-throughput scenarios.
+//
+// 3. Connection Tracking:
+//    Network proxy maintains per-flow connection state. Idle connections
+//    are cleaned up after 5 minutes.
+//
+// 4. Protocol Support:
+//    Currently supports TCP (protocol 6) and UDP (protocol 17).
+//    Other protocols will pass through normally.
+//
+// 5. Integration with Port Proxying:
+//    You can use both port-based and network-based proxying simultaneously.
+//    Port-based proxying happens at the netstack level, while network
+//    proxying intercepts packets before they reach the netstack.

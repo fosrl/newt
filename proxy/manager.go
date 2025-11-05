@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -39,11 +40,27 @@ type ProxyManager struct {
 	running    bool
 	mutex      sync.RWMutex
 
+	// network-level proxying (subnet interception)
+	networkTargets map[string]bool              // map[subnet_cidr]bool to track registered subnets
+	netConnections map[string]*networkProxyConn // map[flow_key]connection
+	netConnMutex   sync.RWMutex
+
 	// telemetry (multi-tunnel)
 	currentTunnelID string
 	tunnels         map[string]*tunnelEntry
 	asyncBytes      bool
 	flushStop       chan struct{}
+}
+
+// networkProxyConn tracks an active network-level proxy connection
+type networkProxyConn struct {
+	srcAddr    string
+	dstAddr    string
+	protocol   uint8
+	conn       net.Conn
+	tunnelID   string
+	lastActive time.Time
+	cancel     context.CancelFunc
 }
 
 // tunnelEntry holds per-tunnel attributes and (optional) async counters.
@@ -127,12 +144,14 @@ func classifyProxyError(err error) string {
 // NewProxyManager creates a new proxy manager instance
 func NewProxyManager(tnet *netstack2.Net) *ProxyManager {
 	return &ProxyManager{
-		tnet:       tnet,
-		tcpTargets: make(map[string]map[int]string),
-		udpTargets: make(map[string]map[int]string),
-		listeners:  make([]*gonet.TCPListener, 0),
-		udpConns:   make([]*gonet.UDPConn, 0),
-		tunnels:    make(map[string]*tunnelEntry),
+		tnet:           tnet,
+		tcpTargets:     make(map[string]map[int]string),
+		udpTargets:     make(map[string]map[int]string),
+		listeners:      make([]*gonet.TCPListener, 0),
+		udpConns:       make([]*gonet.UDPConn, 0),
+		networkTargets: make(map[string]bool),
+		netConnections: make(map[string]*networkProxyConn),
+		tunnels:        make(map[string]*tunnelEntry),
 	}
 }
 
@@ -206,10 +225,12 @@ func (pm *ProxyManager) ClearTunnelID() {
 // init function without tnet
 func NewProxyManagerWithoutTNet() *ProxyManager {
 	return &ProxyManager{
-		tcpTargets: make(map[string]map[int]string),
-		udpTargets: make(map[string]map[int]string),
-		listeners:  make([]*gonet.TCPListener, 0),
-		udpConns:   make([]*gonet.UDPConn, 0),
+		tcpTargets:     make(map[string]map[int]string),
+		udpTargets:     make(map[string]map[int]string),
+		listeners:      make([]*gonet.TCPListener, 0),
+		udpConns:       make([]*gonet.UDPConn, 0),
+		networkTargets: make(map[string]bool),
+		netConnections: make(map[string]*networkProxyConn),
 	}
 }
 
@@ -245,6 +266,80 @@ func (pm *ProxyManager) AddTarget(proto, listenIP string, port int, targetAddr s
 	} else {
 		logger.Debug("Not adding target because not running")
 	}
+	return nil
+}
+
+// AddNetworkTarget adds a subnet range for network-level proxying
+// Packets destined for this subnet will be proxied through the host's network stack
+func (pm *ProxyManager) AddNetworkTarget(subnet string) error {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	// Parse and validate subnet
+	prefix, err := netip.ParsePrefix(subnet)
+	if err != nil {
+		return fmt.Errorf("invalid subnet: %w", err)
+	}
+
+	// Check if already registered
+	if pm.networkTargets[subnet] {
+		return fmt.Errorf("subnet %s already registered", subnet)
+	}
+
+	pm.networkTargets[subnet] = true
+
+	// If running, register the interceptor immediately
+	if pm.running && pm.tnet != nil {
+		if err := pm.tnet.RegisterSubnetInterceptor(prefix, pm); err != nil {
+			delete(pm.networkTargets, subnet)
+			return fmt.Errorf("failed to register interceptor: %w", err)
+		}
+		logger.Info("Started network proxy for subnet %s", subnet)
+	}
+
+	return nil
+}
+
+// RemoveNetworkTarget removes a subnet from network-level proxying
+func (pm *ProxyManager) RemoveNetworkTarget(subnet string) error {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	if !pm.networkTargets[subnet] {
+		return fmt.Errorf("subnet %s not registered", subnet)
+	}
+
+	// Parse subnet
+	prefix, err := netip.ParsePrefix(subnet)
+	if err != nil {
+		return fmt.Errorf("invalid subnet: %w", err)
+	}
+
+	// Unregister interceptor if running
+	if pm.running && pm.tnet != nil {
+		pm.tnet.UnregisterSubnetInterceptor(prefix)
+	}
+
+	// Close all connections for this subnet
+	pm.netConnMutex.Lock()
+	for key, conn := range pm.netConnections {
+		// Check if connection's destination matches this subnet
+		dstAddr, err := netip.ParseAddr(conn.dstAddr)
+		if err == nil && prefix.Contains(dstAddr) {
+			if conn.cancel != nil {
+				conn.cancel()
+			}
+			if conn.conn != nil {
+				conn.conn.Close()
+			}
+			delete(pm.netConnections, key)
+		}
+	}
+	pm.netConnMutex.Unlock()
+
+	delete(pm.networkTargets, subnet)
+	logger.Info("Removed network proxy for subnet %s", subnet)
+
 	return nil
 }
 
@@ -331,6 +426,20 @@ func (pm *ProxyManager) Start() error {
 				return fmt.Errorf("failed to start UDP target: %v", err)
 			}
 		}
+	}
+
+	// Register network-level interceptors
+	for subnet := range pm.networkTargets {
+		prefix, err := netip.ParsePrefix(subnet)
+		if err != nil {
+			logger.Error("Invalid subnet %s: %v", subnet, err)
+			continue
+		}
+		if err := pm.tnet.RegisterSubnetInterceptor(prefix, pm); err != nil {
+			logger.Error("Failed to register network interceptor for %s: %v", subnet, err)
+			continue
+		}
+		logger.Info("Started network proxy for subnet %s", subnet)
 	}
 
 	pm.running = true
@@ -437,6 +546,27 @@ func (pm *ProxyManager) Stop() error {
 		pm.udpConns = append(pm.udpConns[:i], pm.udpConns[i+1:]...)
 	}
 
+	// Unregister network interceptors and close all network connections
+	for subnet := range pm.networkTargets {
+		prefix, err := netip.ParsePrefix(subnet)
+		if err == nil {
+			pm.tnet.UnregisterSubnetInterceptor(prefix)
+		}
+	}
+
+	// Close all active network proxy connections
+	pm.netConnMutex.Lock()
+	for flowKey, conn := range pm.netConnections {
+		if conn.cancel != nil {
+			conn.cancel()
+		}
+		if conn.conn != nil {
+			conn.conn.Close()
+		}
+		delete(pm.netConnections, flowKey)
+	}
+	pm.netConnMutex.Unlock()
+
 	// // Clear the target maps
 	// for k := range pm.tcpTargets {
 	// 	delete(pm.tcpTargets, k)
@@ -488,6 +618,465 @@ func (pm *ProxyManager) getEntry(id string) *tunnelEntry {
 	e := pm.tunnels[id]
 	pm.mutex.RUnlock()
 	return e
+}
+
+// HandlePacket implements netstack2.PacketHandler for network-level proxying
+func (pm *ProxyManager) HandlePacket(info netstack2.PacketInfo) bool {
+	// Build connection key: src_ip:src_port->dst_ip:dst_port:protocol
+	flowKey := fmt.Sprintf("%s:%d->%s:%d:%d",
+		info.SrcAddr, info.SrcPort,
+		info.DstAddr, info.DstPort,
+		info.Protocol)
+
+	pm.netConnMutex.RLock()
+	conn, exists := pm.netConnections[flowKey]
+	pm.netConnMutex.RUnlock()
+
+	if exists {
+		// Forward packet on existing connection
+		conn.lastActive = time.Now()
+		go pm.forwardNetworkPacket(conn, info)
+		return true
+	}
+
+	// Only handle TCP and UDP
+	if info.Protocol != 6 && info.Protocol != 17 {
+		return false // Let other protocols through
+	}
+
+	// Create new connection
+	go pm.handleNewNetworkConnection(info, flowKey)
+	return true
+}
+
+// handleNewNetworkConnection establishes a new proxied connection for network-level traffic
+func (pm *ProxyManager) handleNewNetworkConnection(info netstack2.PacketInfo, flowKey string) {
+	tunnelID := pm.currentTunnelID
+	dstAddrPort := fmt.Sprintf("%s:%d", info.DstAddr, info.DstPort)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var conn net.Conn
+	var err error
+	var protoStr string
+
+	switch info.Protocol {
+	case 6: // TCP
+		protoStr = "tcp"
+		conn, err = net.DialTimeout("tcp", dstAddrPort, 10*time.Second)
+	case 17: // UDP
+		protoStr = "udp"
+		raddr, _ := net.ResolveUDPAddr("udp", dstAddrPort)
+		conn, err = net.DialUDP("udp", nil, raddr)
+	default:
+		cancel()
+		return
+	}
+
+	if err != nil {
+		logger.Error("Network proxy: failed to dial %s: %v", dstAddrPort, err)
+		telemetry.IncProxyAccept(context.Background(), tunnelID, protoStr, "failure", classifyProxyError(err))
+		cancel()
+		return
+	}
+
+	proxyConn := &networkProxyConn{
+		srcAddr:    fmt.Sprintf("%s:%d", info.SrcAddr, info.SrcPort),
+		dstAddr:    fmt.Sprintf("%s:%d", info.DstAddr, info.DstPort),
+		protocol:   info.Protocol,
+		conn:       conn,
+		tunnelID:   tunnelID,
+		lastActive: time.Now(),
+		cancel:     cancel,
+	}
+
+	pm.netConnMutex.Lock()
+	pm.netConnections[flowKey] = proxyConn
+	pm.netConnMutex.Unlock()
+
+	telemetry.IncProxyAccept(context.Background(), tunnelID, protoStr, "success", "")
+	telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, protoStr, telemetry.ProxyConnectionOpened)
+
+	// Track active connections
+	if e := pm.getEntry(tunnelID); e != nil {
+		if info.Protocol == 6 {
+			e.activeTCP.Add(1)
+		} else {
+			e.activeUDP.Add(1)
+		}
+	}
+
+	logger.Info("Network proxy: new %s connection %s", protoStr, flowKey)
+
+	// Start goroutine to read responses from target
+	go pm.readNetworkResponses(ctx, flowKey, proxyConn, info)
+
+	// Forward the initial packet
+	pm.forwardNetworkPacket(proxyConn, info)
+}
+
+// forwardNetworkPacket forwards a packet's payload to the target connection
+func (pm *ProxyManager) forwardNetworkPacket(conn *networkProxyConn, info netstack2.PacketInfo) {
+	// Extract payload from IP packet
+	payload := pm.extractPayload(info)
+
+	protoStr := "tcp"
+	if info.Protocol == 17 {
+		protoStr = "udp"
+	}
+
+	logger.Debug("Network proxy: extractPayload returned %d bytes for %s", len(payload), protoStr)
+
+	if len(payload) == 0 {
+		logger.Debug("Network proxy: no payload to forward (likely TCP control packet)")
+		return
+	}
+
+	logger.Info("Network proxy: forwarding %d bytes to %s", len(payload), conn.dstAddr)
+
+	// Write to target connection
+	n, err := conn.conn.Write(payload)
+	if err != nil {
+		logger.Error("Network proxy: failed to forward packet: %v", err)
+		pm.closeNetworkConnection(conn, fmt.Sprintf("%s:%d->%s:%d:%d",
+			info.SrcAddr, info.SrcPort, info.DstAddr, info.DstPort, info.Protocol))
+		return
+	}
+
+	logger.Info("Network proxy: successfully wrote %d bytes to target", n)
+
+	// Track bytes (ingress: from tunnel to target)
+	if n > 0 && conn.tunnelID != "" {
+		protoStr := "tcp"
+		if info.Protocol == 17 {
+			protoStr = "udp"
+		}
+		if e := pm.getEntry(conn.tunnelID); e != nil {
+			if pm.asyncBytes {
+				if info.Protocol == 6 {
+					e.bytesInTCP.Add(uint64(n))
+				} else {
+					e.bytesInUDP.Add(uint64(n))
+				}
+			} else {
+				var attrSet attribute.Set
+				if info.Protocol == 6 {
+					attrSet = e.attrInTCP
+				} else {
+					attrSet = e.attrInUDP
+				}
+				telemetry.AddTunnelBytesSet(context.Background(), int64(n), attrSet)
+			}
+		}
+		logger.Info("Network proxy: forwarded %d bytes %s", n, protoStr)
+	}
+}
+
+// readNetworkResponses reads responses from the target and injects them back into the tunnel
+func (pm *ProxyManager) readNetworkResponses(ctx context.Context, flowKey string, conn *networkProxyConn, originalInfo netstack2.PacketInfo) {
+	defer pm.closeNetworkConnection(conn, flowKey)
+
+	buf := make([]byte, 65536)
+	protoStr := "tcp"
+	if originalInfo.Protocol == 17 {
+		protoStr = "udp"
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Set read deadline for cleanup of idle connections
+		conn.conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+
+		logger.Info("Network proxy: waiting for response %s", protoStr)
+		n, err := conn.conn.Read(buf)
+		logger.Info("Network proxy: read returned n=%d err=%v", n, err)
+		if err != nil {
+			if err != io.EOF && !errors.Is(err, net.ErrClosed) {
+				logger.Error("Network proxy: error reading response: %v", err)
+			}
+			return
+		}
+
+		if n == 0 {
+			continue
+		}
+
+		conn.lastActive = time.Now()
+
+		// Build response packet with swapped src/dst
+		responsePacket := pm.buildResponsePacket(
+			originalInfo.DstAddr, originalInfo.SrcAddr,
+			originalInfo.DstPort, originalInfo.SrcPort,
+			originalInfo.Protocol, originalInfo.IsIPv4,
+			buf[:n],
+		)
+
+		if responsePacket == nil {
+			logger.Error("Network proxy: failed to build response packet")
+			continue
+		}
+
+		// Inject response back into tunnel
+		if err := pm.tnet.InjectPacket(responsePacket); err != nil {
+			logger.Error("Network proxy: failed to inject response: %v", err)
+			return
+		}
+
+		// // Track bytes (egress: from target back to tunnel)
+		// if conn.tunnelID != "" {
+		// 	if e := pm.getEntry(conn.tunnelID); e != nil {
+		// 		if pm.asyncBytes {
+		// 			if originalInfo.Protocol == 6 {
+		// 				e.bytesOutTCP.Add(uint64(n))
+		// 			} else {
+		// 				e.bytesOutUDP.Add(uint64(n))
+		// 			}
+		// 		} else {
+		// 			var attrSet attribute.Set
+		// 			if originalInfo.Protocol == 6 {
+		// 				attrSet = e.attrOutTCP
+		// 			} else {
+		// 				attrSet = e.attrOutUDP
+		// 			}
+		// 			telemetry.AddTunnelBytesSet(context.Background(), int64(n), attrSet)
+		// 		}
+		// 	}
+		// }
+
+		logger.Info("Network proxy: injected %d bytes response %s", n, protoStr)
+	}
+}
+
+// closeNetworkConnection closes a network proxy connection and cleans up
+func (pm *ProxyManager) closeNetworkConnection(conn *networkProxyConn, flowKey string) {
+	if conn.cancel != nil {
+		conn.cancel()
+	}
+	if conn.conn != nil {
+		conn.conn.Close()
+	}
+
+	pm.netConnMutex.Lock()
+	delete(pm.netConnections, flowKey)
+	pm.netConnMutex.Unlock()
+
+	protoStr := "tcp"
+	if conn.protocol == 17 {
+		protoStr = "udp"
+	}
+
+	// Decrement active connections
+	if conn.tunnelID != "" {
+		if e := pm.getEntry(conn.tunnelID); e != nil {
+			if conn.protocol == 6 {
+				e.activeTCP.Add(-1)
+			} else {
+				e.activeUDP.Add(-1)
+			}
+		}
+	}
+
+	telemetry.IncProxyConnectionEvent(context.Background(), conn.tunnelID, protoStr, telemetry.ProxyConnectionClosed)
+	logger.Debug("Network proxy: closed connection %s", flowKey)
+}
+
+// extractPayload extracts the transport layer payload from an IP packet
+func (pm *ProxyManager) extractPayload(info netstack2.PacketInfo) []byte {
+	data := info.Data
+	if len(data) < 20 {
+		return nil
+	}
+
+	if info.IsIPv4 {
+		// IPv4: get header length and skip to transport layer
+		ihl := int(data[0]&0x0f) * 4
+		if len(data) < ihl {
+			return nil
+		}
+
+		switch info.Protocol {
+		case 6: // TCP
+			if len(data) < ihl+20 {
+				return nil // TCP header incomplete
+			}
+			tcpHeaderLen := int(data[ihl+12]>>4) * 4
+			if len(data) < ihl+tcpHeaderLen {
+				return nil
+			}
+			return data[ihl+tcpHeaderLen:]
+
+		case 17: // UDP
+			if len(data) < ihl+8 {
+				return nil // UDP header incomplete
+			}
+			return data[ihl+8:]
+		}
+	} else {
+		// IPv6: fixed 40 byte header
+		if len(data) < 40 {
+			return nil
+		}
+
+		switch info.Protocol {
+		case 6: // TCP
+			if len(data) < 40+20 {
+				return nil
+			}
+			tcpHeaderLen := int(data[40+12]>>4) * 4
+			if len(data) < 40+tcpHeaderLen {
+				return nil
+			}
+			return data[40+tcpHeaderLen:]
+
+		case 17: // UDP
+			if len(data) < 40+8 {
+				return nil
+			}
+			return data[40+8:]
+		}
+	}
+
+	return nil
+}
+
+// buildResponsePacket constructs a complete IP packet for the response
+func (pm *ProxyManager) buildResponsePacket(srcIP, dstIP netip.Addr, srcPort, dstPort uint16, protocol uint8, isIPv4 bool, payload []byte) []byte {
+	if isIPv4 {
+		return pm.buildIPv4Packet(srcIP, dstIP, srcPort, dstPort, protocol, payload)
+	}
+	return pm.buildIPv6Packet(srcIP, dstIP, srcPort, dstPort, protocol, payload)
+}
+
+// buildIPv4Packet constructs an IPv4 packet
+func (pm *ProxyManager) buildIPv4Packet(srcIP, dstIP netip.Addr, srcPort, dstPort uint16, protocol uint8, payload []byte) []byte {
+	var transportHeader []byte
+	var totalLen int
+
+	switch protocol {
+	case 6: // TCP
+		// Simplified TCP header (20 bytes minimum)
+		transportHeader = make([]byte, 20)
+		transportHeader[0] = byte(srcPort >> 8)
+		transportHeader[1] = byte(srcPort)
+		transportHeader[2] = byte(dstPort >> 8)
+		transportHeader[3] = byte(dstPort)
+		// Sequence and ack numbers would need proper TCP state tracking
+		// For now, using zeros (this is a limitation)
+		transportHeader[12] = 0x50 // Data offset: 5 (20 bytes), no flags
+		transportHeader[14] = 0xff // Window size
+		transportHeader[15] = 0xff
+		totalLen = 20 + 20 + len(payload)
+
+	case 17: // UDP
+		udpLen := 8 + len(payload)
+		transportHeader = make([]byte, 8)
+		transportHeader[0] = byte(srcPort >> 8)
+		transportHeader[1] = byte(srcPort)
+		transportHeader[2] = byte(dstPort >> 8)
+		transportHeader[3] = byte(dstPort)
+		transportHeader[4] = byte(udpLen >> 8)
+		transportHeader[5] = byte(udpLen)
+		// Checksum at [6:8] - leave as zero for now (optional in IPv4)
+		totalLen = 20 + udpLen
+
+	default:
+		return nil
+	}
+
+	// Build IPv4 header (20 bytes)
+	ipHeader := make([]byte, 20)
+	ipHeader[0] = 0x45                // Version 4, IHL 5
+	ipHeader[1] = 0                   // DSCP/ECN
+	ipHeader[2] = byte(totalLen >> 8) // Total length
+	ipHeader[3] = byte(totalLen)
+	ipHeader[4] = 0 // ID
+	ipHeader[5] = 0
+	ipHeader[6] = 0x40     // Flags: Don't Fragment
+	ipHeader[7] = 0        // Fragment offset
+	ipHeader[8] = 64       // TTL
+	ipHeader[9] = protocol // Protocol
+	// Checksum at [10:12] - calculate below
+	srcBytes := srcIP.As4()
+	dstBytes := dstIP.As4()
+	copy(ipHeader[12:16], srcBytes[:]) // Source IP
+	copy(ipHeader[16:20], dstBytes[:]) // Dest IP
+
+	// Calculate IPv4 header checksum
+	checksum := uint32(0)
+	for i := 0; i < 20; i += 2 {
+		checksum += uint32(ipHeader[i])<<8 | uint32(ipHeader[i+1])
+	}
+	for checksum > 0xffff {
+		checksum = (checksum & 0xffff) + (checksum >> 16)
+	}
+	ipHeader[10] = byte(^checksum >> 8)
+	ipHeader[11] = byte(^checksum)
+
+	// Assemble packet
+	packet := make([]byte, 0, totalLen)
+	packet = append(packet, ipHeader...)
+	packet = append(packet, transportHeader...)
+	packet = append(packet, payload...)
+
+	return packet
+}
+
+// buildIPv6Packet constructs an IPv6 packet
+func (pm *ProxyManager) buildIPv6Packet(srcIP, dstIP netip.Addr, srcPort, dstPort uint16, protocol uint8, payload []byte) []byte {
+	var transportHeader []byte
+	var payloadLen int
+
+	switch protocol {
+	case 6: // TCP
+		transportHeader = make([]byte, 20)
+		transportHeader[0] = byte(srcPort >> 8)
+		transportHeader[1] = byte(srcPort)
+		transportHeader[2] = byte(dstPort >> 8)
+		transportHeader[3] = byte(dstPort)
+		transportHeader[12] = 0x50 // Data offset: 5 (20 bytes)
+		transportHeader[14] = 0xff // Window size
+		transportHeader[15] = 0xff
+		payloadLen = 20 + len(payload)
+
+	case 17: // UDP
+		udpLen := 8 + len(payload)
+		transportHeader = make([]byte, 8)
+		transportHeader[0] = byte(srcPort >> 8)
+		transportHeader[1] = byte(srcPort)
+		transportHeader[2] = byte(dstPort >> 8)
+		transportHeader[3] = byte(dstPort)
+		transportHeader[4] = byte(udpLen >> 8)
+		transportHeader[5] = byte(udpLen)
+		payloadLen = udpLen
+
+	default:
+		return nil
+	}
+
+	// Build IPv6 header (40 bytes)
+	ipHeader := make([]byte, 40)
+	ipHeader[0] = 0x60                  // Version 6
+	ipHeader[4] = byte(payloadLen >> 8) // Payload length
+	ipHeader[5] = byte(payloadLen)
+	ipHeader[6] = protocol // Next header
+	ipHeader[7] = 64       // Hop limit
+	srcBytes := srcIP.As16()
+	dstBytes := dstIP.As16()
+	copy(ipHeader[8:24], srcBytes[:])  // Source IP
+	copy(ipHeader[24:40], dstBytes[:]) // Dest IP
+
+	// Assemble packet
+	packet := make([]byte, 0, 40+payloadLen)
+	packet = append(packet, ipHeader...)
+	packet = append(packet, transportHeader...)
+	packet = append(packet, payload...)
+
+	return packet
 }
 
 func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string) {
@@ -735,4 +1324,72 @@ func (pm *ProxyManager) PrintTargets() {
 			logger.Info("UDP %s:%d -> %s", listenIP, port, targetAddr)
 		}
 	}
+
+	logger.Info("Current Network Targets:")
+	for subnet := range pm.networkTargets {
+		logger.Info("Network %s -> (proxied through host)", subnet)
+	}
+
+	pm.netConnMutex.RLock()
+	logger.Info("Active Network Connections: %d", len(pm.netConnections))
+	pm.netConnMutex.RUnlock()
+}
+
+// GetNetworkConnectionStats returns statistics about active network proxy connections
+func (pm *ProxyManager) GetNetworkConnectionStats() map[string]interface{} {
+	pm.netConnMutex.RLock()
+	defer pm.netConnMutex.RUnlock()
+
+	stats := map[string]interface{}{
+		"total_connections": len(pm.netConnections),
+		"tcp_connections":   0,
+		"udp_connections":   0,
+		"connections":       []map[string]interface{}{},
+	}
+
+	tcpCount := 0
+	udpCount := 0
+	connDetails := []map[string]interface{}{}
+
+	for flowKey, conn := range pm.netConnections {
+		if conn.protocol == 6 {
+			tcpCount++
+		} else if conn.protocol == 17 {
+			udpCount++
+		}
+
+		protoStr := "tcp"
+		if conn.protocol == 17 {
+			protoStr = "udp"
+		}
+
+		connDetails = append(connDetails, map[string]interface{}{
+			"flow_key":    flowKey,
+			"src_addr":    conn.srcAddr,
+			"dst_addr":    conn.dstAddr,
+			"protocol":    protoStr,
+			"tunnel_id":   conn.tunnelID,
+			"last_active": conn.lastActive.Format(time.RFC3339),
+			"idle_time":   time.Since(conn.lastActive).String(),
+		})
+	}
+
+	stats["tcp_connections"] = tcpCount
+	stats["udp_connections"] = udpCount
+	stats["connections"] = connDetails
+
+	return stats
+}
+
+// GetNetworkTargets returns a list of all registered network subnets
+func (pm *ProxyManager) GetNetworkTargets() []string {
+	pm.mutex.RLock()
+	defer pm.mutex.RUnlock()
+
+	subnets := make([]string, 0, len(pm.networkTargets))
+	for subnet := range pm.networkTargets {
+		subnets = append(subnets, subnet)
+	}
+
+	return subnets
 }

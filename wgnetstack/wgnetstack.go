@@ -468,6 +468,8 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 		s.updateTargets(s.proxyManager, "add", s.TunnelIP, "udp", TargetData{Targets: config.Targets.UDP})
 	}
 
+	s.proxyManager.AddNetworkTarget("10.20.20.0/24") // Newt internal network
+
 	// Create ProxyManager for this tunnel
 	s.proxyManager.Start()
 }

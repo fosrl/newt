@@ -1,0 +1,175 @@
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+      1 0.000000       172.17.0.3            10.20.20.20           TCP      72                80 → 34486 [ACK] Seq=1 Ack=1 Win=510 Len=0 TSval=2756139990 TSecr=978052381
+
+Frame 1: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 172.17.0.3, Dst: 10.20.20.20
+Transmission Control Protocol, Src Port: 80, Dst Port: 34486, Seq: 1, Ack: 1, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+      2 0.000003       172.17.0.3            10.20.20.20           TCP      72                [TCP Dup ACK 1#1] 80 → 34486 [ACK] Seq=1 Ack=1 Win=510 Len=0 TSval=2756139990 TSecr=978052381
+
+Frame 2: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 172.17.0.3, Dst: 10.20.20.20
+Transmission Control Protocol, Src Port: 80, Dst Port: 34486, Seq: 1, Ack: 1, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+      3 0.000033       10.20.20.20           172.17.0.3            TCP      72                [TCP ACKed unseen segment] 34486 → 80 [ACK] Seq=1 Ack=2 Win=512 Len=0 TSval=978067611 TSecr=2756124760
+
+Frame 3: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 10.20.20.20, Dst: 172.17.0.3
+Transmission Control Protocol, Src Port: 34486, Dst Port: 80, Seq: 1, Ack: 2, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+      4 0.000035       10.20.20.20           172.17.0.3            TCP      72                [TCP Dup ACK 3#1] 34486 → 80 [ACK] Seq=1 Ack=2 Win=512 Len=0 TSval=978067611 TSecr=2756124760
+
+Frame 4: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 10.20.20.20, Dst: 172.17.0.3
+Transmission Control Protocol, Src Port: 34486, Dst Port: 80, Seq: 1, Ack: 2, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+      5 0.003996       172.17.0.3            10.20.20.20           TCP      72                80 → 53952 [ACK] Seq=1 Ack=1 Win=510 Len=0 TSval=2756139994 TSecr=978052507
+
+Frame 5: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 172.17.0.3, Dst: 10.20.20.20
+Transmission Control Protocol, Src Port: 80, Dst Port: 53952, Seq: 1, Ack: 1, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+      6 0.003997       172.17.0.3            10.20.20.20           TCP      72                [TCP Dup ACK 5#1] 80 → 53952 [ACK] Seq=1 Ack=1 Win=510 Len=0 TSval=2756139994 TSecr=978052507
+
+Frame 6: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 172.17.0.3, Dst: 10.20.20.20
+Transmission Control Protocol, Src Port: 80, Dst Port: 53952, Seq: 1, Ack: 1, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+      7 0.003997       10.20.20.20           172.17.0.3            TCP      72                [TCP Keep-Alive] 34486 → 80 [ACK] Seq=0 Ack=2 Win=512 Len=0 TSval=978067615 TSecr=2756124760
+
+Frame 7: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 10.20.20.20, Dst: 172.17.0.3
+Transmission Control Protocol, Src Port: 34486, Dst Port: 80, Seq: 0, Ack: 2, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+      8 0.003997       10.20.20.20           172.17.0.3            TCP      72                [TCP ACKed unseen segment] 53952 → 80 [ACK] Seq=0 Ack=2 Win=512 Len=0 TSval=978067615 TSecr=2756124886
+
+Frame 8: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 10.20.20.20, Dst: 172.17.0.3
+Transmission Control Protocol, Src Port: 53952, Dst Port: 80, Seq: 0, Ack: 2, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+      9 0.003998       10.20.20.20           172.17.0.3            TCP      72                [TCP Keep-Alive] 34486 → 80 [ACK] Seq=0 Ack=2 Win=512 Len=0 TSval=978067615 TSecr=2756124760
+
+Frame 9: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 10.20.20.20, Dst: 172.17.0.3
+Transmission Control Protocol, Src Port: 34486, Dst Port: 80, Seq: 0, Ack: 2, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+     10 0.003999       10.20.20.20           172.17.0.3            TCP      72                [TCP Dup ACK 8#1] 53952 → 80 [ACK] Seq=0 Ack=2 Win=512 Len=0 TSval=978067615 TSecr=2756124886
+
+Frame 10: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 10.20.20.20, Dst: 172.17.0.3
+Transmission Control Protocol, Src Port: 53952, Dst Port: 80, Seq: 0, Ack: 2, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+     11 0.004005       172.17.0.3            10.20.20.20           TCP      72                [TCP Previous segment not captured] 80 → 34486 [ACK] Seq=2 Ack=1 Win=510 Len=0 TSval=2756139994 TSecr=978067611
+
+Frame 11: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 172.17.0.3, Dst: 10.20.20.20
+Transmission Control Protocol, Src Port: 80, Dst Port: 34486, Seq: 2, Ack: 1, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+     12 0.004006       172.17.0.3            10.20.20.20           TCP      72                [TCP Keep-Alive ACK] 80 → 34486 [ACK] Seq=2 Ack=1 Win=510 Len=0 TSval=2756139994 TSecr=978067611
+
+Frame 12: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 172.17.0.3, Dst: 10.20.20.20
+Transmission Control Protocol, Src Port: 80, Dst Port: 34486, Seq: 2, Ack: 1, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+     13 0.004008       172.17.0.3            10.20.20.20           TCP      72                [TCP ACKed unseen segment] [TCP Previous segment not captured] 80 → 53952 [ACK] Seq=2 Ack=1 Win=510 Len=0 TSval=2756139994 TSecr=978052507
+
+Frame 13: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 172.17.0.3, Dst: 10.20.20.20
+Transmission Control Protocol, Src Port: 80, Dst Port: 53952, Seq: 2, Ack: 1, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+     14 0.004008       172.17.0.3            10.20.20.20           TCP      72                [TCP Dup ACK 5#2] 80 → 53952 [ACK] Seq=2 Ack=1 Win=510 Len=0 TSval=2756139994 TSecr=978052507
+
+Frame 14: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 172.17.0.3, Dst: 10.20.20.20
+Transmission Control Protocol, Src Port: 80, Dst Port: 53952, Seq: 2, Ack: 1, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+     15 0.004011       10.20.20.20           172.17.0.3            TCP      72                [TCP Previous segment not captured] 53952 → 80 [ACK] Seq=1 Ack=2 Win=512 Len=0 TSval=978067615 TSecr=2756124886
+
+Frame 15: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 10.20.20.20, Dst: 172.17.0.3
+Transmission Control Protocol, Src Port: 53952, Dst Port: 80, Seq: 1, Ack: 2, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+     16 0.004012       10.20.20.20           172.17.0.3            TCP      72                [TCP Dup ACK 8#2] 53952 → 80 [ACK] Seq=1 Ack=2 Win=512 Len=0 TSval=978067615 TSecr=2756124886
+
+Frame 16: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 10.20.20.20, Dst: 172.17.0.3
+Transmission Control Protocol, Src Port: 53952, Dst Port: 80, Seq: 1, Ack: 2, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+     17 1.330607       10.20.20.20           172.17.0.3            TCP      80     65495      54092 → 80 [SYN] Seq=0 Win=65495 Len=0 MSS=65495 SACK_PERM TSval=978068941 TSecr=0 WS=128
+
+Frame 17: 80 bytes on wire (640 bits), 80 bytes captured (640 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 10.20.20.20, Dst: 172.17.0.3
+Transmission Control Protocol, Src Port: 54092, Dst Port: 80, Seq: 0, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+     18 1.330611       10.20.20.20           172.17.0.3            TCP      80     65495      [TCP Retransmission] 54092 → 80 [SYN] Seq=0 Win=65495 Len=0 MSS=65495 SACK_PERM TSval=978068941 TSecr=0 WS=128
+
+Frame 18: 80 bytes on wire (640 bits), 80 bytes captured (640 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 10.20.20.20, Dst: 172.17.0.3
+Transmission Control Protocol, Src Port: 54092, Dst Port: 80, Seq: 0, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+     19 1.330623       172.17.0.3            10.20.20.20           TCP      80     1460       80 → 54092 [SYN, ACK] Seq=0 Ack=1 Win=65160 Len=0 MSS=1460 SACK_PERM TSval=2756141320 TSecr=978068941 WS=128
+
+Frame 19: 80 bytes on wire (640 bits), 80 bytes captured (640 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 172.17.0.3, Dst: 10.20.20.20
+Transmission Control Protocol, Src Port: 80, Dst Port: 54092, Seq: 0, Ack: 1, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+     20 1.330625       172.17.0.3            10.20.20.20           TCP      80     1460       [TCP Retransmission] 80 → 54092 [SYN, ACK] Seq=0 Ack=1 Win=65160 Len=0 MSS=1460 SACK_PERM TSval=2756141320 TSecr=978068941 WS=128
+
+Frame 20: 80 bytes on wire (640 bits), 80 bytes captured (640 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 172.17.0.3, Dst: 10.20.20.20
+Transmission Control Protocol, Src Port: 80, Dst Port: 54092, Seq: 0, Ack: 1, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+     21 1.330640       10.20.20.20           172.17.0.3            TCP      72                54092 → 80 [ACK] Seq=1 Ack=1 Win=65536 Len=0 TSval=978068941 TSecr=2756141320
+
+Frame 21: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 10.20.20.20, Dst: 172.17.0.3
+Transmission Control Protocol, Src Port: 54092, Dst Port: 80, Seq: 1, Ack: 1, Len: 0
+
+No.     Time           Source                Destination           Protocol Length MSS Value  Info
+     22 1.330641       10.20.20.20           172.17.0.3            TCP      72                [TCP Dup ACK 21#1] 54092 → 80 [ACK] Seq=1 Ack=1 Win=65536 Len=0 TSval=978068941 TSecr=2756141320
+
+Frame 22: 72 bytes on wire (576 bits), 72 bytes captured (576 bits)
+Linux cooked capture v2
+Internet Protocol Version 4, Src: 10.20.20.20, Dst: 172.17.0.3
+Transmission Control Protocol, Src Port: 54092, Dst Port: 80, Seq: 1, Ack: 1, Len: 0
