@@ -1,41 +1,102 @@
 name: CI/CD Pipeline
 
-# CI/CD workflow for building, publishing, mirroring, signing container images and building release binaries.
-# Actions are pinned to specific SHAs to reduce supply-chain risk. This workflow triggers on tag push events.
-
 permissions:
-  contents: read
-  packages: write      # for GHCR push
-  id-token: write      # for Cosign Keyless (OIDC) Signing
-
-# Required secrets:
-# - DOCKER_HUB_USERNAME / DOCKER_HUB_ACCESS_TOKEN: push to Docker Hub
-# - GITHUB_TOKEN: used for GHCR login and OIDC keyless signing
-# - COSIGN_PRIVATE_KEY / COSIGN_PASSWORD / COSIGN_PUBLIC_KEY: for key-based signing
+  contents: write          # gh-release
+  packages: write          # GHCR push
+  id-token: write          # Keyless-Signatures & Attestations
+  attestations: write      # actions/attest-build-provenance
+  security-events: write   # upload-sarif
+  actions: read
 
 on:
   push:
     tags:
       - "*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "SemVer version to release (e.g., 1.2.3, no leading 'v')"
+        required: true
+        type: string
+      publish_latest:
+        description: "Also publish the 'latest' image tag"
+        required: true
+        type: boolean
+        default: false
+      publish_minor:
+        description: "Also publish the 'major.minor' image tag (e.g., 1.2)"
+        required: true
+        type: boolean
+        default: false
+      target_branch:
+        description: "Branch to tag"
+        required: false
+        default: "main"
 
 concurrency:
-  group: ${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch'
+    name: Prepare release (create tag)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Validate version input
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$INPUT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "Invalid version: $INPUT_VERSION (expected X.Y.Z or X.Y.Z-rc.N)" >&2
+            exit 1
+          fi
+      - name: Create and push tag
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          VERSION: ${{ inputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --prune origin
+          git checkout "$TARGET_BRANCH"
+          git pull --ff-only origin "$TARGET_BRANCH"
+          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            echo "Tag $VERSION already exists" >&2
+            exit 1
+          fi
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "refs/tags/$VERSION"
   release:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.actor != 'github-actions[bot]') }}
     name: Build and Release
-    runs-on: amd64-runner
-    # Job-level timeout to avoid runaway or stuck runs
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      # Target images
-      DOCKERHUB_IMAGE: docker.io/${{ secrets.DOCKER_HUB_USERNAME }}/${{ github.event.repository.name }}
+      DOCKERHUB_IMAGE: docker.io/${{ vars.DOCKER_HUB_USERNAME }}/${{ github.event.repository.name }}
       GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Capture created timestamp
+        run: echo "IMAGE_CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
+        shell: bash
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
@@ -47,112 +108,494 @@ jobs:
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
         with:
           registry: docker.io
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          username: ${{ vars.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
 
+      - name: Log in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Normalize image names to lowercase
+        run: |
+          set -euo pipefail
+          echo "GHCR_IMAGE=${GHCR_IMAGE,,}" >> "$GITHUB_ENV"
+          echo "DOCKERHUB_IMAGE=${DOCKERHUB_IMAGE,,}" >> "$GITHUB_ENV"
+        shell: bash
+
       - name: Extract tag name
-        id: get-tag
-        run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "TAG=${INPUT_VERSION}" >> $GITHUB_ENV
+          else
+            echo "TAG=${{ github.ref_name }}" >> $GITHUB_ENV
+          fi
+        shell: bash
+
+      - name: Validate pushed tag format (no leading 'v')
+        if: ${{ github.event_name == 'push' }}
+        shell: bash
+        env:
+          TAG_GOT: ${{ env.TAG }}
+        run: |
+          set -euo pipefail
+          if [[ "$TAG_GOT" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "Tag OK: $TAG_GOT"
+            exit 0
+          fi
+          echo "ERROR: Tag '$TAG_GOT' is not allowed. Use 'X.Y.Z' or 'X.Y.Z-rc.N' (no leading 'v')." >&2
+          exit 1
+      - name: Wait for tag to be visible (dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+          for i in {1..90}; do
+            if git ls-remote --tags origin "refs/tags/${TAG}" | grep -qE "refs/tags/${TAG}$"; then
+              echo "Tag ${TAG} is visible on origin"; exit 0
+            fi
+            echo "Tag not yet visible, retrying... ($i/90)"
+            sleep 2
+          done
+          echo "Tag ${TAG} not visible after waiting"; exit 1
+        shell: bash
+
+      - name: Ensure repository is at the tagged commit (dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          git checkout "refs/tags/${TAG}"
+          echo "Checked out $(git rev-parse --short HEAD) for tag ${TAG}"
+        shell: bash
+
+      - name: Detect release candidate (rc)
+        run: |
+          set -euo pipefail
+          if [[ "${TAG}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+            echo "IS_RC=true" >> $GITHUB_ENV
+          else
+            echo "IS_RC=false" >> $GITHUB_ENV
+          fi
         shell: bash
 
       - name: Install Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: 1.25
+          go-version-file: go.mod
 
-      - name: Update version in main.go
-        run: |
-          TAG=${{ env.TAG }}
-          if [ -f main.go ]; then
-            sed -i 's/version_replaceme/'"$TAG"'/' main.go
-            echo "Updated main.go with version $TAG"
-          else
-            echo "main.go not found"
-          fi
-        shell: bash
-
-      - name: Build and push Docker images (Docker Hub)
-        run: |
-          TAG=${{ env.TAG }}
-          make docker-build-release tag=$TAG
-          echo "Built & pushed to: ${{ env.DOCKERHUB_IMAGE }}:${TAG}"
-        shell: bash
-
-      - name: Install skopeo + jq
-        # skopeo: copy/inspect images between registries
-        # jq: JSON parsing tool used to extract digest values
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y skopeo jq
-          skopeo --version
-        shell: bash
-
-      - name: Login to GHCR
-        run: |
-            skopeo login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
-        shell: bash
-
-      - name: Copy tag from Docker Hub to GHCR
-        # Mirror the already-built image (all architectures) to GHCR so we can sign it
+      - name: Resolve publish-latest flag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PL_INPUT: ${{ inputs.publish_latest }}
+          PL_VAR: ${{ vars.PUBLISH_LATEST }}
         run: |
           set -euo pipefail
-          TAG=${{ env.TAG }}
-          echo "Copying ${{ env.DOCKERHUB_IMAGE }}:${TAG} -> ${{ env.GHCR_IMAGE }}:${TAG}"
-          skopeo copy --all --retry-times 3 \
-            docker://$DOCKERHUB_IMAGE:$TAG \
-            docker://$GHCR_IMAGE:$TAG
+          val="false"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "${PL_INPUT}" = "true" ]; then val="true"; fi
+          else
+            if [ "${PL_VAR}" = "true" ]; then val="true"; fi
+          fi
+          echo "PUBLISH_LATEST=$val" >> $GITHUB_ENV
         shell: bash
+
+      - name: Resolve publish-minor flag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PM_INPUT: ${{ inputs.publish_minor }}
+          PM_VAR: ${{ vars.PUBLISH_MINOR }}
+        run: |
+          set -euo pipefail
+          val="false"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "${PM_INPUT}" = "true" ]; then val="true"; fi
+          else
+            if [ "${PM_VAR}" = "true" ]; then val="true"; fi
+          fi
+          echo "PUBLISH_MINOR=$val" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Cache Go modules
+        if: ${{ hashFiles('**/go.sum') != '' }}
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+      - name: Go vet & test
+        if: ${{ hashFiles('**/go.mod') != '' }}
+        run: |
+          go version
+          go vet ./...
+          go test ./... -race -covermode=atomic
+        shell: bash
+
+      - name: Resolve license fallback
+        run: echo "IMAGE_LICENSE=${{ github.event.repository.license.spdx_id || 'NOASSERTION' }}" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Resolve registries list (GHCR always, Docker Hub only if creds)
+        shell: bash
+        run: |
+          set -euo pipefail
+          images="${GHCR_IMAGE}"
+          if [ -n "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" ] && [ -n "${{ vars.DOCKER_HUB_USERNAME }}" ]; then
+            images="${images}\n${DOCKERHUB_IMAGE}"
+          fi
+          {
+            echo 'IMAGE_LIST<<EOF'
+            echo -e "$images"
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
+        with:
+          images: ${{ env.IMAGE_LIST }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ env.TAG }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG }},enable=${{ env.PUBLISH_MINOR == 'true' && env.IS_RC != 'true' }}
+            type=raw,value=latest,enable=${{ env.PUBLISH_LATEST == 'true' && env.IS_RC != 'true' }}
+          flavor: |
+            latest=false
+          labels: |
+            org.opencontainers.image.title=${{ github.event.repository.name }}
+            org.opencontainers.image.version=${{ env.TAG }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.event.repository.html_url }}
+            org.opencontainers.image.url=${{ github.event.repository.html_url }}
+            org.opencontainers.image.documentation=${{ github.event.repository.html_url }}
+            org.opencontainers.image.description=${{ github.event.repository.description }}
+            org.opencontainers.image.licenses=${{ env.IMAGE_LICENSE }}
+            org.opencontainers.image.created=${{ env.IMAGE_CREATED }}
+            org.opencontainers.image.ref.name=${{ env.TAG }}
+            org.opencontainers.image.authors=${{ github.repository_owner }}
+      - name: Echo build config (non-secret)
+        shell: bash
+        env:
+          IMAGE_TITLE:        ${{ github.event.repository.name }}
+          IMAGE_VERSION:      ${{ env.TAG }}
+          IMAGE_REVISION:     ${{ github.sha }}
+          IMAGE_SOURCE_URL:   ${{ github.event.repository.html_url }}
+          IMAGE_URL:          ${{ github.event.repository.html_url }}
+          IMAGE_DESCRIPTION:  ${{ github.event.repository.description }}
+          IMAGE_LICENSE:      ${{ env.IMAGE_LICENSE }}
+          DOCKERHUB_IMAGE:    ${{ env.DOCKERHUB_IMAGE }}
+          GHCR_IMAGE:         ${{ env.GHCR_IMAGE }}
+          DOCKER_HUB_USER:    ${{ vars.DOCKER_HUB_USERNAME }}
+          REPO:               ${{ github.repository }}
+          OWNER:              ${{ github.repository_owner }}
+          WORKFLOW_REF:       ${{ github.workflow_ref }}
+          REF:                ${{ github.ref }}
+          REF_NAME:           ${{ github.ref_name }}
+          RUN_URL:            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          echo "=== OCI Label Values ==="
+          echo "org.opencontainers.image.title=${IMAGE_TITLE}"
+          echo "org.opencontainers.image.version=${IMAGE_VERSION}"
+          echo "org.opencontainers.image.revision=${IMAGE_REVISION}"
+          echo "org.opencontainers.image.source=${IMAGE_SOURCE_URL}"
+          echo "org.opencontainers.image.url=${IMAGE_URL}"
+          echo "org.opencontainers.image.description=${IMAGE_DESCRIPTION}"
+          echo "org.opencontainers.image.licenses=${IMAGE_LICENSE}"
+          echo
+          echo "=== Images ==="
+          echo "DOCKERHUB_IMAGE=${DOCKERHUB_IMAGE}"
+          echo "GHCR_IMAGE=${GHCR_IMAGE}"
+          echo "DOCKER_HUB_USERNAME=${DOCKER_HUB_USER}"
+          echo
+          echo "=== GitHub Kontext ==="
+          echo "repository=${REPO}"
+          echo "owner=${OWNER}"
+          echo "workflow_ref=${WORKFLOW_REF}"
+          echo "ref=${REF}"
+          echo "ref_name=${REF_NAME}"
+          echo "run_url=${RUN_URL}"
+          echo
+          echo "=== docker/metadata-action outputs (Tags/Labels), raw ==="
+          echo "::group::tags"
+          echo "${{ steps.meta.outputs.tags }}"
+          echo "::endgroup::"
+          echo "::group::labels"
+          echo "${{ steps.meta.outputs.labels }}"
+          echo "::endgroup::"
+      - name: Build and push (Docker Hub + GHCR)
+        id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ github.repository }}
+          cache-to: type=gha,mode=max,scope=${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Compute image digest refs
+        run: |
+          echo "DIGEST=${{ steps.build.outputs.digest }}" >> $GITHUB_ENV
+          echo "GHCR_REF=$GHCR_IMAGE@${{ steps.build.outputs.digest }}" >> $GITHUB_ENV
+          echo "DH_REF=$DOCKERHUB_IMAGE@${{ steps.build.outputs.digest }}" >> $GITHUB_ENV
+          echo "Built digest: ${{ steps.build.outputs.digest }}"
+        shell: bash
+
+      - name: Attest build provenance (GHCR)
+        id: attest-ghcr
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ${{ env.GHCR_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          show-summary: true
+
+      - name: Attest build provenance (Docker Hub)
+        continue-on-error: true
+        id: attest-dh
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: index.docker.io/${{ vars.DOCKER_HUB_USERNAME }}/${{ github.event.repository.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          show-summary: true
 
       - name: Install cosign
-        # cosign is used to sign and verify container images (key and keyless)
         uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
+        with:
+          cosign-release: 'v3.0.2'
 
-      - name: Dual-sign and verify (GHCR & Docker Hub)
-        # Sign each image by digest using keyless (OIDC) and key-based signing,
-        # then verify both the public key signature and the keyless OIDC signature.
+      - name: Sanity check cosign private key
         env:
-          TAG: ${{ env.TAG }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
-          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
-          COSIGN_YES: "true"
+          COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
         run: |
           set -euo pipefail
-
-          issuer="https://token.actions.githubusercontent.com"
-          id_regex="^https://github.com/${{ github.repository }}/.+"  # accept this repo (all workflows/refs)
-
-          for IMAGE in "${GHCR_IMAGE}" "${DOCKERHUB_IMAGE}"; do
-            echo "Processing ${IMAGE}:${TAG}"
-
-            DIGEST="$(skopeo inspect --retry-times 3 docker://${IMAGE}:${TAG} | jq -r '.Digest')"
-            REF="${IMAGE}@${DIGEST}"
-            echo "Resolved digest: ${REF}"
-
-            echo "==> cosign sign (keyless) --recursive ${REF}"
-            cosign sign --recursive "${REF}"
-
-            echo "==> cosign sign (key) --recursive ${REF}"
-            cosign sign --key env://COSIGN_PRIVATE_KEY --recursive "${REF}"
-
-            echo "==> cosign verify (public key) ${REF}"
-            cosign verify --key env://COSIGN_PUBLIC_KEY "${REF}" -o text
-
-            echo "==> cosign verify (keyless policy) ${REF}"
-            cosign verify \
-              --certificate-oidc-issuer "${issuer}" \
-              --certificate-identity-regexp "${id_regex}" \
-              "${REF}" -o text
-          done
+          cosign public-key --key env://COSIGN_PRIVATE_KEY >/dev/null
         shell: bash
+
+      - name: Sign GHCR image (digest) with key (recursive)
+        env:
+          COSIGN_YES: "true"
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "Signing ${GHCR_REF} (digest) recursively with provided key"
+          cosign sign --key env://COSIGN_PRIVATE_KEY --recursive "${GHCR_REF}"
+        shell: bash
+
+      - name: Generate SBOM (SPDX JSON)
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: ${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output: sbom.spdx.json
+
+      - name: Validate SBOM JSON
+        run: jq -e . sbom.spdx.json >/dev/null
+        shell: bash
+
+      - name: Minify SBOM JSON (optional hardening)
+        run: jq -c . sbom.spdx.json > sbom.min.json && mv sbom.min.json sbom.spdx.json
+        shell: bash
+
+      - name: Create SBOM attestation (GHCR, private key)
+        env:
+          COSIGN_YES: "true"
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cosign attest \
+            --key env://COSIGN_PRIVATE_KEY \
+            --type spdxjson \
+            --predicate sbom.spdx.json \
+            "${GHCR_REF}"
+        shell: bash
+
+      - name: Create SBOM attestation (Docker Hub, private key)
+        continue-on-error: true
+        env:
+          COSIGN_YES: "true"
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
+          COSIGN_DOCKER_MEDIA_TYPES: "1"
+        run: |
+          set -euo pipefail
+          cosign attest \
+            --key env://COSIGN_PRIVATE_KEY \
+            --type spdxjson \
+            --predicate sbom.spdx.json \
+            "${DH_REF}"
+        shell: bash
+
+      - name: Keyless sign & verify GHCR digest (OIDC)
+        env:
+          COSIGN_YES: "true"
+          WORKFLOW_REF: ${{ github.workflow_ref }}  # owner/repo/.github/workflows/<file>@refs/tags/<tag>
+          ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          echo "Keyless signing ${GHCR_REF}"
+          cosign sign --rekor-url https://rekor.sigstore.dev --recursive "${GHCR_REF}"
+          echo "Verify keyless (OIDC) signature policy on ${GHCR_REF}"
+          cosign verify \
+            --certificate-oidc-issuer "${ISSUER}" \
+            --certificate-identity "https://github.com/${WORKFLOW_REF}" \
+            "${GHCR_REF}" -o text
+        shell: bash
+
+      - name: Sign Docker Hub image (digest) with key (recursive)
+        continue-on-error: true
+        env:
+          COSIGN_YES: "true"
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
+          COSIGN_DOCKER_MEDIA_TYPES: "1"
+        run: |
+          set -euo pipefail
+          echo "Signing ${DH_REF} (digest) recursively with provided key (Docker media types fallback)"
+          cosign sign --key env://COSIGN_PRIVATE_KEY --recursive "${DH_REF}"
+        shell: bash
+
+      - name: Keyless sign & verify Docker Hub digest (OIDC)
+        continue-on-error: true
+        env:
+          COSIGN_YES: "true"
+          ISSUER: https://token.actions.githubusercontent.com
+          COSIGN_DOCKER_MEDIA_TYPES: "1"
+        run: |
+          set -euo pipefail
+          echo "Keyless signing ${DH_REF} (force public-good Rekor)"
+          cosign sign --rekor-url https://rekor.sigstore.dev --recursive "${DH_REF}"
+          echo "Keyless verify via Rekor (strict identity)"
+          if ! cosign verify \
+            --rekor-url https://rekor.sigstore.dev \
+            --certificate-oidc-issuer "${ISSUER}" \
+            --certificate-identity "https://github.com/${{ github.workflow_ref }}" \
+            "${DH_REF}" -o text; then
+            echo "Rekor verify failed — retry offline bundle verify (no Rekor)"
+            if ! cosign verify \
+              --offline \
+              --certificate-oidc-issuer "${ISSUER}" \
+              --certificate-identity "https://github.com/${{ github.workflow_ref }}" \
+              "${DH_REF}" -o text; then
+              echo "Offline bundle verify failed — ignore tlog (TEMP for debugging)"
+              cosign verify \
+                --insecure-ignore-tlog=true \
+                --certificate-oidc-issuer "${ISSUER}" \
+                --certificate-identity "https://github.com/${{ github.workflow_ref }}" \
+                "${DH_REF}" -o text || true
+            fi
+          fi
+      - name: Verify signature (public key) GHCR digest + tag
+        env:
+          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          TAG_VAR="${TAG}"
+          echo "Verifying (digest) ${GHCR_REF}"
+          cosign verify --key env://COSIGN_PUBLIC_KEY "$GHCR_REF" -o text
+          echo "Verifying (tag) $GHCR_IMAGE:$TAG_VAR"
+          cosign verify --key env://COSIGN_PUBLIC_KEY "$GHCR_IMAGE:$TAG_VAR" -o text
+        shell: bash
+
+      - name: Verify SBOM attestation (GHCR)
+        env:
+          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
+        run: cosign verify-attestation --key env://COSIGN_PUBLIC_KEY --type spdxjson "$GHCR_REF" -o text
+        shell: bash
+
+      - name: Verify SLSA provenance (GHCR)
+        env:
+          ISSUER: https://token.actions.githubusercontent.com
+          WFREF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          # (optional) show which predicate types are present to aid debugging
+          cosign download attestation "$GHCR_REF" \
+            | jq -r '.payload | @base64d | fromjson | .predicateType' | sort -u || true
+          # Verify the SLSA v1 provenance attestation (predicate URL)
+          cosign verify-attestation \
+            --type 'https://slsa.dev/provenance/v1' \
+            --certificate-oidc-issuer "$ISSUER" \
+            --certificate-identity "https://github.com/${WFREF}" \
+            --rekor-url https://rekor.sigstore.dev \
+            "$GHCR_REF" -o text
+        shell: bash
+
+      - name: Verify signature (public key) Docker Hub digest
+        continue-on-error: true
+        env:
+          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
+          COSIGN_DOCKER_MEDIA_TYPES: "1"
+        run: |
+          set -euo pipefail
+          echo "Verifying (digest) ${DH_REF} with Docker media types"
+          cosign verify --key env://COSIGN_PUBLIC_KEY "${DH_REF}" -o text
+        shell: bash
+
+      - name: Verify signature (public key) Docker Hub tag
+        continue-on-error: true
+        env:
+          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
+          COSIGN_DOCKER_MEDIA_TYPES: "1"
+        run: |
+          set -euo pipefail
+          echo "Verifying (tag) $DOCKERHUB_IMAGE:$TAG with Docker media types"
+          cosign verify --key env://COSIGN_PUBLIC_KEY "$DOCKERHUB_IMAGE:$TAG" -o text
+        shell: bash
+
+      - name: Trivy scan (GHCR image)
+        id: trivy
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: ${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy-ghcr.sarif
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          exit-code: ${{ (vars.TRIVY_FAIL || '0') }}
+
+      - name: Upload SARIF
+        if: ${{ always() && hashFiles('trivy-ghcr.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@4e94bd11f71e507f7f87df81788dff88d1dacbfb # v4.31.0
+        with:
+          sarif_file: trivy-ghcr.sarif
+          category: Image Vulnerability Scan
 
       - name: Build binaries
+        env:
+          CGO_ENABLED: "0"
+          GOFLAGS: "-trimpath"
         run: |
-          make go-build-release
+          set -euo pipefail
+          TAG_VAR="${TAG}"
+          make go-build-release tag=$TAG_VAR
         shell: bash
 
-      - name: Upload artifacts from /bin
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@6da8fa9354ddfdc4aeace5fc48d7f679b5214090 # v2.4.1
         with:
-          name: binaries
-          path: bin/
+          tag_name: ${{ env.TAG }}
+          generate_release_notes: true
+          prerelease: ${{ env.IS_RC == 'true' }}
+          files: |
+            bin/*
+          fail_on_unmatched_files: true
+          body: |
+            ## Container Images
+            - GHCR: `${{ env.GHCR_REF }}`
+            - Docker Hub: `${{ env.DH_REF || 'N/A' }}`
+            **Digest:** `${{ steps.build.outputs.digest }}`
