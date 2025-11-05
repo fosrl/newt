@@ -1,0 +1,202 @@
+// Example: How to use the packet interception primitives from another Go module
+// 
+// This file demonstrates how an external proxy module would implement
+// SNAT-like behavior using the primitives provided by netstack2.
+//
+// File: example_proxy.go.txt (rename to .go when implementing)
+
+package myproxy
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"net/netip"
+	"sync"
+
+	"your-project/netstack2" // Adjust import path
+)
+
+// ProxyHandler implements the netstack2.PacketHandler interface
+type ProxyHandler struct {
+	netstack *netstack2.Net
+	
+	// Track active connections for bidirectional communication
+	mu          sync.RWMutex
+	connections map[string]*ProxyConnection
+}
+
+type ProxyConnection struct {
+	srcAddr  netip.AddrPort
+	dstAddr  netip.AddrPort
+	protocol uint8
+	conn     net.Conn
+}
+
+func NewProxyHandler(netstack *netstack2.Net) *ProxyHandler {
+	return &ProxyHandler{
+		netstack:    netstack,
+		connections: make(map[string]*ProxyConnection),
+	}
+}
+
+// HandlePacket implements netstack2.PacketHandler
+func (p *ProxyHandler) HandlePacket(info netstack2.PacketInfo) bool {
+	// Build connection key
+	key := fmt.Sprintf("%s:%d->%s:%d:%d",
+		info.SrcAddr, info.SrcPort,
+		info.DstAddr, info.DstPort,
+		info.Protocol)
+	
+	p.mu.RLock()
+	conn, exists := p.connections[key]
+	p.mu.RUnlock()
+	
+	if !exists {
+		// New connection - establish proxy connection through host network
+		go p.handleNewConnection(info, key)
+		return true
+	}
+	
+	// Forward packet data to existing connection
+	go p.forwardPacket(conn, info)
+	return true
+}
+
+func (p *ProxyHandler) handleNewConnection(info netstack2.PacketInfo, key string) {
+	var conn net.Conn
+	var err error
+	
+	dstAddr := netip.AddrPortFrom(info.DstAddr, info.DstPort)
+	
+	// Create connection through host's network stack
+	switch info.Protocol {
+	case 6: // TCP
+		conn, err = net.DialTCP("tcp", nil, net.TCPAddrFromAddrPort(dstAddr))
+	case 17: // UDP
+		conn, err = net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(dstAddr))
+	default:
+		fmt.Printf("Unsupported protocol: %d\n", info.Protocol)
+		return
+	}
+	
+	if err != nil {
+		fmt.Printf("Failed to dial %s: %v\n", dstAddr, err)
+		return
+	}
+	
+	proxyConn := &ProxyConnection{
+		srcAddr:  netip.AddrPortFrom(info.SrcAddr, info.SrcPort),
+		dstAddr:  dstAddr,
+		protocol: info.Protocol,
+		conn:     conn,
+	}
+	
+	p.mu.Lock()
+	p.connections[key] = proxyConn
+	p.mu.Unlock()
+	
+	// Start goroutine to read responses and inject back into tunnel
+	go p.readResponses(key, proxyConn)
+	
+	// Forward the initial packet
+	p.forwardPacket(proxyConn, info)
+}
+
+func (p *ProxyHandler) forwardPacket(conn *ProxyConnection, info netstack2.PacketInfo) {
+	// Extract payload from IP packet
+	payload := extractPayload(info)
+	if len(payload) == 0 {
+		return
+	}
+	
+	// Write to host connection
+	_, err := conn.conn.Write(payload)
+	if err != nil {
+		fmt.Printf("Failed to forward packet: %v\n", err)
+		// Clean up connection
+		conn.conn.Close()
+	}
+}
+
+func (p *ProxyHandler) readResponses(key string, conn *ProxyConnection) {
+	defer func() {
+		conn.conn.Close()
+		p.mu.Lock()
+		delete(p.connections, key)
+		p.mu.Unlock()
+	}()
+	
+	buf := make([]byte, 65536)
+	for {
+		n, err := conn.conn.Read(buf)
+		if err != nil {
+			return
+		}
+		
+		// Build response packet with swapped src/dst
+		responsePacket := buildIPPacket(
+			conn.dstAddr.Addr(),   // src (originally dst)
+			conn.srcAddr.Addr(),   // dst (originally src)
+			conn.dstAddr.Port(),   // src port
+			conn.srcAddr.Port(),   // dst port
+			conn.protocol,
+			buf[:n],
+		)
+		
+		// Inject response back into tunnel
+		err = p.netstack.InjectPacket(responsePacket)
+		if err != nil {
+			fmt.Printf("Failed to inject response: %v\n", err)
+			return
+		}
+	}
+}
+
+// Helper functions (simplified - you'd need proper implementations)
+func extractPayload(info netstack2.PacketInfo) []byte {
+	// Parse IP + TCP/UDP headers and extract payload
+	// This is simplified - real implementation needs proper header parsing
+	if info.IsIPv4 {
+		ipHeaderLen := int(info.Data[0]&0x0f) * 4
+		if info.Protocol == 6 { // TCP
+			tcpHeaderLen := int(info.Data[ipHeaderLen+12]>>4) * 4
+			return info.Data[ipHeaderLen+tcpHeaderLen:]
+		} else if info.Protocol == 17 { // UDP
+			return info.Data[ipHeaderLen+8:]
+		}
+	}
+	return nil
+}
+
+func buildIPPacket(srcIP, dstIP netip.Addr, srcPort, dstPort uint16, protocol uint8, payload []byte) []byte {
+	// Build complete IP packet with proper headers
+	// This is a placeholder - real implementation needs proper IP/TCP/UDP header construction
+	// including checksums, sequence numbers for TCP, etc.
+	
+	// You would use encoding/binary and proper header structures here
+	// See golang.org/x/net/ipv4 and ipv6 packages for helpers
+	
+	return nil // Implement proper packet construction
+}
+
+// Usage example:
+func ExampleUsage(netstack *netstack2.Net) error {
+	// Create proxy handler
+	handler := NewProxyHandler(netstack)
+	
+	// Register subnet to intercept (e.g., 10.0.0.0/30)
+	subnet := netip.MustParsePrefix("10.0.0.0/30")
+	err := netstack.RegisterSubnetInterceptor(subnet, handler)
+	if err != nil {
+		return fmt.Errorf("failed to register interceptor: %w", err)
+	}
+	
+	// Now all packets to 10.0.0.0-10.0.0.3 will be intercepted
+	// and proxied through the host's network stack
+	
+	// To unregister later:
+	// netstack.UnregisterSubnetInterceptor(subnet)
+	
+	return nil
+}

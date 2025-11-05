@@ -3,6 +3,22 @@
  * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
  */
 
+// Package netstack2 provides a userspace network stack implementation.
+//
+// Packet Interception Feature:
+// This package supports intercepting packets destined for specific subnet ranges
+// and routing them to external proxy handlers. This enables SNAT-like behavior
+// where packets can be proxied through the host's network stack.
+//
+// Usage:
+//   1. Implement the PacketHandler interface in your proxy module
+//   2. Register subnet ranges using RegisterSubnetInterceptor()
+//   3. Your handler receives PacketInfo for matching packets
+//   4. Use InjectPacket() to send response packets back through the tunnel
+//
+// Example:
+//   net.RegisterSubnetInterceptor(netip.MustParsePrefix("10.0.0.0/30"), myProxyHandler)
+//
 package netstack2
 
 import (
@@ -19,6 +35,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -39,6 +56,38 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
+// PacketInfo contains information about an intercepted packet
+type PacketInfo struct {
+	// Raw packet data (IP header + payload)
+	Data []byte
+	// Source address from IP header
+	SrcAddr netip.Addr
+	// Destination address from IP header
+	DstAddr netip.Addr
+	// Source port (for TCP/UDP)
+	SrcPort uint16
+	// Destination port (for TCP/UDP)
+	DstPort uint16
+	// Protocol number (6=TCP, 17=UDP, etc)
+	Protocol uint8
+	// Is IPv4 packet
+	IsIPv4 bool
+}
+
+// PacketHandler is the interface that external proxy modules should implement
+// to handle intercepted packets
+type PacketHandler interface {
+	// HandlePacket is called when a packet matching a registered subnet is intercepted
+	// Return true if the packet was handled, false to let it through normally
+	HandlePacket(info PacketInfo) bool
+}
+
+// SubnetInterceptor manages packet interception for specific subnet ranges
+type SubnetInterceptor struct {
+	subnet  netip.Prefix
+	handler PacketHandler
+}
+
 type netTun struct {
 	ep             *channel.Endpoint
 	stack          *stack.Stack
@@ -48,9 +97,72 @@ type netTun struct {
 	mtu            int
 	dnsServers     []netip.Addr
 	hasV4, hasV6   bool
+
+	// Packet interception
+	interceptorsMu sync.RWMutex
+	interceptors   []SubnetInterceptor
 }
 
 type Net netTun
+
+// RegisterSubnetInterceptor registers a handler for packets destined to a specific subnet
+// The handler will be called for all packets matching the subnet prefix
+func (net *Net) RegisterSubnetInterceptor(subnet netip.Prefix, handler PacketHandler) error {
+	if !subnet.IsValid() {
+		return errors.New("invalid subnet prefix")
+	}
+	if handler == nil {
+		return errors.New("handler cannot be nil")
+	}
+
+	tun := (*netTun)(net)
+	tun.interceptorsMu.Lock()
+	defer tun.interceptorsMu.Unlock()
+
+	// Check if subnet already registered
+	for _, interceptor := range tun.interceptors {
+		if interceptor.subnet == subnet {
+			return fmt.Errorf("subnet %s already has an interceptor registered", subnet)
+		}
+	}
+
+	tun.interceptors = append(tun.interceptors, SubnetInterceptor{
+		subnet:  subnet,
+		handler: handler,
+	})
+
+	return nil
+}
+
+// UnregisterSubnetInterceptor removes a handler for a specific subnet
+func (net *Net) UnregisterSubnetInterceptor(subnet netip.Prefix) bool {
+	tun := (*netTun)(net)
+	tun.interceptorsMu.Lock()
+	defer tun.interceptorsMu.Unlock()
+
+	for i, interceptor := range tun.interceptors {
+		if interceptor.subnet == subnet {
+			tun.interceptors = append(tun.interceptors[:i], tun.interceptors[i+1:]...)
+			return true
+		}
+	}
+
+	return false
+}
+
+// GetRegisteredSubnets returns a list of all registered subnet prefixes
+func (net *Net) GetRegisteredSubnets() []netip.Prefix {
+	tun := (*netTun)(net)
+	tun.interceptorsMu.RLock()
+	defer tun.interceptorsMu.RUnlock()
+
+	subnets := make([]netip.Prefix, len(tun.interceptors))
+	for i, interceptor := range tun.interceptors {
+		subnets[i] = interceptor.subnet
+	}
+
+	return subnets
+}
 
 func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device, *Net, error) {
 	opts := stack.Options{
@@ -134,6 +246,64 @@ func (tun *netTun) Read(buf [][]byte, sizes []int, offset int) (int, error) {
 	return 1, nil
 }
 
+// parsePacketInfo extracts packet information from raw IP packet data
+func parsePacketInfo(packet []byte) (PacketInfo, error) {
+	info := PacketInfo{Data: packet}
+
+	if len(packet) < 20 {
+		return info, errors.New("packet too short")
+	}
+
+	version := packet[0] >> 4
+	if version == 4 {
+		info.IsIPv4 = true
+		if len(packet) < 20 {
+			return info, errors.New("IPv4 packet too short")
+		}
+
+		info.Protocol = packet[9]
+		info.SrcAddr = netip.AddrFrom4([4]byte{packet[12], packet[13], packet[14], packet[15]})
+		info.DstAddr = netip.AddrFrom4([4]byte{packet[16], packet[17], packet[18], packet[19]})
+
+		ihl := int(packet[0]&0x0f) * 4
+		if len(packet) < ihl+4 {
+			return info, nil // No port info available
+		}
+
+		// Extract ports for TCP/UDP
+		if info.Protocol == 6 || info.Protocol == 17 { // TCP or UDP
+			info.SrcPort = binary.BigEndian.Uint16(packet[ihl : ihl+2])
+			info.DstPort = binary.BigEndian.Uint16(packet[ihl+2 : ihl+4])
+		}
+	} else if version == 6 {
+		info.IsIPv4 = false
+		if len(packet) < 40 {
+			return info, errors.New("IPv6 packet too short")
+		}
+
+		info.Protocol = packet[6]
+		var srcBytes, dstBytes [16]byte
+		copy(srcBytes[:], packet[8:24])
+		copy(dstBytes[:], packet[24:40])
+		info.SrcAddr = netip.AddrFrom16(srcBytes)
+		info.DstAddr = netip.AddrFrom16(dstBytes)
+
+		if len(packet) < 44 {
+			return info, nil // No port info available
+		}
+
+		// Extract ports for TCP/UDP (simple case, no extension headers)
+		if info.Protocol == 6 || info.Protocol == 17 { // TCP or UDP
+			info.SrcPort = binary.BigEndian.Uint16(packet[40:42])
+			info.DstPort = binary.BigEndian.Uint16(packet[42:44])
+		}
+	} else {
+		return info, fmt.Errorf("unknown IP version: %d", version)
+	}
+
+	return info, nil
+}
+
 func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
 	for _, buf := range buf {
 		packet := buf[offset:]
@@ -141,6 +311,42 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
 			continue
 		}
 
+		// Check if packet should be intercepted
+		tun.interceptorsMu.RLock()
+		shouldIntercept := false
+		if len(tun.interceptors) > 0 {
+			info, err := parsePacketInfo(packet)
+			if err == nil && info.DstAddr.IsValid() {
+				for _, interceptor := range tun.interceptors {
+					if interceptor.subnet.Contains(info.DstAddr) {
+						// Make a copy of the packet data for the handler
+						packetCopy := make([]byte, len(packet))
+						copy(packetCopy, packet)
+						info.Data = packetCopy
+
+						// Release lock before calling handler
+						tun.interceptorsMu.RUnlock()
+
+						// Call handler (blocks)
+						if interceptor.handler.HandlePacket(info) {
+							shouldIntercept = true
+						}
+
+						// Reacquire lock for cleanup
+						tun.interceptorsMu.RLock()
+						break
+					}
+				}
+			}
+		}
+		tun.interceptorsMu.RUnlock()
+
+		// If intercepted, skip normal processing
+		if shouldIntercept {
+			continue
+		}
+
+		// Normal packet processing
 		pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(packet)})
 		switch packet[0] >> 4 {
 		case 4:
@@ -152,6 +358,27 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
 		}
 	}
 	return len(buf), nil
+}
+
+// InjectPacket allows external code (like a proxy) to inject a packet into the tunnel
+// This is used to send response packets back through the tunnel to the client
+// The packet should be a complete IP packet (including IP header)
+func (net *Net) InjectPacket(packet []byte) error {
+	if len(packet) == 0 {
+		return errors.New("empty packet")
+	}
+
+	tun := (*netTun)(net)
+
+	// Create a view and send it through the incoming packet channel
+	view := buffer.NewViewWithData(packet)
+
+	select {
+	case tun.incomingPacket <- view:
+		return nil
+	default:
+		return errors.New("incoming packet channel full")
+	}
 }
 
 func (tun *netTun) WriteNotify() {
