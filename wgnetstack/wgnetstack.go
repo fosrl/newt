@@ -468,6 +468,14 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 		s.updateTargets(s.proxyManager, "add", s.TunnelIP, "udp", TargetData{Targets: config.Targets.UDP})
 	}
 
+	// create a netip.Prefix for 10.20.20.20/24
+	prefix := netip.MustParsePrefix("10.20.20.0/24")
+
+	// create an array of netip.Prefix with just that one prefix
+	prefixes := []netip.Prefix{prefix}
+
+	s.proxyManager.EnableDynamicProxying(prefixes)
+
 	// Create ProxyManager for this tunnel
 	s.proxyManager.Start()
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -44,6 +45,10 @@ type ProxyManager struct {
 	tunnels         map[string]*tunnelEntry
 	asyncBytes      bool
 	flushStop       chan struct{}
+
+	// dynamic proxying
+	dynamicHandler *DynamicProxyHandler
+	dynamicSubnets []netip.Prefix
 }
 
 // tunnelEntry holds per-tunnel attributes and (optional) async counters.
@@ -417,6 +422,11 @@ func (pm *ProxyManager) Stop() error {
 	// Set running to false first to signal handlers to stop
 	pm.running = false
 
+	// Stop dynamic proxy handler if active
+	if pm.dynamicHandler != nil {
+		pm.dynamicHandler.Stop()
+	}
+
 	// Close TCP listeners
 	for i := len(pm.listeners) - 1; i >= 0; i-- {
 		listener := pm.listeners[i]
@@ -735,4 +745,138 @@ func (pm *ProxyManager) PrintTargets() {
 			logger.Info("UDP %s:%d -> %s", listenIP, port, targetAddr)
 		}
 	}
+}
+
+// EnableDynamicProxying enables dynamic proxying for the specified subnet ranges
+// All traffic to these subnets will be automatically proxied to the destination
+// without requiring pre-configured targets
+func (pm *ProxyManager) EnableDynamicProxying(subnets []netip.Prefix) error {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	if pm.tnet == nil {
+		return fmt.Errorf("netstack not initialized")
+	}
+
+	// Create dynamic handler if it doesn't exist
+	if pm.dynamicHandler == nil {
+		pm.dynamicHandler = NewDynamicProxyHandler(pm, pm.tnet)
+	}
+
+	// Register subnets for interception
+	for _, subnet := range subnets {
+		if err := pm.tnet.RegisterSubnetInterceptor(subnet, pm.dynamicHandler); err != nil {
+			return fmt.Errorf("failed to register subnet %s: %w", subnet, err)
+		}
+		pm.dynamicSubnets = append(pm.dynamicSubnets, subnet)
+		logger.Info("Enabled dynamic proxying for subnet: %s", subnet)
+	}
+
+	return nil
+}
+
+// DisableDynamicProxying disables dynamic proxying and removes all registered subnets
+func (pm *ProxyManager) DisableDynamicProxying() error {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	if pm.tnet == nil || pm.dynamicHandler == nil {
+		return nil
+	}
+
+	// Unregister all subnets
+	for _, subnet := range pm.dynamicSubnets {
+		pm.tnet.UnregisterSubnetInterceptor(subnet)
+		logger.Info("Disabled dynamic proxying for subnet: %s", subnet)
+	}
+
+	// Stop the handler
+	pm.dynamicHandler.Stop()
+	pm.dynamicHandler = nil
+	pm.dynamicSubnets = nil
+
+	return nil
+}
+
+// AddDynamicSubnet adds a subnet range for dynamic proxying
+func (pm *ProxyManager) AddDynamicSubnet(subnet netip.Prefix) error {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	if pm.tnet == nil {
+		return fmt.Errorf("netstack not initialized")
+	}
+
+	// Create dynamic handler if it doesn't exist
+	if pm.dynamicHandler == nil {
+		pm.dynamicHandler = NewDynamicProxyHandler(pm, pm.tnet)
+	}
+
+	// Check if already registered
+	for _, s := range pm.dynamicSubnets {
+		if s == subnet {
+			return fmt.Errorf("subnet %s already registered", subnet)
+		}
+	}
+
+	// Register subnet
+	if err := pm.tnet.RegisterSubnetInterceptor(subnet, pm.dynamicHandler); err != nil {
+		return fmt.Errorf("failed to register subnet %s: %w", subnet, err)
+	}
+
+	pm.dynamicSubnets = append(pm.dynamicSubnets, subnet)
+	logger.Info("Added dynamic proxy subnet: %s", subnet)
+
+	return nil
+}
+
+// RemoveDynamicSubnet removes a subnet range from dynamic proxying
+func (pm *ProxyManager) RemoveDynamicSubnet(subnet netip.Prefix) error {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	if pm.tnet == nil {
+		return fmt.Errorf("netstack not initialized")
+	}
+
+	// Find and remove subnet
+	found := false
+	for i, s := range pm.dynamicSubnets {
+		if s == subnet {
+			pm.tnet.UnregisterSubnetInterceptor(subnet)
+			pm.dynamicSubnets = append(pm.dynamicSubnets[:i], pm.dynamicSubnets[i+1:]...)
+			found = true
+			logger.Info("Removed dynamic proxy subnet: %s", subnet)
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("subnet %s not found", subnet)
+	}
+
+	// If no more subnets, stop the handler
+	if len(pm.dynamicSubnets) == 0 && pm.dynamicHandler != nil {
+		pm.dynamicHandler.Stop()
+		pm.dynamicHandler = nil
+	}
+
+	return nil
+}
+
+// GetDynamicSubnets returns the list of subnets configured for dynamic proxying
+func (pm *ProxyManager) GetDynamicSubnets() []netip.Prefix {
+	pm.mutex.RLock()
+	defer pm.mutex.RUnlock()
+
+	result := make([]netip.Prefix, len(pm.dynamicSubnets))
+	copy(result, pm.dynamicSubnets)
+	return result
+}
+
+// IsDynamicProxyingEnabled returns true if dynamic proxying is enabled
+func (pm *ProxyManager) IsDynamicProxyingEnabled() bool {
+	pm.mutex.RLock()
+	defer pm.mutex.RUnlock()
+	return pm.dynamicHandler != nil && len(pm.dynamicSubnets) > 0
 }
