@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/fosrl/newt/logger"
-	"golang.zx2c4.com/wireguard/tun/netstack"
+	"github.com/fosrl/newt/netstack2"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
@@ -39,7 +39,7 @@ type Server struct {
 	newtID       string
 	outputPrefix string
 	useNetstack  bool
-	tnet         interface{} // Will be *netstack.Net when using netstack
+	tnet         interface{} // Will be *netstack2.Net when using netstack
 }
 
 // NewServer creates a new connection test server using UDP
@@ -56,7 +56,7 @@ func NewServer(serverAddr string, serverPort uint16, newtID string) *Server {
 }
 
 // NewServerWithNetstack creates a new connection test server using WireGuard netstack
-func NewServerWithNetstack(serverAddr string, serverPort uint16, newtID string, tnet *netstack.Net) *Server {
+func NewServerWithNetstack(serverAddr string, serverPort uint16, newtID string, tnet *netstack2.Net) *Server {
 	return &Server{
 		serverAddr:   serverAddr,
 		serverPort:   serverPort + 1, // use the next port for the server
@@ -82,7 +82,7 @@ func (s *Server) Start() error {
 
 	if s.useNetstack && s.tnet != nil {
 		// Use WireGuard netstack
-		tnet := s.tnet.(*netstack.Net)
+		tnet := s.tnet.(*netstack2.Net)
 		udpAddr := &net.UDPAddr{Port: int(s.serverPort)}
 		netstackConn, err := tnet.ListenUDP(udpAddr)
 		if err != nil {
@@ -130,7 +130,7 @@ func (s *Server) Stop() {
 }
 
 // RestartWithNetstack stops the current server and restarts it with netstack
-func (s *Server) RestartWithNetstack(tnet *netstack.Net) error {
+func (s *Server) RestartWithNetstack(tnet *netstack2.Net) error {
 	s.Stop()
 
 	// Update configuration to use netstack

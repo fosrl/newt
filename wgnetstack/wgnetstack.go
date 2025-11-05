@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/netstack2"
 	"github.com/fosrl/newt/network"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/websocket"
@@ -25,7 +26,6 @@ import (
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/fosrl/newt/internal/telemetry"
@@ -83,14 +83,14 @@ type WireGuardService struct {
 	stopGetConfig     func()
 	// Netstack fields
 	tun    tun.Device
-	tnet   *netstack.Net
+	tnet   *netstack2.Net
 	device *device.Device
 	dns    []netip.Addr
 	// Callback for when netstack is ready
-	onNetstackReady func(*netstack.Net)
+	onNetstackReady func(*netstack2.Net)
 	// Callback for when netstack is closed
 	onNetstackClose func()
-	othertnet       *netstack.Net
+	othertnet       *netstack2.Net
 	// Proxy manager for tunnel
 	proxyManager *proxy.ProxyManager
 	TunnelIP     string
@@ -247,7 +247,9 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 
 // ReportRTT allows reporting native RTTs to telemetry, rate-limited externally.
 func (s *WireGuardService) ReportRTT(seconds float64) {
-	if s.serverPubKey == "" { return }
+	if s.serverPubKey == "" {
+		return
+	}
 	telemetry.ObserveTunnelLatency(context.Background(), s.serverPubKey, "wireguard", seconds)
 }
 
@@ -257,8 +259,8 @@ func (s *WireGuardService) addTcpTarget(msg websocket.WSMessage) {
 	// if there is no wgData or pm, we can't add targets
 	if s.TunnelIP == "" || s.proxyManager == nil {
 		logger.Info("No tunnel IP or proxy manager available")
-	return
-}
+		return
+	}
 
 	targetData, err := parseTargetData(msg.Data)
 	if err != nil {
@@ -331,7 +333,7 @@ func (s *WireGuardService) removeTcpTarget(msg websocket.WSMessage) {
 	}
 }
 
-func (s *WireGuardService) SetOthertnet(tnet *netstack.Net) {
+func (s *WireGuardService) SetOthertnet(tnet *netstack2.Net) {
 	s.othertnet = tnet
 }
 
@@ -382,7 +384,7 @@ func (s *WireGuardService) SetToken(token string) {
 }
 
 // GetNetstackNet returns the netstack network interface for use by other components
-func (s *WireGuardService) GetNetstackNet() *netstack.Net {
+func (s *WireGuardService) GetNetstackNet() *netstack2.Net {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.tnet
@@ -401,7 +403,7 @@ func (s *WireGuardService) GetPublicKey() wgtypes.Key {
 }
 
 // SetOnNetstackReady sets a callback function to be called when the netstack interface is ready
-func (s *WireGuardService) SetOnNetstackReady(callback func(*netstack.Net)) {
+func (s *WireGuardService) SetOnNetstackReady(callback func(*netstack2.Net)) {
 	s.onNetstackReady = callback
 }
 
@@ -493,7 +495,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 
 	// Create TUN device and network stack using netstack
 	var err error
-	s.tun, s.tnet, err = netstack.CreateNetTUN(
+	s.tun, s.tnet, err = netstack2.CreateNetTUN(
 		[]netip.Addr{tunnelIP},
 		s.dns,
 		s.mtu)
@@ -1202,7 +1204,7 @@ func (s *WireGuardService) ReplaceNetstack() error {
 	s.proxyManager.Stop()
 
 	// Create new TUN device and netstack with new DNS
-	newTun, newTnet, err := netstack.CreateNetTUN(
+	newTun, newTnet, err := netstack2.CreateNetTUN(
 		[]netip.Addr{tunnelIP},
 		s.dns,
 		s.mtu)

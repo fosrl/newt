@@ -5,9 +5,9 @@ import (
 	"strings"
 
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/netstack2"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/websocket"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 
 	"github.com/fosrl/newt/wgnetstack"
 	"github.com/fosrl/newt/wgtester"
@@ -37,7 +37,7 @@ func setupClients(client *websocket.Client) {
 }
 
 func setupClientsNetstack(client *websocket.Client, host string) {
-	logger.Info("Setting up clients with netstack...")
+	logger.Info("Setting up clients with netstack2...")
 	// Create WireGuard service
 	wgService, err = wgnetstack.NewWireGuardService(interfaceName, mtuInt, generateAndSaveKeyTo, host, id, client, "9.9.9.9")
 	if err != nil {
@@ -45,7 +45,7 @@ func setupClientsNetstack(client *websocket.Client, host string) {
 	}
 
 	// // Set up callback to restart wgtester with netstack when WireGuard is ready
-	wgService.SetOnNetstackReady(func(tnet *netstack.Net) {
+	wgService.SetOnNetstackReady(func(tnet *netstack2.Net) {
 
 		wgTesterServer = wgtester.NewServerWithNetstack("0.0.0.0", wgService.Port, id, tnet) // TODO: maybe make this the same ip of the wg server?
 		err := wgTesterServer.Start()
@@ -66,7 +66,7 @@ func setupClientsNetstack(client *websocket.Client, host string) {
 	})
 }
 
-func setDownstreamTNetstack(tnet *netstack.Net) {
+func setDownstreamTNetstack(tnet *netstack2.Net) {
 	if wgService != nil {
 		wgService.SetOthertnet(tnet)
 	}
