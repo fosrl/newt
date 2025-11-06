@@ -8,6 +8,7 @@ import (
 	"github.com/fosrl/newt/netstack2"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/websocket"
+	"golang.zx2c4.com/wireguard/tun/netstack"
 
 	"github.com/fosrl/newt/wgnetstack"
 	"github.com/fosrl/newt/wgtester"
@@ -66,7 +67,7 @@ func setupClientsNetstack(client *websocket.Client, host string) {
 	})
 }
 
-func setDownstreamTNetstack(tnet *netstack2.Net) {
+func setDownstreamTNetstack(tnet *netstack.Net) {
 	if wgService != nil {
 		wgService.SetOthertnet(tnet)
 	}

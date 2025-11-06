@@ -20,7 +20,6 @@ import (
 	"github.com/fosrl/newt/docker"
 	"github.com/fosrl/newt/healthcheck"
 	"github.com/fosrl/newt/logger"
-	"github.com/fosrl/newt/netstack2"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/updates"
 	"github.com/fosrl/newt/websocket"
@@ -31,6 +30,7 @@ import (
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
+	"golang.zx2c4.com/wireguard/tun/netstack"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -531,7 +531,7 @@ func main() {
 
 	// Create TUN device and network stack
 	var tun tun.Device
-	var tnet *netstack2.Net
+	var tnet *netstack.Net
 	var dev *device.Device
 	var pm *proxy.ProxyManager
 	var connected bool
@@ -637,7 +637,7 @@ func main() {
 		}
 
 		logger.Debug(fmtReceivedMsg, msg)
-		tun, tnet, err = netstack2.CreateNetTUN(
+		tun, tnet, err = netstack.CreateNetTUN(
 			[]netip.Addr{netip.MustParseAddr(wgData.TunnelIP)},
 			[]netip.Addr{netip.MustParseAddr(dns)},
 			mtuInt)

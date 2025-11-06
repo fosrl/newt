@@ -219,7 +219,7 @@ func (s *Server) handleConnections() {
 			copy(responsePacket[5:13], buffer[5:13])
 
 			// Log response being sent for debugging
-			logger.Debug("%sSending response to %s", s.outputPrefix, addr.String())
+			// logger.Debug("%sSending response to %s", s.outputPrefix, addr.String())
 
 			// Send the response packet - handle both regular UDP and netstack UDP
 			if s.useNetstack {
@@ -235,7 +235,7 @@ func (s *Server) handleConnections() {
 			if err != nil {
 				logger.Error("%sError sending response: %v", s.outputPrefix, err)
 			} else {
-				logger.Debug("%sResponse sent successfully", s.outputPrefix)
+				// logger.Debug("%sResponse sent successfully", s.outputPrefix)
 			}
 		}
 	}

@@ -26,6 +26,7 @@ import (
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
+	"golang.zx2c4.com/wireguard/tun/netstack"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/fosrl/newt/internal/telemetry"
@@ -90,7 +91,7 @@ type WireGuardService struct {
 	onNetstackReady func(*netstack2.Net)
 	// Callback for when netstack is closed
 	onNetstackClose func()
-	othertnet       *netstack2.Net
+	othertnet       *netstack.Net
 	// Proxy manager for tunnel
 	proxyManager *proxy.ProxyManager
 	TunnelIP     string
@@ -333,7 +334,7 @@ func (s *WireGuardService) removeTcpTarget(msg websocket.WSMessage) {
 	}
 }
 
-func (s *WireGuardService) SetOthertnet(tnet *netstack2.Net) {
+func (s *WireGuardService) SetOthertnet(tnet *netstack.Net) {
 	s.othertnet = tnet
 }
 
@@ -495,16 +496,20 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 
 	// Create TUN device and network stack using netstack
 	var err error
-	s.tun, s.tnet, err = netstack2.CreateNetTUN(
+	s.tun, s.tnet, err = netstack2.CreateNetTUNWithOptions(
 		[]netip.Addr{tunnelIP},
 		s.dns,
-		s.mtu)
+		s.mtu,
+		netstack2.NetTunOptions{
+			EnableTCPProxy: true,
+			EnableUDPProxy: true,
+		},
+	)
 	if err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("failed to create TUN device: %v", err)
 	}
-
-	s.proxyManager.SetTNet(s.tnet)
+	// s.proxyManager.SetTNet(s.tnet)
 	s.TunnelIP = tunnelIP.String()
 
 	// Create WireGuard device
@@ -1256,7 +1261,7 @@ func (s *WireGuardService) ReplaceNetstack() error {
 	}
 
 	// Update proxy manager with new tnet and restart
-	s.proxyManager.SetTNet(s.tnet)
+	// s.proxyManager.SetTNet(s.tnet)
 	s.proxyManager.Start()
 
 	s.proxyManager.PrintTargets()

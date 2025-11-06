@@ -17,12 +17,12 @@ import (
 
 	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
-	"github.com/fosrl/newt/netstack2"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/websocket"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.zx2c4.com/wireguard/device"
+	"golang.zx2c4.com/wireguard/tun/netstack"
 	"gopkg.in/yaml.v3"
 )
 
@@ -42,7 +42,7 @@ func fixKey(key string) string {
 	return hex.EncodeToString(decoded)
 }
 
-func ping(tnet *netstack2.Net, dst string, timeout time.Duration) (time.Duration, error) {
+func ping(tnet *netstack.Net, dst string, timeout time.Duration) (time.Duration, error) {
 	logger.Debug("Pinging %s", dst)
 	socket, err := tnet.Dial("ping4", dst)
 	if err != nil {
@@ -108,7 +108,7 @@ func ping(tnet *netstack2.Net, dst string, timeout time.Duration) (time.Duration
 }
 
 // reliablePing performs multiple ping attempts with adaptive timeout
-func reliablePing(tnet *netstack2.Net, dst string, baseTimeout time.Duration, maxAttempts int) (time.Duration, error) {
+func reliablePing(tnet *netstack.Net, dst string, baseTimeout time.Duration, maxAttempts int) (time.Duration, error) {
 	var lastErr error
 	var totalLatency time.Duration
 	successCount := 0
@@ -152,7 +152,7 @@ func reliablePing(tnet *netstack2.Net, dst string, baseTimeout time.Duration, ma
 	return totalLatency / time.Duration(successCount), nil
 }
 
-func pingWithRetry(tnet *netstack2.Net, dst string, timeout time.Duration) (stopChan chan struct{}, err error) {
+func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopChan chan struct{}, err error) {
 
 	if healthFile != "" {
 		err = os.Remove(healthFile)
@@ -236,7 +236,7 @@ func pingWithRetry(tnet *netstack2.Net, dst string, timeout time.Duration) (stop
 	return stopChan, fmt.Errorf("initial ping attempts failed, continuing in background")
 }
 
-func startPingCheck(tnet *netstack2.Net, serverIP string, client *websocket.Client, tunnelID string) chan struct{} {
+func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Client, tunnelID string) chan struct{} {
 	maxInterval := 6 * time.Second
 	currentInterval := pingInterval
 	consecutiveFailures := 0
