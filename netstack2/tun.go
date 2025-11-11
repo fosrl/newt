@@ -114,6 +114,10 @@ func CreateNetTUNWithOptions(localAddresses, dnsServers []netip.Addr, mtu int, o
 		return nil, nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
 	}
 
+	if err := dev.stack.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true); err != nil {
+		return nil, nil, fmt.Errorf("set ipv4 forwarding: %s", err)
+	}
+
 	for _, ip := range localAddresses {
 		var protoNumber tcpip.NetworkProtocolNumber
 		if ip.Is4() {
@@ -155,52 +159,70 @@ func CreateNetTUNWithOptions(localAddresses, dnsServers []netip.Addr, mtu int, o
 	// Add specific route for proxy network (10.20.20.0/24) to NIC 2
 	if options.EnableTCPProxy || options.EnableUDPProxy {
 		dev.proxyNotifyHandle = dev.proxyEp.AddNotify(dev)
-		tcpipErr = dev.stack.CreateNIC(2, dev.proxyEp)
+		tcpipErr = dev.stack.CreateNICWithOptions(2, dev.proxyEp, stack.NICOptions{
+			Disabled: false,
+			// If no queueing discipline was specified
+			// provide a stub implementation that just
+			// delegates to the lower link endpoint.
+			QDisc: nil,
+		})
 		if tcpipErr != nil {
 			return nil, nil, fmt.Errorf("CreateNIC 2 (proxy): %v", tcpipErr)
 		}
 
 		// Enable promiscuous mode ONLY on NIC 2
+		// This allows the NIC to accept packets destined for any IP address
 		if tcpipErr := dev.stack.SetPromiscuousMode(2, true); tcpipErr != nil {
 			return nil, nil, fmt.Errorf("SetPromiscuousMode on NIC 2: %v", tcpipErr)
 		}
 
 		// Enable spoofing ONLY on NIC 2
+		// This allows the stack to send packets from any address, not just owned addresses
 		if tcpipErr := dev.stack.SetSpoofing(2, true); tcpipErr != nil {
 			return nil, nil, fmt.Errorf("SetSpoofing on NIC 2: %v", tcpipErr)
 		}
 
-		// Add the proxy network address (10.20.20.1/24) to NIC 2
-		// This allows the stack to accept connections to any IP in this range when in promiscuous mode
-		// Similar to how tun2socks adds 10.0.0.1/8 for multicast support
-		// The PEB: CanBePrimaryEndpoint is CRITICAL - it allows the stack to build routes
-		// and accept connections to any IP in this range when in promiscuous+spoofing mode
-		proxyAddr := netip.MustParseAddr("10.20.20.1")
-		protoAddr := tcpip.ProtocolAddress{
-			Protocol: ipv4.ProtocolNumber,
-			AddressWithPrefix: tcpip.AddressWithPrefix{
-				Address:   tcpip.AddrFromSlice(proxyAddr.AsSlice()),
-				PrefixLen: 24, // /24 network
-			},
-		}
-		tcpipErr = dev.stack.AddProtocolAddress(2, protoAddr, stack.AddressProperties{
-			PEB: stack.CanBePrimaryEndpoint, // Allow this to be used as primary endpoint
-		})
-		if tcpipErr != nil {
-			return nil, nil, fmt.Errorf("AddProtocolAddress for proxy NIC: %v", tcpipErr)
-		}
+		// // Add a wildcard IPv4 address covering the 10.0.0.0/8 space so the stack can
+		// // synthesize temporary endpoints for any 10.x.y.z destination. This mimics
+		// // the tun2socks behaviour and is required once promiscuous+spoofing are turned on.
+		// wildcardAddr := tcpip.ProtocolAddress{
+		// 	Protocol: ipv4.ProtocolNumber,
+		// 	AddressWithPrefix: tcpip.AddressWithPrefix{
+		// 		Address:   tcpip.AddrFrom4([4]byte{10, 0, 0, 1}),
+		// 		PrefixLen: 8,
+		// 	},
+		// }
+		// if tcpipErr = dev.stack.AddProtocolAddress(2, wildcardAddr, stack.AddressProperties{
+		// 	PEB: stack.CanBePrimaryEndpoint,
+		// }); tcpipErr != nil {
+		// 	return nil, nil, fmt.Errorf("Add wildcard proxy address: %v", tcpipErr)
+		// }
 
-		proxySubnet := netip.MustParsePrefix("10.20.20.0/24")
-		proxyTcpipSubnet, err := tcpip.NewSubnet(
-			tcpip.AddrFromSlice(proxySubnet.Addr().AsSlice()),
-			tcpip.MaskFromBytes(net.CIDRMask(24, 32)),
-		)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to create proxy subnet: %v", err)
-		}
+		// // Keep the real service IP (10.20.20.1/24) so existing clients that target the
+		// // gateway explicitly still resolve as before.
+		// proxyAddr := netip.MustParseAddr("10.20.20.1")
+		// protoAddr := tcpip.ProtocolAddress{
+		// 	Protocol: ipv4.ProtocolNumber,
+		// 	AddressWithPrefix: tcpip.AddressWithPrefix{
+		// 		Address:   tcpip.AddrFromSlice(proxyAddr.AsSlice()),
+		// 		PrefixLen: 24,
+		// 	},
+		// }
+		// if tcpipErr = dev.stack.AddProtocolAddress(2, protoAddr, stack.AddressProperties{}); tcpipErr != nil {
+		// 	return nil, nil, fmt.Errorf("Add proxy service address: %v", tcpipErr)
+		// }
+
+		// proxySubnet := netip.MustParsePrefix("10.20.20.0/24")
+		// proxyTcpipSubnet, err := tcpip.NewSubnet(
+		// 	tcpip.AddrFromSlice(proxySubnet.Addr().AsSlice()),
+		// 	tcpip.MaskFromBytes(net.CIDRMask(24, 32)),
+		// )
+		// if err != nil {
+		// 	return nil, nil, fmt.Errorf("failed to create proxy subnet: %v", err)
+		// }
 
 		dev.stack.AddRoute(tcpip.Route{
-			Destination: proxyTcpipSubnet,
+			Destination: header.IPv4EmptySubnet,
 			NIC:         2,
 		})
 	}
@@ -268,34 +290,21 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
 
 		switch packet[0] >> 4 {
 		case 4:
-			// Parse IPv4 header to check destination
-			if len(packet) >= header.IPv4MinimumSize {
-				ipv4Header := header.IPv4(packet)
-				dstIP := ipv4Header.DestinationAddress()
+			// // Parse IPv4 header to check destination
+			// if len(packet) >= header.IPv4MinimumSize {
+			// 	ipv4Header := header.IPv4(packet)
+			// 	dstIP := ipv4Header.DestinationAddress()
 
-				// Check if destination is in the proxy range (10.20.20.0/24)
-				// If so, inject into proxyEp (NIC 2) which has promiscuous mode
-				if tun.proxyEp != nil {
-					dstBytes := dstIP.As4()
-					// Check for 10.20.20.x
-					if dstBytes[0] == 10 && dstBytes[1] == 20 && dstBytes[2] == 20 {
-						targetEp = tun.proxyEp
-						// Log what protocol this is
-						proto := "unknown"
-						if len(packet) > header.IPv4MinimumSize {
-							switch ipv4Header.Protocol() {
-							case uint8(header.TCPProtocolNumber):
-								proto = "TCP"
-							case uint8(header.UDPProtocolNumber):
-								proto = "UDP"
-							case uint8(header.ICMPv4ProtocolNumber):
-								proto = "ICMP"
-							}
-						}
-						logger.Info("Routing %s packet to NIC 2 (proxy): dst=%s", proto, dstIP)
-					}
-				}
-			}
+			// 	// Check if destination is in the proxy range (10.20.20.0/24)
+			// 	// If so, inject into proxyEp (NIC 2) which has promiscuous mode
+			// 	if tun.proxyEp != nil {
+			// 		dstBytes := dstIP.As4()
+			// 		// Check for 10.20.20.x
+			// 		if dstBytes[0] == 10 && dstBytes[1] == 20 && dstBytes[2] == 20 {
+			// 			targetEp = tun.proxyEp
+			// 		}
+			// 	}
+			// }
 			targetEp.InjectInbound(header.IPv4ProtocolNumber, pkb)
 		case 6:
 			// For IPv6, always use NIC 1 for now
@@ -398,14 +407,16 @@ func (tun *netTun) WriteNotify() {
 	}
 
 	// Handle notifications from proxy endpoint (NIC 2) if it exists
-	if tun.proxyEp != nil {
-		pkt = tun.proxyEp.Read()
-		if pkt != nil {
-			view := pkt.ToView()
-			pkt.DecRef()
-			tun.incomingPacket <- view
-		}
-	}
+	// // These are response packets from the proxied connections that need to go back to WireGuard
+	// if tun.proxyEp != nil {
+	// 	pkt = tun.proxyEp.Read()
+	// 	if pkt != nil {
+	// 		view := pkt.ToView()
+	// 		pkt.DecRef()
+	// 		tun.incomingPacket <- view
+	// 		return
+	// 	}
+	// }
 }
 
 func (tun *netTun) Close() error {
