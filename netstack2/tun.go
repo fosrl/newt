@@ -44,6 +44,7 @@ type netTun struct {
 	ep                *channel.Endpoint
 	proxyEp           *channel.Endpoint // Separate endpoint for promiscuous mode
 	stack             *stack.Stack
+	proxyStack        *stack.Stack // Separate stack for proxy endpoint
 	events            chan tun.Event
 	notifyHandle      *channel.NotificationHandle
 	proxyNotifyHandle *channel.NotificationHandle // Notify handle for proxy endpoint
@@ -79,27 +80,25 @@ func CreateNetTUNWithOptions(localAddresses, dnsServers []netip.Addr, mtu int, o
 		HandleLocal:        true,
 	}
 	dev := &netTun{
-		ep:             channel.New(1024, uint32(mtu), ""),
-		proxyEp:        channel.New(1024, uint32(mtu), ""),
-		stack:          stack.New(stackOpts),
+		ep:      channel.New(1024, uint32(mtu), ""),
+		proxyEp: channel.New(1024, uint32(mtu), ""),
+		stack:   stack.New(stackOpts),
+		proxyStack: stack.New(stack.Options{
+			NetworkProtocols: []stack.NetworkProtocolFactory{
+				ipv4.NewProtocol,
+				ipv6.NewProtocol,
+			},
+			TransportProtocols: []stack.TransportProtocolFactory{
+				tcp.NewProtocol,
+				udp.NewProtocol,
+				icmp.NewProtocol4,
+				icmp.NewProtocol6,
+			},
+		}),
 		events:         make(chan tun.Event, 10),
 		incomingPacket: make(chan *buffer.View),
 		dnsServers:     dnsServers,
 		mtu:            mtu,
-	}
-
-	if options.EnableTCPProxy {
-		dev.tcpHandler = NewTCPHandler(dev.stack)
-		if err := dev.tcpHandler.InstallTCPHandler(); err != nil {
-			return nil, nil, fmt.Errorf("failed to install TCP handler: %v", err)
-		}
-	}
-
-	if options.EnableUDPProxy {
-		dev.udpHandler = NewUDPHandler(dev.stack)
-		if err := dev.udpHandler.InstallUDPHandler(); err != nil {
-			return nil, nil, fmt.Errorf("failed to install UDP handler: %v", err)
-		}
 	}
 
 	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is enabled by default
@@ -140,26 +139,31 @@ func CreateNetTUNWithOptions(localAddresses, dnsServers []netip.Addr, mtu int, o
 		}
 	}
 	if dev.hasV4 {
-		// dev.stack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: 1})
-		// add 100.90.129.0/24
-		proxySubnet := netip.MustParsePrefix("100.90.129.0/24")
-		proxyTcpipSubnet, err := tcpip.NewSubnet(
-			tcpip.AddrFromSlice(proxySubnet.Addr().AsSlice()),
-			tcpip.MaskFromBytes(proxySubnet.Addr().AsSlice()),
-		)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to create proxy subnet: %v", err)
-		}
-		dev.stack.AddRoute(tcpip.Route{Destination: proxyTcpipSubnet, NIC: 1})
+		dev.stack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: 1})
 	}
-	// if dev.hasV6 {
-	// 	// dev.stack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: 1})
-	// }
+	if dev.hasV6 {
+		dev.stack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: 1})
+	}
 
 	// Add specific route for proxy network (10.20.20.0/24) to NIC 2
 	if options.EnableTCPProxy || options.EnableUDPProxy {
+
+		if options.EnableTCPProxy {
+			dev.tcpHandler = NewTCPHandler(dev.proxyStack)
+			if err := dev.tcpHandler.InstallTCPHandler(); err != nil {
+				return nil, nil, fmt.Errorf("failed to install TCP handler: %v", err)
+			}
+		}
+
+		if options.EnableUDPProxy {
+			dev.udpHandler = NewUDPHandler(dev.proxyStack)
+			if err := dev.udpHandler.InstallUDPHandler(); err != nil {
+				return nil, nil, fmt.Errorf("failed to install UDP handler: %v", err)
+			}
+		}
+
 		dev.proxyNotifyHandle = dev.proxyEp.AddNotify(dev)
-		tcpipErr = dev.stack.CreateNICWithOptions(2, dev.proxyEp, stack.NICOptions{
+		tcpipErr = dev.proxyStack.CreateNICWithOptions(1, dev.proxyEp, stack.NICOptions{
 			Disabled: false,
 			// If no queueing discipline was specified
 			// provide a stub implementation that just
@@ -172,13 +176,13 @@ func CreateNetTUNWithOptions(localAddresses, dnsServers []netip.Addr, mtu int, o
 
 		// Enable promiscuous mode ONLY on NIC 2
 		// This allows the NIC to accept packets destined for any IP address
-		if tcpipErr := dev.stack.SetPromiscuousMode(2, true); tcpipErr != nil {
+		if tcpipErr := dev.proxyStack.SetPromiscuousMode(1, true); tcpipErr != nil {
 			return nil, nil, fmt.Errorf("SetPromiscuousMode on NIC 2: %v", tcpipErr)
 		}
 
 		// Enable spoofing ONLY on NIC 2
 		// This allows the stack to send packets from any address, not just owned addresses
-		if tcpipErr := dev.stack.SetSpoofing(2, true); tcpipErr != nil {
+		if tcpipErr := dev.proxyStack.SetSpoofing(1, true); tcpipErr != nil {
 			return nil, nil, fmt.Errorf("SetSpoofing on NIC 2: %v", tcpipErr)
 		}
 
@@ -221,30 +225,30 @@ func CreateNetTUNWithOptions(localAddresses, dnsServers []netip.Addr, mtu int, o
 		// 	return nil, nil, fmt.Errorf("failed to create proxy subnet: %v", err)
 		// }
 
-		dev.stack.AddRoute(tcpip.Route{
+		dev.proxyStack.AddRoute(tcpip.Route{
 			Destination: header.IPv4EmptySubnet,
-			NIC:         2,
+			NIC:         1,
 		})
 	}
 
 	// print the stack routes table and interfaces for debugging
 	logger.Info("Stack configuration:")
 
-	// Print NICs
-	nics := dev.stack.NICInfo()
-	for nicID, nicInfo := range nics {
-		logger.Info("NIC %d: %s (MTU: %d)", nicID, nicInfo.Name, nicInfo.MTU)
-		for _, addr := range nicInfo.ProtocolAddresses {
-			logger.Info("  Address: %s", addr.AddressWithPrefix)
-		}
-	}
+	// // Print NICs
+	// nics := dev.stack.NICInfo()
+	// for nicID, nicInfo := range nics {
+	// 	logger.Info("NIC %d: %s (MTU: %d)", nicID, nicInfo.Name, nicInfo.MTU)
+	// 	for _, addr := range nicInfo.ProtocolAddresses {
+	// 		logger.Info("  Address: %s", addr.AddressWithPrefix)
+	// 	}
+	// }
 
-	// Print routing table
-	routes := dev.stack.GetRouteTable()
-	logger.Info("Routing table (%d routes):", len(routes))
-	for i, route := range routes {
-		logger.Info("  Route %d: %s -> NIC %d", i, route.Destination, route.NIC)
-	}
+	// // Print routing table
+	// routes := dev.stack.GetRouteTable()
+	// logger.Info("Routing table (%d routes):", len(routes))
+	// for i, route := range routes {
+	// 	logger.Info("  Route %d: %s -> NIC %d", i, route.Destination, route.NIC)
+	// }
 
 	dev.events <- tun.EventUp
 	return dev, (*Net)(dev), nil
@@ -291,20 +295,20 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
 		switch packet[0] >> 4 {
 		case 4:
 			// // Parse IPv4 header to check destination
-			// if len(packet) >= header.IPv4MinimumSize {
-			// 	ipv4Header := header.IPv4(packet)
-			// 	dstIP := ipv4Header.DestinationAddress()
+			if len(packet) >= header.IPv4MinimumSize {
+				ipv4Header := header.IPv4(packet)
+				dstIP := ipv4Header.DestinationAddress()
 
-			// 	// Check if destination is in the proxy range (10.20.20.0/24)
-			// 	// If so, inject into proxyEp (NIC 2) which has promiscuous mode
-			// 	if tun.proxyEp != nil {
-			// 		dstBytes := dstIP.As4()
-			// 		// Check for 10.20.20.x
-			// 		if dstBytes[0] == 10 && dstBytes[1] == 20 && dstBytes[2] == 20 {
-			// 			targetEp = tun.proxyEp
-			// 		}
-			// 	}
-			// }
+				// Check if destination is in the proxy range (10.20.20.0/24)
+				// If so, inject into proxyEp (NIC 2) which has promiscuous mode
+				if tun.proxyEp != nil {
+					dstBytes := dstIP.As4()
+					// Check for 10.20.20.x
+					if dstBytes[0] == 10 && dstBytes[1] == 20 && dstBytes[2] == 20 {
+						targetEp = tun.proxyEp
+					}
+				}
+			}
 			targetEp.InjectInbound(header.IPv4ProtocolNumber, pkb)
 		case 6:
 			// For IPv6, always use NIC 1 for now
@@ -407,16 +411,16 @@ func (tun *netTun) WriteNotify() {
 	}
 
 	// Handle notifications from proxy endpoint (NIC 2) if it exists
-	// // These are response packets from the proxied connections that need to go back to WireGuard
-	// if tun.proxyEp != nil {
-	// 	pkt = tun.proxyEp.Read()
-	// 	if pkt != nil {
-	// 		view := pkt.ToView()
-	// 		pkt.DecRef()
-	// 		tun.incomingPacket <- view
-	// 		return
-	// 	}
-	// }
+	// These are response packets from the proxied connections that need to go back to WireGuard
+	if tun.proxyEp != nil {
+		pkt = tun.proxyEp.Read()
+		if pkt != nil {
+			view := pkt.ToView()
+			pkt.DecRef()
+			tun.incomingPacket <- view
+			return
+		}
+	}
 }
 
 func (tun *netTun) Close() error {
