@@ -247,27 +247,36 @@ func (h *UDPHandler) handleUDPConn(netstackConn *gonet.UDPConn, id stack.Transpo
 		return
 	}
 
-	// Create UDP connection to target
-	targetConn, err := net.DialUDP("udp", nil, remoteUDPAddr)
+	// Resolve client address (for sending responses back)
+	clientAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", srcIP, srcPort))
 	if err != nil {
-		logger.Info("UDP Forwarder: Failed to dial %s: %v", targetAddr, err)
+		logger.Info("UDP Forwarder: Failed to resolve client %s:%d: %v", srcIP, srcPort, err)
+		return
+	}
+
+	// Create unconnected UDP socket (so we can use WriteTo)
+	targetConn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		logger.Info("UDP Forwarder: Failed to create UDP socket: %v", err)
 		return
 	}
 	defer targetConn.Close()
 
-	logger.Info("UDP Forwarder: Successfully connected to %s, starting bidirectional copy", targetAddr)
+	logger.Info("UDP Forwarder: Successfully created UDP socket for %s, starting bidirectional copy", targetAddr)
 
 	// Bidirectional copy between netstack and target
-	pipeUDP(netstackConn, targetConn, remoteUDPAddr, udpSessionTimeout)
+	pipeUDP(netstackConn, targetConn, remoteUDPAddr, clientAddr, udpSessionTimeout)
 }
 
 // pipeUDP copies UDP packets bidirectionally
-func pipeUDP(origin, remote net.PacketConn, to net.Addr, timeout time.Duration) {
+func pipeUDP(origin, remote net.PacketConn, serverAddr, clientAddr net.Addr, timeout time.Duration) {
 	wg := sync.WaitGroup{}
 	wg.Add(2)
 
-	go unidirectionalPacketStream(remote, origin, to, "origin->remote", &wg, timeout)
-	go unidirectionalPacketStream(origin, remote, nil, "remote->origin", &wg, timeout)
+	// Read from origin (netstack), write to remote (target server)
+	go unidirectionalPacketStream(remote, origin, serverAddr, "origin->remote", &wg, timeout)
+	// Read from remote (target server), write to origin (netstack) with client address
+	go unidirectionalPacketStream(origin, remote, clientAddr, "remote->origin", &wg, timeout)
 
 	wg.Wait()
 }
@@ -275,7 +284,14 @@ func pipeUDP(origin, remote net.PacketConn, to net.Addr, timeout time.Duration) 
 // unidirectionalPacketStream copies packets in one direction
 func unidirectionalPacketStream(dst, src net.PacketConn, to net.Addr, dir string, wg *sync.WaitGroup, timeout time.Duration) {
 	defer wg.Done()
-	_ = copyPacketData(dst, src, to, timeout)
+
+	logger.Info("UDP %s: Starting packet stream (to=%v)", dir, to)
+	err := copyPacketData(dst, src, to, timeout)
+	if err != nil {
+		logger.Info("UDP %s: Stream ended with error: %v", dir, err)
+	} else {
+		logger.Info("UDP %s: Stream ended (timeout)", dir)
+	}
 }
 
 // copyPacketData copies UDP packet data with timeout
@@ -284,7 +300,7 @@ func copyPacketData(dst, src net.PacketConn, to net.Addr, timeout time.Duration)
 
 	for {
 		src.SetReadDeadline(time.Now().Add(timeout))
-		n, _, err := src.ReadFrom(buf)
+		n, srcAddr, err := src.ReadFrom(buf)
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
 			return nil // ignore I/O timeout
 		} else if err == io.EOF {
@@ -293,9 +309,22 @@ func copyPacketData(dst, src net.PacketConn, to net.Addr, timeout time.Duration)
 			return err
 		}
 
-		if _, err = dst.WriteTo(buf[:n], to); err != nil {
+		logger.Info("UDP copyPacketData: Read %d bytes from %v", n, srcAddr)
+
+		// Determine write destination
+		writeAddr := to
+		if writeAddr == nil {
+			// If no destination specified, use the source address from the packet
+			writeAddr = srcAddr
+		}
+
+		written, err := dst.WriteTo(buf[:n], writeAddr)
+		if err != nil {
+			logger.Info("UDP copyPacketData: Write error to %v: %v", writeAddr, err)
 			return err
 		}
+		logger.Info("UDP copyPacketData: Wrote %d bytes to %v", written, writeAddr)
+
 		dst.SetReadDeadline(time.Now().Add(timeout))
 	}
 }
