@@ -22,6 +22,7 @@ import (
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/updates"
+	"github.com/fosrl/newt/util"
 	"github.com/fosrl/newt/websocket"
 
 	"github.com/fosrl/newt/internal/state"
@@ -663,7 +664,7 @@ func main() {
 
 		logger.Info("Connecting to endpoint: %s", host)
 
-		endpoint, err := resolveDomain(wgData.Endpoint)
+		endpoint, err := util.ResolveDomain(wgData.Endpoint)
 		if err != nil {
 			logger.Error("Failed to resolve endpoint: %v", err)
 			regResult = "failure"
