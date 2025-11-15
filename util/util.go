@@ -4,6 +4,10 @@ import (
 	"fmt"
 	"net"
 	"strings"
+
+	mathrand "math/rand/v2"
+
+	"github.com/fosrl/newt/logger"
 )
 
 func ResolveDomain(domain string) (string, error) {
@@ -55,4 +59,64 @@ func ResolveDomain(domain string) (string, error) {
 	}
 
 	return ipAddr, nil
+}
+
+func ParseLogLevel(level string) logger.LogLevel {
+	switch strings.ToUpper(level) {
+	case "DEBUG":
+		return logger.DEBUG
+	case "INFO":
+		return logger.INFO
+	case "WARN":
+		return logger.WARN
+	case "ERROR":
+		return logger.ERROR
+	case "FATAL":
+		return logger.FATAL
+	default:
+		return logger.INFO // default to INFO if invalid level provided
+	}
+}
+
+// find an available UDP port in the range [minPort, maxPort] and also the next port for the wgtester
+func FindAvailableUDPPort(minPort, maxPort uint16) (uint16, error) {
+	if maxPort < minPort {
+		return 0, fmt.Errorf("invalid port range: min=%d, max=%d", minPort, maxPort)
+	}
+
+	// We need to check port+1 as well, so adjust the max port to avoid going out of range
+	adjustedMaxPort := maxPort - 1
+	if adjustedMaxPort < minPort {
+		return 0, fmt.Errorf("insufficient port range to find consecutive ports: min=%d, max=%d", minPort, maxPort)
+	}
+
+	// Create a slice of all ports in the range (excluding the last one)
+	portRange := make([]uint16, adjustedMaxPort-minPort+1)
+	for i := range portRange {
+		portRange[i] = minPort + uint16(i)
+	}
+
+	// Fisher-Yates shuffle to randomize the port order
+	for i := len(portRange) - 1; i > 0; i-- {
+		j := mathrand.IntN(i + 1)
+		portRange[i], portRange[j] = portRange[j], portRange[i]
+	}
+
+	// Try each port in the randomized order
+	for _, port := range portRange {
+		// Check if port is available
+		addr1 := &net.UDPAddr{
+			IP:   net.ParseIP("127.0.0.1"),
+			Port: int(port),
+		}
+		conn1, err1 := net.ListenUDP("udp", addr1)
+		if err1 != nil {
+			continue // Port is in use or there was an error, try next port
+		}
+
+		conn1.Close()
+		return port, nil
+	}
+
+	return 0, fmt.Errorf("no available consecutive UDP ports found in range %d-%d", minPort, maxPort)
 }

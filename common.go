@@ -365,23 +365,6 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 	return pingStopChan
 }
 
-func parseLogLevel(level string) logger.LogLevel {
-	switch strings.ToUpper(level) {
-	case "DEBUG":
-		return logger.DEBUG
-	case "INFO":
-		return logger.INFO
-	case "WARN":
-		return logger.WARN
-	case "ERROR":
-		return logger.ERROR
-	case "FATAL":
-		return logger.FATAL
-	default:
-		return logger.INFO // default to INFO if invalid level provided
-	}
-}
-
 func mapToWireGuardLogLevel(level logger.LogLevel) int {
 	switch level {
 	case logger.DEBUG:

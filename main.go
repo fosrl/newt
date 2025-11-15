@@ -369,8 +369,8 @@ func main() {
 	}
 
 	logger.Init()
-	loggerLevel := parseLogLevel(logLevel)
-	logger.GetLogger().SetLevel(parseLogLevel(logLevel))
+	loggerLevel := util.ParseLogLevel(logLevel)
+	logger.GetLogger().SetLevel(loggerLevel)
 
 	// Initialize telemetry after flags are parsed (so flags override env)
 	tcfg := telemetry.FromEnv()

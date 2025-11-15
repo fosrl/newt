@@ -28,15 +28,17 @@ type Manager struct {
 	running    bool
 	stopChan   chan struct{}
 	sharedBind *bind.SharedBind
-	newtID     string
+	ID         string
 	token      string
+	clientType string
 }
 
 // NewManager creates a new hole punch manager
-func NewManager(sharedBind *bind.SharedBind, newtID string) *Manager {
+func NewManager(sharedBind *bind.SharedBind, ID string, clientType string) *Manager {
 	return &Manager{
 		sharedBind: sharedBind,
-		newtID:     newtID,
+		ID:         ID,
+		clientType: clientType,
 	}
 }
 
@@ -250,19 +252,30 @@ func (m *Manager) runSingleEndpoint(endpoint, serverPubKey string) {
 func (m *Manager) sendHolePunch(remoteAddr *net.UDPAddr, serverPubKey string) error {
 	m.mu.Lock()
 	token := m.token
-	newtID := m.newtID
+	ID := m.ID
 	m.mu.Unlock()
 
 	if serverPubKey == "" || token == "" {
 		return fmt.Errorf("server public key or OLM token is empty")
 	}
 
-	payload := struct {
-		NewtID string `json:"newtId"`
-		Token  string `json:"token"`
-	}{
-		NewtID: newtID,
-		Token:  token,
+	var payload interface{}
+	if m.clientType == "newt" {
+		payload = struct {
+			ID    string `json:"newtId"`
+			Token string `json:"token"`
+		}{
+			ID:    ID,
+			Token: token,
+		}
+	} else {
+		payload = struct {
+			ID    string `json:"olmId"`
+			Token string `json:"token"`
+		}{
+			ID:    ID,
+			Token: token,
+		}
 	}
 
 	// Convert payload to JSON
