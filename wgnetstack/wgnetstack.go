@@ -18,7 +18,6 @@ import (
 	"github.com/fosrl/newt/holepunch"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/netstack2"
-	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/util"
 	"github.com/fosrl/newt/websocket"
 	"golang.zx2c4.com/wireguard/device"
@@ -88,32 +87,10 @@ type WireGuardService struct {
 	onNetstackClose func()
 	othertnet       *netstack.Net
 	// Proxy manager for tunnel
-	proxyManager *proxy.ProxyManager
-	TunnelIP     string
+	TunnelIP string
 	// Shared bind and holepunch manager
 	sharedBind       *bind.SharedBind
 	holePunchManager *holepunch.Manager
-}
-
-// GetProxyManager returns the proxy manager for this WireGuardService
-func (s *WireGuardService) GetProxyManager() *proxy.ProxyManager {
-	return s.proxyManager
-}
-
-// AddProxyTarget adds a target to the proxy manager
-func (s *WireGuardService) AddProxyTarget(proto, listenIP string, port int, targetAddr string) error {
-	if s.proxyManager == nil {
-		return fmt.Errorf("proxy manager not initialized")
-	}
-	return s.proxyManager.AddTarget(proto, listenIP, port, targetAddr)
-}
-
-// RemoveProxyTarget removes a target from the proxy manager
-func (s *WireGuardService) RemoveProxyTarget(proto, listenIP string, port int) error {
-	if s.proxyManager == nil {
-		return fmt.Errorf("proxy manager not initialized")
-	}
-	return s.proxyManager.RemoveTarget(proto, listenIP, port)
 }
 
 func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo string, host string, newtId string, wsClient *websocket.Client, dns string) (*WireGuardService, error) {
@@ -189,7 +166,6 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 		lastReadings:  make(map[string]PeerReading),
 		Port:          port,
 		dns:           dnsAddrs,
-		proxyManager:  proxy.NewProxyManagerWithoutTNet(),
 		sharedBind:    sharedBind,
 	}
 
@@ -202,10 +178,6 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 	wsClient.RegisterHandler("newt/wg/peer/add", service.handleAddPeer)
 	wsClient.RegisterHandler("newt/wg/peer/remove", service.handleRemovePeer)
 	wsClient.RegisterHandler("newt/wg/peer/update", service.handleUpdatePeer)
-	wsClient.RegisterHandler("newt/wg/tcp/add", service.addTcpTarget)
-	wsClient.RegisterHandler("newt/wg/udp/add", service.addUdpTarget)
-	wsClient.RegisterHandler("newt/wg/udp/remove", service.removeUdpTarget)
-	wsClient.RegisterHandler("newt/wg/tcp/remove", service.removeTcpTarget)
 
 	return service, nil
 }
@@ -216,86 +188,6 @@ func (s *WireGuardService) ReportRTT(seconds float64) {
 		return
 	}
 	telemetry.ObserveTunnelLatency(context.Background(), s.serverPubKey, "wireguard", seconds)
-}
-
-func (s *WireGuardService) addTcpTarget(msg websocket.WSMessage) {
-	logger.Debug("Received: %+v", msg)
-
-	// if there is no wgData or pm, we can't add targets
-	if s.TunnelIP == "" || s.proxyManager == nil {
-		logger.Info("No tunnel IP or proxy manager available")
-		return
-	}
-
-	targetData, err := parseTargetData(msg.Data)
-	if err != nil {
-		logger.Info("Error parsing target data: %v", err)
-		return
-	}
-
-	if len(targetData.Targets) > 0 {
-		s.updateTargets(s.proxyManager, "add", s.TunnelIP, "tcp", targetData)
-	}
-}
-
-func (s *WireGuardService) addUdpTarget(msg websocket.WSMessage) {
-	logger.Info("Received: %+v", msg)
-
-	// if there is no wgData or pm, we can't add targets
-	if s.TunnelIP == "" || s.proxyManager == nil {
-		logger.Info("No tunnel IP or proxy manager available")
-		return
-	}
-
-	targetData, err := parseTargetData(msg.Data)
-	if err != nil {
-		logger.Info("Error parsing target data: %v", err)
-		return
-	}
-
-	if len(targetData.Targets) > 0 {
-		s.updateTargets(s.proxyManager, "add", s.TunnelIP, "udp", targetData)
-	}
-}
-
-func (s *WireGuardService) removeUdpTarget(msg websocket.WSMessage) {
-	logger.Info("Received: %+v", msg)
-
-	// if there is no wgData or pm, we can't add targets
-	if s.TunnelIP == "" || s.proxyManager == nil {
-		logger.Info("No tunnel IP or proxy manager available")
-		return
-	}
-
-	targetData, err := parseTargetData(msg.Data)
-	if err != nil {
-		logger.Info("Error parsing target data: %v", err)
-		return
-	}
-
-	if len(targetData.Targets) > 0 {
-		s.updateTargets(s.proxyManager, "remove", s.TunnelIP, "udp", targetData)
-	}
-}
-
-func (s *WireGuardService) removeTcpTarget(msg websocket.WSMessage) {
-	logger.Info("Received: %+v", msg)
-
-	// if there is no wgData or pm, we can't add targets
-	if s.TunnelIP == "" || s.proxyManager == nil {
-		logger.Info("No tunnel IP or proxy manager available")
-		return
-	}
-
-	targetData, err := parseTargetData(msg.Data)
-	if err != nil {
-		logger.Info("Error parsing target data: %v", err)
-		return
-	}
-
-	if len(targetData.Targets) > 0 {
-		s.updateTargets(s.proxyManager, "remove", s.TunnelIP, "tcp", targetData)
-	}
 }
 
 func (s *WireGuardService) SetOthertnet(tnet *netstack.Net) {
@@ -435,18 +327,6 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	if err := s.ensureWireguardPeers(config.Peers); err != nil {
 		logger.Error("Failed to ensure WireGuard peers: %v", err)
 	}
-
-	// add the targets if there are any
-	if len(config.Targets.TCP) > 0 {
-		s.updateTargets(s.proxyManager, "add", s.TunnelIP, "tcp", TargetData{Targets: config.Targets.TCP})
-	}
-
-	if len(config.Targets.UDP) > 0 {
-		s.updateTargets(s.proxyManager, "add", s.TunnelIP, "udp", TargetData{Targets: config.Targets.UDP})
-	}
-
-	// Create ProxyManager for this tunnel
-	s.proxyManager.Start()
 }
 
 func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
@@ -484,7 +364,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		s.mu.Unlock()
 		return fmt.Errorf("failed to create TUN device: %v", err)
 	}
-	// s.proxyManager.SetTNet(s.tnet)
+
 	s.TunnelIP = tunnelIP.String()
 
 	// Create WireGuard device using the shared bind
@@ -916,169 +796,6 @@ func (s *WireGuardService) reportPeerBandwidth() error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to send bandwidth data: %v", err)
-	}
-
-	return nil
-}
-
-func (s *WireGuardService) updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto string, targetData TargetData) error {
-	var replace = false
-	for _, t := range targetData.Targets {
-		// Split the first number off of the target with : separator and use as the port
-		parts := strings.Split(t, ":")
-		if len(parts) != 3 {
-			logger.Info("Invalid target format: %s", t)
-			continue
-		}
-
-		// Get the port as an int
-		port := 0
-		_, err := fmt.Sscanf(parts[0], "%d", &port)
-		if err != nil {
-			logger.Info("Invalid port: %s", parts[0])
-			continue
-		}
-
-		if action == "add" {
-			target := parts[1] + ":" + parts[2]
-
-			// Call updown script if provided
-			processedTarget := target
-
-			// Only remove the specific target if it exists
-			err := pm.RemoveTarget(proto, tunnelIP, port)
-			if err != nil {
-				// Ignore "target not found" errors as this is expected for new targets
-				if !strings.Contains(err.Error(), "target not found") {
-					logger.Error("Failed to remove existing target: %v", err)
-				}
-			} else {
-				replace = true // We successfully removed an existing target
-			}
-
-			// Add the new target
-			pm.AddTarget(proto, tunnelIP, port, processedTarget)
-
-		} else if action == "remove" {
-			logger.Info("Removing target with port %d", port)
-
-			err := pm.RemoveTarget(proto, tunnelIP, port)
-			if err != nil {
-				logger.Error("Failed to remove target: %v", err)
-				return err
-			}
-		}
-	}
-
-	if replace {
-		// If we replaced any targets, we need to hot swap the netstack
-		if err := s.ReplaceNetstack(); err != nil {
-			logger.Error("Failed to replace netstack after updating targets: %v", err)
-			return err
-		}
-		logger.Info("Netstack replaced successfully after updating targets")
-	} else {
-		logger.Info("No targets updated, no netstack replacement needed")
-	}
-
-	return nil
-}
-
-func parseTargetData(data interface{}) (TargetData, error) {
-	var targetData TargetData
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		logger.Info("Error marshaling data: %v", err)
-		return targetData, err
-	}
-
-	if err := json.Unmarshal(jsonData, &targetData); err != nil {
-		logger.Info("Error unmarshaling target data: %v", err)
-		return targetData, err
-	}
-	return targetData, nil
-}
-
-// Add this method to WireGuardService
-func (s *WireGuardService) ReplaceNetstack() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.device == nil || s.tun == nil {
-		return fmt.Errorf("WireGuard device not initialized")
-	}
-
-	// Parse the current tunnel IP from the existing config
-	parts := strings.Split(s.config.IpAddress, "/")
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid IP address format: %s", s.config.IpAddress)
-	}
-	tunnelIP := netip.MustParseAddr(parts[0])
-
-	// Stop the proxy manager temporarily
-	s.proxyManager.Stop()
-
-	// Create new TUN device and netstack with new DNS
-	newTun, newTnet, err := netstack2.CreateNetTUN(
-		[]netip.Addr{tunnelIP},
-		s.dns,
-		s.mtu)
-	if err != nil {
-		// Restart proxy manager with old tnet on failure
-		s.proxyManager.Start()
-		return fmt.Errorf("failed to create new TUN device: %v", err)
-	}
-
-	// Get current device config before closing
-	currentConfig, err := s.device.IpcGet()
-	if err != nil {
-		newTun.Close()
-		s.proxyManager.Start()
-		return fmt.Errorf("failed to get current device config: %v", err)
-	}
-
-	// Filter out read-only fields from the config
-	filteredConfig := s.filterReadOnlyFields(currentConfig)
-
-	// if onNetstackClose callback is set, call it
-	if s.onNetstackClose != nil {
-		s.onNetstackClose()
-	}
-
-	// Close old device (this closes the old TUN device)
-	s.device.Close()
-
-	// Update references
-	s.tun = newTun
-	s.tnet = newTnet
-
-	// Create new WireGuard device with same shared bind
-	s.device = device.NewDevice(s.tun, s.sharedBind, device.NewLogger(
-		device.LogLevelSilent,
-		"wireguard: ",
-	))
-
-	// Restore the configuration (without read-only fields)
-	err = s.device.IpcSet(filteredConfig)
-	if err != nil {
-		return fmt.Errorf("failed to restore WireGuard configuration: %v", err)
-	}
-
-	// Bring up the device
-	err = s.device.Up()
-	if err != nil {
-		return fmt.Errorf("failed to bring up new WireGuard device: %v", err)
-	}
-
-	// Update proxy manager with new tnet and restart
-	// s.proxyManager.SetTNet(s.tnet)
-	s.proxyManager.Start()
-
-	s.proxyManager.PrintTargets()
-
-	// Call the netstack ready callback if set
-	if s.onNetstackReady != nil {
-		go s.onNetstackReady(s.tnet)
 	}
 
 	return nil
