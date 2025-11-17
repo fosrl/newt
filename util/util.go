@@ -14,6 +14,16 @@ import (
 )
 
 func ResolveDomain(domain string) (string, error) {
+	// trim whitespace
+	domain = strings.TrimSpace(domain)
+
+	// Remove any protocol prefix if present (do this first, before splitting host/port)
+	domain = strings.TrimPrefix(domain, "http://")
+	domain = strings.TrimPrefix(domain, "https://")
+
+	// if there are any trailing slashes, remove them
+	domain = strings.TrimSuffix(domain, "/")
+
 	// Check if there's a port in the domain
 	host, port, err := net.SplitHostPort(domain)
 	if err != nil {
@@ -21,16 +31,6 @@ func ResolveDomain(domain string) (string, error) {
 		host = domain
 		port = ""
 	}
-
-	// Remove any protocol prefix if present
-	if strings.HasPrefix(host, "http://") {
-		host = strings.TrimPrefix(host, "http://")
-	} else if strings.HasPrefix(host, "https://") {
-		host = strings.TrimPrefix(host, "https://")
-	}
-
-	// if there are any trailing slashes, remove them
-	host = strings.TrimSuffix(host, "/")
 
 	// Lookup IP addresses
 	ips, err := net.LookupIP(host)
