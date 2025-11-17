@@ -10,6 +10,7 @@ import (
 	mathrand "math/rand/v2"
 
 	"github.com/fosrl/newt/logger"
+	"golang.zx2c4.com/wireguard/device"
 )
 
 func ResolveDomain(domain string) (string, error) {
@@ -135,4 +136,19 @@ func FixKey(key string) string {
 
 	// Convert to hex
 	return hex.EncodeToString(decoded)
+}
+
+func MapToWireGuardLogLevel(level logger.LogLevel) int {
+	switch level {
+	case logger.DEBUG:
+		return device.LogLevelVerbose
+	// case logger.INFO:
+	// return device.LogLevel
+	case logger.WARN:
+		return device.LogLevelError
+	case logger.ERROR, logger.FATAL:
+		return device.LogLevelSilent
+	default:
+		return device.LogLevelSilent
+	}
 }

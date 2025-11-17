@@ -30,7 +30,7 @@ func setupClients(client *websocket.Client) {
 	host = strings.TrimSuffix(host, "/")
 
 	if useNativeInterface {
-		setupClientsNative(client, host)
+		// setupClientsNative(client, host)
 	} else {
 		setupClientsNetstack(client, host)
 	}
@@ -81,7 +81,7 @@ func closeClients() {
 		wgService = nil
 	}
 
-	closeWgServiceNative()
+	// closeWgServiceNative()
 
 	if wgTesterServer != nil {
 		wgTesterServer.Stop()
@@ -106,7 +106,7 @@ func clientsHandleNewtConnection(publicKey string, endpoint string) {
 		wgService.StartHolepunch(publicKey, endpoint)
 	}
 
-	clientsHandleNewtConnectionNative(publicKey, endpoint)
+	// clientsHandleNewtConnectionNative(publicKey, endpoint)
 }
 
 func clientsOnConnect() {
@@ -117,7 +117,7 @@ func clientsOnConnect() {
 		wgService.LoadRemoteConfig()
 	}
 
-	clientsOnConnectNative()
+	// clientsOnConnectNative()
 }
 
 func clientsAddProxyTarget(pm *proxy.ProxyManager, tunnelIp string) {
@@ -130,5 +130,5 @@ func clientsAddProxyTarget(pm *proxy.ProxyManager, tunnelIp string) {
 		pm.AddTarget("udp", tunnelIp, int(wgService.Port), fmt.Sprintf("127.0.0.1:%d", wgService.Port))
 	}
 
-	clientsAddProxyTargetNative(pm, tunnelIp)
+	// clientsAddProxyTargetNative(pm, tunnelIp)
 }

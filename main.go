@@ -651,7 +651,7 @@ func main() {
 
 		// Create WireGuard device
 		dev = device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(
-			mapToWireGuardLogLevel(loggerLevel),
+			util.MapToWireGuardLogLevel(loggerLevel),
 			"wireguard: ",
 		))
 

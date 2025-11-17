@@ -18,7 +18,6 @@ import (
 	"github.com/fosrl/newt/websocket"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
-	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 	"gopkg.in/yaml.v3"
 )
@@ -347,21 +346,6 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 	}()
 
 	return pingStopChan
-}
-
-func mapToWireGuardLogLevel(level logger.LogLevel) int {
-	switch level {
-	case logger.DEBUG:
-		return device.LogLevelVerbose
-	// case logger.INFO:
-	// return device.LogLevel
-	case logger.WARN:
-		return device.LogLevelError
-	case logger.ERROR, logger.FATAL:
-		return device.LogLevelSilent
-	default:
-		return device.LogLevelSilent
-	}
 }
 
 func parseTargetData(data interface{}) (TargetData, error) {
