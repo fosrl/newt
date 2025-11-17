@@ -2,8 +2,6 @@ package logger
 
 import (
 	"fmt"
-	"io"
-	"log"
 	"os"
 	"sync"
 	"time"
@@ -11,7 +9,7 @@ import (
 
 // Logger struct holds the logger instance
 type Logger struct {
-	logger *log.Logger
+	writer LogWriter
 	level  LogLevel
 }
 
@@ -20,10 +18,18 @@ var (
 	once          sync.Once
 )
 
-// NewLogger creates a new logger instance
+// NewLogger creates a new logger instance with the default StandardWriter
 func NewLogger() *Logger {
 	return &Logger{
-		logger: log.New(os.Stdout, "", 0),
+		writer: NewStandardWriter(),
+		level:  DEBUG,
+	}
+}
+
+// NewLoggerWithWriter creates a new logger instance with a custom LogWriter
+func NewLoggerWithWriter(writer LogWriter) *Logger {
+	return &Logger{
+		writer: writer,
 		level:  DEBUG,
 	}
 }
@@ -49,9 +55,11 @@ func (l *Logger) SetLevel(level LogLevel) {
 	l.level = level
 }
 
-// SetOutput sets the output destination for the logger
-func (l *Logger) SetOutput(w io.Writer) {
-	l.logger.SetOutput(w)
+// SetOutput sets the output destination for the logger (only works with StandardWriter)
+func (l *Logger) SetOutput(output *os.File) {
+	if sw, ok := l.writer.(*StandardWriter); ok {
+		sw.SetOutput(output)
+	}
 }
 
 // log handles the actual logging
@@ -60,24 +68,8 @@ func (l *Logger) log(level LogLevel, format string, args ...interface{}) {
 		return
 	}
 
-	// Get timezone from environment variable or use local timezone
-	timezone := os.Getenv("LOGGER_TIMEZONE")
-	var location *time.Location
-	var err error
-
-	if timezone != "" {
-		location, err = time.LoadLocation(timezone)
-		if err != nil {
-			// If invalid timezone, fall back to local
-			location = time.Local
-		}
-	} else {
-		location = time.Local
-	}
-
-	timestamp := time.Now().In(location).Format("2006/01/02 15:04:05")
 	message := fmt.Sprintf(format, args...)
-	l.logger.Printf("%s: %s %s", level.String(), timestamp, message)
+	l.writer.Write(level, time.Now(), message)
 }
 
 // Debug logs debug level messages
@@ -128,6 +120,6 @@ func Fatal(format string, args ...interface{}) {
 }
 
 // SetOutput sets the output destination for the default logger
-func SetOutput(w io.Writer) {
-	GetLogger().SetOutput(w)
+func SetOutput(output *os.File) {
+	GetLogger().SetOutput(output)
 }

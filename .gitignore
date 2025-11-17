@@ -6,3 +6,4 @@ nohup.out
 *.iml
 certs/
 newt_arm64
+key
