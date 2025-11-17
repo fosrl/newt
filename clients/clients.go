@@ -29,9 +29,9 @@ import (
 )
 
 type WgConfig struct {
-	IpAddress string   `json:"ipAddress"`
-	Peers     []Peer   `json:"peers"`
-	Targets   []Target `json:"targets"`
+	IpAddress string `json:"ipAddress"`
+	Peers     []Peer `json:"peers"`
+	// Targets   []Target `json:"targets"`
 }
 
 type Target struct {
@@ -331,9 +331,9 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 		logger.Error("Failed to ensure WireGuard peers: %v", err)
 	}
 
-	if err := s.ensureTargets(config.Targets); err != nil {
-		logger.Error("Failed to ensure WireGuard targets: %v", err)
-	}
+	// if err := s.ensureTargets(config.Targets); err != nil {
+	// 	logger.Error("Failed to ensure WireGuard targets: %v", err)
+	// }
 }
 
 func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
