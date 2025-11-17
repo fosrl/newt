@@ -4,17 +4,18 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/fosrl/newt/clients"
+	wgnetstack "github.com/fosrl/newt/clients"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/netstack2"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/websocket"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 
-	"github.com/fosrl/newt/wgnetstack"
 	"github.com/fosrl/newt/wgtester"
 )
 
-var wgService *wgnetstack.WireGuardService
+var wgService *clients.WireGuardService
 var wgTesterServer *wgtester.Server
 var ready bool
 

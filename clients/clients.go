@@ -1,4 +1,4 @@
-package wgnetstack
+package clients
 
 import (
 	"context"
@@ -29,18 +29,19 @@ import (
 )
 
 type WgConfig struct {
-	IpAddress string        `json:"ipAddress"`
-	Peers     []Peer        `json:"peers"`
-	Targets   TargetsByType `json:"targets"`
+	IpAddress string   `json:"ipAddress"`
+	Peers     []Peer   `json:"peers"`
+	Targets   []Target `json:"targets"`
 }
 
-type TargetsByType struct {
-	UDP []string `json:"udp"`
-	TCP []string `json:"tcp"`
+type Target struct {
+	CIDR      string      `json:"cidr"`
+	PortRange []PortRange `json:"portRange,omitempty"`
 }
 
-type TargetData struct {
-	Targets []string `json:"targets"`
+type PortRange struct {
+	Min uint16 `json:"min"`
+	Max uint16 `json:"max"`
 }
 
 type Peer struct {
@@ -178,6 +179,8 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 	wsClient.RegisterHandler("newt/wg/peer/add", service.handleAddPeer)
 	wsClient.RegisterHandler("newt/wg/peer/remove", service.handleRemovePeer)
 	wsClient.RegisterHandler("newt/wg/peer/update", service.handleUpdatePeer)
+	wsClient.RegisterHandler("newt/wg/target/add", service.handleAddTarget)
+	wsClient.RegisterHandler("newt/wg/target/remove", service.handleRemoveTarget)
 
 	return service, nil
 }
@@ -327,6 +330,10 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	if err := s.ensureWireguardPeers(config.Peers); err != nil {
 		logger.Error("Failed to ensure WireGuard peers: %v", err)
 	}
+
+	if err := s.ensureTargets(config.Targets); err != nil {
+		logger.Error("Failed to ensure WireGuard targets: %v", err)
+	}
 }
 
 func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
@@ -376,7 +383,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 	// logger.Info("Private key is %s", fixKey(s.key.String()))
 
 	// Configure WireGuard with private key
-	config := fmt.Sprintf("private_key=%s", fixKey(s.key.String()))
+	config := fmt.Sprintf("private_key=%s", util.FixKey(s.key.String()))
 
 	err = s.device.IpcSet(config)
 	if err != nil {
@@ -407,20 +414,6 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 
 	// Note: we already unlocked above, so don't use defer unlock
 	return nil
-}
-
-func fixKey(key string) string {
-	// Remove any whitespace
-	key = strings.TrimSpace(key)
-
-	// Decode from base64
-	decoded, err := base64.StdEncoding.DecodeString(key)
-	if err != nil {
-		logger.Fatal("Error decoding base64: %v", err)
-	}
-
-	// Convert to hex
-	return hex.EncodeToString(decoded)
 }
 
 func (s *WireGuardService) ensureWireguardPeers(peers []Peer) error {
@@ -461,6 +454,38 @@ func (s *WireGuardService) ensureWireguardPeers(peers []Peer) error {
 	return nil
 }
 
+func (s *WireGuardService) ensureTargets(targets []Target) error {
+	if s.tnet == nil {
+		return fmt.Errorf("netstack not initialized")
+	}
+
+	// handler.AddSubnetRule(subnet2, []PortRange{
+	// 	{Min: 12000, Max: 12001},
+	// 	{Min: 8000, Max: 8000},
+	// })
+
+	for _, target := range targets {
+		prefix, err := netip.ParsePrefix(target.CIDR)
+		if err != nil {
+			return fmt.Errorf("invalid CIDR %s: %v", target.CIDR, err)
+		}
+
+		var portRanges []netstack2.PortRange
+		for _, pr := range target.PortRange {
+			portRanges = append(portRanges, netstack2.PortRange{
+				Min: pr.Min,
+				Max: pr.Max,
+			})
+		}
+
+		s.tnet.AddProxySubnetRule(prefix, portRanges)
+
+		logger.Info("Added target subnet %s with port ranges: %v", target.CIDR, target.PortRange)
+	}
+
+	return nil
+}
+
 func (s *WireGuardService) addPeerToDevice(peer Peer) error {
 	// parse the key first
 	pubKey, err := wgtypes.ParseKey(peer.PublicKey)
@@ -469,7 +494,7 @@ func (s *WireGuardService) addPeerToDevice(peer Peer) error {
 	}
 
 	// Build IPC configuration string for the peer
-	config := fmt.Sprintf("public_key=%s", fixKey(pubKey.String()))
+	config := fmt.Sprintf("public_key=%s", util.FixKey(pubKey.String()))
 
 	// Add allowed IPs
 	for _, allowedIP := range peer.AllowedIPs {
@@ -559,7 +584,7 @@ func (s *WireGuardService) removePeer(publicKey string) error {
 	}
 
 	// Build IPC configuration string to remove the peer
-	config := fmt.Sprintf("public_key=%s\nremove=true", fixKey(pubKey.String()))
+	config := fmt.Sprintf("public_key=%s\nremove=true", util.FixKey(pubKey.String()))
 
 	if err := s.device.IpcSet(config); err != nil {
 		return fmt.Errorf("failed to remove peer: %v", err)
@@ -603,7 +628,7 @@ func (s *WireGuardService) handleUpdatePeer(msg websocket.WSMessage) {
 	}
 
 	// Build IPC configuration string to update the peer
-	config := fmt.Sprintf("public_key=%s\nupdate_only=true", fixKey(pubKey.String()))
+	config := fmt.Sprintf("public_key=%s\nupdate_only=true", util.FixKey(pubKey.String()))
 
 	// Handle AllowedIPs update
 	if len(request.AllowedIPs) > 0 {
@@ -799,6 +824,81 @@ func (s *WireGuardService) reportPeerBandwidth() error {
 	}
 
 	return nil
+}
+
+// filterReadOnlyFields removes read-only fields from WireGuard IPC configuration
+func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
+	logger.Debug("Received message: %v", msg.Data)
+	var target Target
+
+	jsonData, err := json.Marshal(msg.Data)
+	if err != nil {
+		logger.Info("Error marshaling data: %v", err)
+		return
+	}
+
+	if err := json.Unmarshal(jsonData, &target); err != nil {
+		logger.Info("Error unmarshaling target data: %v", err)
+		return
+	}
+
+	if s.tnet == nil {
+		logger.Info("Netstack not initialized")
+		return
+	}
+
+	prefix, err := netip.ParsePrefix(target.CIDR)
+	if err != nil {
+		logger.Info("Invalid CIDR %s: %v", target.CIDR, err)
+		return
+	}
+
+	var portRanges []netstack2.PortRange
+	for _, pr := range target.PortRange {
+		portRanges = append(portRanges, netstack2.PortRange{
+			Min: pr.Min,
+			Max: pr.Max,
+		})
+	}
+
+	s.tnet.AddProxySubnetRule(prefix, portRanges)
+
+	logger.Info("Added target subnet %s with port ranges: %v", target.CIDR, target.PortRange)
+}
+
+func (s *WireGuardService) handleRemoveTarget(msg websocket.WSMessage) {
+	logger.Debug("Received message: %v", msg.Data)
+
+	type RemoveTargetRequest struct {
+		CIDR string `json:"cidr"`
+	}
+
+	jsonData, err := json.Marshal(msg.Data)
+	if err != nil {
+		logger.Info("Error marshaling data: %v", err)
+		return
+	}
+
+	var request RemoveTargetRequest
+	if err := json.Unmarshal(jsonData, &request); err != nil {
+		logger.Info("Error unmarshaling data: %v", err)
+		return
+	}
+
+	if s.tnet == nil {
+		logger.Info("Netstack not initialized")
+		return
+	}
+
+	prefix, err := netip.ParsePrefix(request.CIDR)
+	if err != nil {
+		logger.Info("Invalid CIDR %s: %v", request.CIDR, err)
+		return
+	}
+
+	s.tnet.RemoveProxySubnetRule(prefix)
+
+	logger.Info("Removed target subnet %s", request.CIDR)
 }
 
 // filterReadOnlyFields removes read-only fields from WireGuard IPC configuration

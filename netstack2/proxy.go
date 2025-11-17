@@ -150,18 +150,18 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 		}
 	}
 
-	// Example 1: Add a subnet with no port restrictions (all ports allowed)
-	// This accepts all traffic to 10.20.20.0/24
-	subnet1 := netip.MustParsePrefix("10.20.20.0/24")
-	handler.AddSubnetRule(subnet1, nil)
+	// // Example 1: Add a subnet with no port restrictions (all ports allowed)
+	// // This accepts all traffic to 10.20.20.0/24
+	// subnet1 := netip.MustParsePrefix("10.20.20.0/24")
+	// handler.AddSubnetRule(subnet1, nil)
 
-	// Example 2: Add a subnet with specific port ranges
-	// This accepts traffic to 192.168.1.0/24 only on ports 80, 443, and 8000-9000
-	subnet2 := netip.MustParsePrefix("10.20.21.21/32")
-	handler.AddSubnetRule(subnet2, []PortRange{
-		{Min: 12000, Max: 12001},
-		{Min: 8000, Max: 8000},
-	})
+	// // Example 2: Add a subnet with specific port ranges
+	// // This accepts traffic to 192.168.1.0/24 only on ports 80, 443, and 8000-9000
+	// subnet2 := netip.MustParsePrefix("10.20.21.21/32")
+	// handler.AddSubnetRule(subnet2, []PortRange{
+	// 	{Min: 12000, Max: 12001},
+	// 	{Min: 8000, Max: 8000},
+	// })
 
 	return handler, nil
 }

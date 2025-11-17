@@ -678,7 +678,7 @@ func main() {
 public_key=%s
 allowed_ip=%s/32
 endpoint=%s
-persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.PublicKey), wgData.ServerIP, endpoint)
+persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(wgData.PublicKey), wgData.ServerIP, endpoint)
 
 		err = dev.IpcSet(config)
 		if err != nil {

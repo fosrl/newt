@@ -1,6 +1,8 @@
 package util
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"strings"
@@ -119,4 +121,18 @@ func FindAvailableUDPPort(minPort, maxPort uint16) (uint16, error) {
 	}
 
 	return 0, fmt.Errorf("no available consecutive UDP ports found in range %d-%d", minPort, maxPort)
+}
+
+func FixKey(key string) string {
+	// Remove any whitespace
+	key = strings.TrimSpace(key)
+
+	// Decode from base64
+	decoded, err := base64.StdEncoding.DecodeString(key)
+	if err != nil {
+		logger.Fatal("Error decoding base64: %v", err)
+	}
+
+	// Convert to hex
+	return hex.EncodeToString(decoded)
 }

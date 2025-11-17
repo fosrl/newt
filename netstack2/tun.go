@@ -48,7 +48,8 @@ type netTun struct {
 	mtu            int
 	dnsServers     []netip.Addr
 	hasV4, hasV6   bool
-	proxyHandler   *ProxyHandler // Handles promiscuous mode packet processing
+	// TODO: LETS NOT KEEP THIS ON THE TUN AND MOVE IT BUT WE CAN KEEP IT FOR NOW
+	proxyHandler *ProxyHandler // Handles promiscuous mode packet processing
 }
 
 type Net netTun
@@ -345,6 +346,30 @@ func (net *Net) DialUDP(laddr, raddr *net.UDPAddr) (*gonet.UDPConn, error) {
 
 func (net *Net) ListenUDP(laddr *net.UDPAddr) (*gonet.UDPConn, error) {
 	return net.DialUDP(laddr, nil)
+}
+
+// AddProxySubnetRule adds a subnet rule to the proxy handler
+// If portRanges is nil or empty, all ports are allowed for this subnet
+func (net *Net) AddProxySubnetRule(prefix netip.Prefix, portRanges []PortRange) {
+	tun := (*netTun)(net)
+	if tun.proxyHandler != nil {
+		tun.proxyHandler.AddSubnetRule(prefix, portRanges)
+	}
+}
+
+// RemoveProxySubnetRule removes a subnet rule from the proxy handler
+func (net *Net) RemoveProxySubnetRule(prefix netip.Prefix) {
+	tun := (*netTun)(net)
+	if tun.proxyHandler != nil {
+		tun.proxyHandler.RemoveSubnetRule(prefix)
+	}
+}
+
+// GetProxyHandler returns the proxy handler (for advanced use cases)
+// Returns nil if proxy is not enabled
+func (net *Net) GetProxyHandler() *ProxyHandler {
+	tun := (*netTun)(net)
+	return tun.proxyHandler
 }
 
 type PingConn struct {
