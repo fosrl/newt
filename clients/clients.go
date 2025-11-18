@@ -29,9 +29,9 @@ import (
 )
 
 type WgConfig struct {
-	IpAddress string `json:"ipAddress"`
-	Peers     []Peer `json:"peers"`
-	// Targets   []Target `json:"targets"`
+	IpAddress string   `json:"ipAddress"`
+	Peers     []Peer   `json:"peers"`
+	Targets   []Target `json:"targets"`
 }
 
 type Target struct {
@@ -181,6 +181,7 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 	wsClient.RegisterHandler("newt/wg/peer/update", service.handleUpdatePeer)
 	wsClient.RegisterHandler("newt/wg/target/add", service.handleAddTarget)
 	wsClient.RegisterHandler("newt/wg/target/remove", service.handleRemoveTarget)
+	wsClient.RegisterHandler("newt/wg/target/update", service.handleUpdateTarget)
 
 	return service, nil
 }
@@ -864,6 +865,60 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 	s.tnet.AddProxySubnetRule(prefix, portRanges)
 
 	logger.Info("Added target subnet %s with port ranges: %v", target.CIDR, target.PortRange)
+}
+
+func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
+	logger.Debug("Received message: %v", msg.Data)
+
+	// you are going to get a oldTarget and a newTarget in the message
+	type UpdateTargetRequest struct {
+		OldTarget Target `json:"oldTarget"`
+		NewTarget Target `json:"newTarget"`
+	}
+
+	jsonData, err := json.Marshal(msg.Data)
+	if err != nil {
+		logger.Info("Error marshaling data: %v", err)
+		return
+	}
+
+	var request UpdateTargetRequest
+	if err := json.Unmarshal(jsonData, &request); err != nil {
+		logger.Info("Error unmarshaling data: %v", err)
+		return
+	}
+
+	if s.tnet == nil {
+		logger.Info("Netstack not initialized")
+		return
+	}
+
+	prefix, err := netip.ParsePrefix(request.OldTarget.CIDR)
+	if err != nil {
+		logger.Info("Invalid CIDR %s: %v", request.OldTarget.CIDR, err)
+		return
+	}
+
+	s.tnet.RemoveProxySubnetRule(prefix)
+
+	// Now add the new target
+	newPrefix, err := netip.ParsePrefix(request.NewTarget.CIDR)
+	if err != nil {
+		logger.Info("Invalid CIDR %s: %v", request.NewTarget.CIDR, err)
+		return
+	}
+
+	var portRanges []netstack2.PortRange
+	for _, pr := range request.NewTarget.PortRange {
+		portRanges = append(portRanges, netstack2.PortRange{
+			Min: pr.Min,
+			Max: pr.Max,
+		})
+	}
+
+	s.tnet.AddProxySubnetRule(newPrefix, portRanges)
+
+	logger.Info("Updated target subnet from %s to %s", request.OldTarget.CIDR, request.NewTarget.CIDR)
 }
 
 func (s *WireGuardService) handleRemoveTarget(msg websocket.WSMessage) {

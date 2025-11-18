@@ -35,8 +35,12 @@ func NewLoggerWithWriter(writer LogWriter) *Logger {
 }
 
 // Init initializes the default logger
-func Init() *Logger {
+func Init(logger *Logger) *Logger {
 	once.Do(func() {
+		if logger != nil {
+			defaultLogger = logger
+			return
+		}
 		defaultLogger = NewLogger()
 	})
 	return defaultLogger
@@ -45,7 +49,7 @@ func Init() *Logger {
 // GetLogger returns the default logger instance
 func GetLogger() *Logger {
 	if defaultLogger == nil {
-		Init()
+		Init(nil)
 	}
 	return defaultLogger
 }
