@@ -23,68 +23,95 @@ type PortRange struct {
 	Max uint16
 }
 
-// SubnetRule represents a subnet with optional port restrictions
+// SubnetRule represents a subnet with optional port restrictions and source address
 type SubnetRule struct {
-	Prefix     netip.Prefix
-	PortRanges []PortRange // empty slice means all ports allowed
+	SourcePrefix netip.Prefix // Source IP prefix (who is sending)
+	DestPrefix   netip.Prefix // Destination IP prefix (where it's going)
+	PortRanges   []PortRange  // empty slice means all ports allowed
 }
 
-// SubnetLookup provides fast IP subnet and port matching
+// ruleKey is used as a map key for fast O(1) lookups
+type ruleKey struct {
+	sourcePrefix string
+	destPrefix   string
+}
+
+// SubnetLookup provides fast IP subnet and port matching with O(1) lookup performance
 type SubnetLookup struct {
 	mu    sync.RWMutex
-	rules []SubnetRule
+	rules map[ruleKey]*SubnetRule // Map for O(1) lookups by prefix combination
 }
 
 // NewSubnetLookup creates a new subnet lookup table
 func NewSubnetLookup() *SubnetLookup {
 	return &SubnetLookup{
-		rules: make([]SubnetRule, 0),
+		rules: make(map[ruleKey]*SubnetRule),
 	}
 }
 
-// AddSubnet adds a subnet to the lookup table with optional port restrictions
+// AddSubnet adds a subnet rule with source and destination prefixes and optional port restrictions
 // If portRanges is nil or empty, all ports are allowed for this subnet
-func (sl *SubnetLookup) AddSubnet(prefix netip.Prefix, portRanges []PortRange) {
+func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, portRanges []PortRange) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
-	sl.rules = append(sl.rules, SubnetRule{
-		Prefix:     prefix,
-		PortRanges: portRanges,
-	})
-}
+	key := ruleKey{
+		sourcePrefix: sourcePrefix.String(),
+		destPrefix:   destPrefix.String(),
+	}
 
-// RemoveSubnet removes a subnet from the lookup table
-func (sl *SubnetLookup) RemoveSubnet(prefix netip.Prefix) {
-	sl.mu.Lock()
-	defer sl.mu.Unlock()
-
-	for i, rule := range sl.rules {
-		if rule.Prefix == prefix {
-			sl.rules = append(sl.rules[:i], sl.rules[i+1:]...)
-			return
-		}
+	sl.rules[key] = &SubnetRule{
+		SourcePrefix: sourcePrefix,
+		DestPrefix:   destPrefix,
+		PortRanges:   portRanges,
 	}
 }
 
-// Match checks if an IP and port match any subnet rule
-// Returns true if the IP is in a matching subnet AND the port is in an allowed range
-func (sl *SubnetLookup) Match(ip netip.Addr, port uint16) bool {
+// RemoveSubnet removes a subnet rule from the lookup table
+func (sl *SubnetLookup) RemoveSubnet(sourcePrefix, destPrefix netip.Prefix) {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+
+	key := ruleKey{
+		sourcePrefix: sourcePrefix.String(),
+		destPrefix:   destPrefix.String(),
+	}
+
+	delete(sl.rules, key)
+}
+
+// Match checks if a source IP, destination IP, and port match any subnet rule
+// Returns true if BOTH:
+//   - The source IP is in the rule's source prefix
+//   - The destination IP is in the rule's destination prefix
+//   - The port is in an allowed range (or no port restrictions exist)
+//
+// This implementation uses O(n) iteration but checks exact prefix matches first for common cases
+func (sl *SubnetLookup) Match(srcIP, dstIP netip.Addr, port uint16) bool {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
 
+	// Iterate through all rules to find matching source and destination prefixes
+	// This is O(n) but necessary since we need to check prefix containment, not exact match
 	for _, rule := range sl.rules {
-		if rule.Prefix.Contains(ip) {
-			// If no port ranges specified, all ports are allowed
-			if len(rule.PortRanges) == 0 {
-				return true
-			}
+		// Check if source and destination IPs match their respective prefixes
+		if !rule.SourcePrefix.Contains(srcIP) {
+			continue
+		}
+		if !rule.DestPrefix.Contains(dstIP) {
+			continue
+		}
 
-			// Check if port is in any of the allowed ranges
-			for _, pr := range rule.PortRanges {
-				if port >= pr.Min && port <= pr.Max {
-					return true
-				}
+		// Both IPs match - now check port restrictions
+		// If no port ranges specified, all ports are allowed
+		if len(rule.PortRanges) == 0 {
+			return true
+		}
+
+		// Check if port is in any of the allowed ranges
+		for _, pr := range rule.PortRanges {
+			if port >= pr.Min && port <= pr.Max {
+				return true
 			}
 		}
 	}
@@ -150,37 +177,42 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 		}
 	}
 
-	// // Example 1: Add a subnet with no port restrictions (all ports allowed)
-	// // This accepts all traffic to 10.20.20.0/24
-	// subnet1 := netip.MustParsePrefix("10.20.20.0/24")
-	// handler.AddSubnetRule(subnet1, nil)
+	// // Example 1: Add a rule with no port restrictions (all ports allowed)
+	// // This accepts all traffic FROM 10.0.0.0/24 TO 10.20.20.0/24
+	// sourceSubnet := netip.MustParsePrefix("10.0.0.0/24")
+	// destSubnet := netip.MustParsePrefix("10.20.20.0/24")
+	// handler.AddSubnetRule(sourceSubnet, destSubnet, nil)
 
-	// // Example 2: Add a subnet with specific port ranges
-	// // This accepts traffic to 192.168.1.0/24 only on ports 80, 443, and 8000-9000
-	// subnet2 := netip.MustParsePrefix("10.20.21.21/32")
-	// handler.AddSubnetRule(subnet2, []PortRange{
-	// 	{Min: 12000, Max: 12001},
-	// 	{Min: 8000, Max: 8000},
+	// // Example 2: Add a rule with specific port ranges
+	// // This accepts traffic FROM 10.0.0.5/32 TO 10.20.21.21/32 only on ports 80, 443, and 8000-9000
+	// sourceIP := netip.MustParsePrefix("10.0.0.5/32")
+	// destIP := netip.MustParsePrefix("10.20.21.21/32")
+	// handler.AddSubnetRule(sourceIP, destIP, []PortRange{
+	// 	{Min: 80, Max: 80},
+	// 	{Min: 443, Max: 443},
+	// 	{Min: 8000, Max: 9000},
 	// })
 
 	return handler, nil
 }
 
 // AddSubnetRule adds a subnet with optional port restrictions to the proxy handler
+// sourcePrefix: The IP prefix of the peer sending the data
+// destPrefix: The IP prefix of the destination
 // If portRanges is nil or empty, all ports are allowed for this subnet
-func (p *ProxyHandler) AddSubnetRule(prefix netip.Prefix, portRanges []PortRange) {
+func (p *ProxyHandler) AddSubnetRule(sourcePrefix, destPrefix netip.Prefix, portRanges []PortRange) {
 	if p == nil || !p.enabled {
 		return
 	}
-	p.subnetLookup.AddSubnet(prefix, portRanges)
+	p.subnetLookup.AddSubnet(sourcePrefix, destPrefix, portRanges)
 }
 
 // RemoveSubnetRule removes a subnet from the proxy handler
-func (p *ProxyHandler) RemoveSubnetRule(prefix netip.Prefix) {
+func (p *ProxyHandler) RemoveSubnetRule(sourcePrefix, destPrefix netip.Prefix) {
 	if p == nil || !p.enabled {
 		return
 	}
-	p.subnetLookup.RemoveSubnet(prefix)
+	p.subnetLookup.RemoveSubnet(sourcePrefix, destPrefix)
 }
 
 // Initialize sets up the promiscuous NIC with the netTun's notification system
@@ -239,11 +271,14 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 
 	// Parse IPv4 header
 	ipv4Header := header.IPv4(packet)
+	srcIP := ipv4Header.SourceAddress()
 	dstIP := ipv4Header.DestinationAddress()
 
 	// Convert gvisor tcpip.Address to netip.Addr
+	srcBytes := srcIP.As4()
+	srcAddr := netip.AddrFrom4(srcBytes)
 	dstBytes := dstIP.As4()
-	addr := netip.AddrFrom4(dstBytes)
+	dstAddr := netip.AddrFrom4(dstBytes)
 
 	// Parse transport layer to get destination port
 	var dstPort uint16
@@ -269,8 +304,8 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 		dstPort = 0
 	}
 
-	// Check if the destination IP and port match any subnet rule
-	if p.subnetLookup.Match(addr, dstPort) {
+	// Check if the source IP, destination IP, and port match any subnet rule
+	if p.subnetLookup.Match(srcAddr, dstAddr, dstPort) {
 		// Inject into proxy stack
 		pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{
 			Payload: buffer.MakeWithData(packet),

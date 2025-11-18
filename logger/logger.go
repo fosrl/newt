@@ -127,3 +127,22 @@ func Fatal(format string, args ...interface{}) {
 func SetOutput(output *os.File) {
 	GetLogger().SetOutput(output)
 }
+
+// WireGuardLogger is a wrapper type that matches WireGuard's Logger interface
+type WireGuardLogger struct {
+	Verbosef func(format string, args ...any)
+	Errorf   func(format string, args ...any)
+}
+
+// GetWireGuardLogger returns a WireGuard-compatible logger that writes to the newt logger
+// The prepend string is added as a prefix to all log messages
+func (l *Logger) GetWireGuardLogger(prepend string) *WireGuardLogger {
+	return &WireGuardLogger{
+		Verbosef: func(format string, args ...any) {
+			l.Debug(prepend+format, args...)
+		},
+		Errorf: func(format string, args ...any) {
+			l.Error(prepend+format, args...)
+		},
+	}
+}

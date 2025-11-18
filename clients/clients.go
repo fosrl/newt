@@ -35,8 +35,9 @@ type WgConfig struct {
 }
 
 type Target struct {
-	CIDR      string      `json:"cidr"`
-	PortRange []PortRange `json:"portRange,omitempty"`
+	SourcePrefix string      `json:"sourcePrefix"`
+	DestPrefix   string      `json:"destPrefix"`
+	PortRange    []PortRange `json:"portRange,omitempty"`
 }
 
 type PortRange struct {
@@ -332,9 +333,9 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 		logger.Error("Failed to ensure WireGuard peers: %v", err)
 	}
 
-	// if err := s.ensureTargets(config.Targets); err != nil {
-	// 	logger.Error("Failed to ensure WireGuard targets: %v", err)
-	// }
+	if err := s.ensureTargets(config.Targets); err != nil {
+		logger.Error("Failed to ensure WireGuard targets: %v", err)
+	}
 }
 
 func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
@@ -460,15 +461,15 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 		return fmt.Errorf("netstack not initialized")
 	}
 
-	// handler.AddSubnetRule(subnet2, []PortRange{
-	// 	{Min: 12000, Max: 12001},
-	// 	{Min: 8000, Max: 8000},
-	// })
-
 	for _, target := range targets {
-		prefix, err := netip.ParsePrefix(target.CIDR)
+		sourcePrefix, err := netip.ParsePrefix(target.SourcePrefix)
 		if err != nil {
-			return fmt.Errorf("invalid CIDR %s: %v", target.CIDR, err)
+			return fmt.Errorf("invalid CIDR %s: %v", target.SourcePrefix, err)
+		}
+
+		destPrefix, err := netip.ParsePrefix(target.DestPrefix)
+		if err != nil {
+			return fmt.Errorf("invalid CIDR %s: %v", target.DestPrefix, err)
 		}
 
 		var portRanges []netstack2.PortRange
@@ -479,9 +480,9 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 			})
 		}
 
-		s.tnet.AddProxySubnetRule(prefix, portRanges)
+		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, portRanges)
 
-		logger.Info("Added target subnet %s with port ranges: %v", target.CIDR, target.PortRange)
+		logger.Info("Added target subnet %s with port ranges: %v", target.SourcePrefix, target.PortRange)
 	}
 
 	return nil
@@ -830,16 +831,10 @@ func (s *WireGuardService) reportPeerBandwidth() error {
 // filterReadOnlyFields removes read-only fields from WireGuard IPC configuration
 func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 	logger.Debug("Received message: %v", msg.Data)
-	var target Target
 
 	jsonData, err := json.Marshal(msg.Data)
 	if err != nil {
 		logger.Info("Error marshaling data: %v", err)
-		return
-	}
-
-	if err := json.Unmarshal(jsonData, &target); err != nil {
-		logger.Info("Error unmarshaling target data: %v", err)
 		return
 	}
 
@@ -848,23 +843,81 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 		return
 	}
 
-	prefix, err := netip.ParsePrefix(target.CIDR)
-	if err != nil {
-		logger.Info("Invalid CIDR %s: %v", target.CIDR, err)
+	// Try to unmarshal as array first
+	var targets []Target
+	if err := json.Unmarshal(jsonData, &targets); err != nil {
+		logger.Warn("Error unmarshaling target data: %v", err)
 		return
 	}
 
-	var portRanges []netstack2.PortRange
-	for _, pr := range target.PortRange {
-		portRanges = append(portRanges, netstack2.PortRange{
-			Min: pr.Min,
-			Max: pr.Max,
-		})
+	// Process all targets
+	for _, target := range targets {
+		sourcePrefix, err := netip.ParsePrefix(target.SourcePrefix)
+		if err != nil {
+			logger.Info("Invalid CIDR %s: %v", target.SourcePrefix, err)
+			continue
+		}
+
+		destPrefix, err := netip.ParsePrefix(target.DestPrefix)
+		if err != nil {
+			logger.Info("Invalid CIDR %s: %v", target.DestPrefix, err)
+			continue
+		}
+
+		var portRanges []netstack2.PortRange
+		for _, pr := range target.PortRange {
+			portRanges = append(portRanges, netstack2.PortRange{
+				Min: pr.Min,
+				Max: pr.Max,
+			})
+		}
+
+		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, portRanges)
+
+		logger.Info("Added target subnet %s with port ranges: %v", target.SourcePrefix, target.PortRange)
+	}
+}
+
+// filterReadOnlyFields removes read-only fields from WireGuard IPC configuration
+func (s *WireGuardService) handleRemoveTarget(msg websocket.WSMessage) {
+	logger.Debug("Received message: %v", msg.Data)
+
+	jsonData, err := json.Marshal(msg.Data)
+	if err != nil {
+		logger.Info("Error marshaling data: %v", err)
+		return
 	}
 
-	s.tnet.AddProxySubnetRule(prefix, portRanges)
+	if s.tnet == nil {
+		logger.Info("Netstack not initialized")
+		return
+	}
 
-	logger.Info("Added target subnet %s with port ranges: %v", target.CIDR, target.PortRange)
+	// Try to unmarshal as array first
+	var targets []Target
+	if err := json.Unmarshal(jsonData, &targets); err != nil {
+		logger.Warn("Error unmarshaling target data: %v", err)
+		return
+	}
+
+	// Process all targets
+	for _, target := range targets {
+		sourcePrefix, err := netip.ParsePrefix(target.SourcePrefix)
+		if err != nil {
+			logger.Info("Invalid CIDR %s: %v", target.SourcePrefix, err)
+			continue
+		}
+
+		destPrefix, err := netip.ParsePrefix(target.DestPrefix)
+		if err != nil {
+			logger.Info("Invalid CIDR %s: %v", target.DestPrefix, err)
+			continue
+		}
+
+		s.tnet.RemoveProxySubnetRule(sourcePrefix, destPrefix)
+
+		logger.Info("Removed target subnet %s", target.SourcePrefix)
+	}
 }
 
 func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
@@ -872,8 +925,8 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 
 	// you are going to get a oldTarget and a newTarget in the message
 	type UpdateTargetRequest struct {
-		OldTarget Target `json:"oldTarget"`
-		NewTarget Target `json:"newTarget"`
+		OldTargets []Target `json:"oldTargets"`
+		NewTargets []Target `json:"newTargets"`
 	}
 
 	jsonData, err := json.Marshal(msg.Data)
@@ -882,78 +935,59 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 		return
 	}
 
-	var request UpdateTargetRequest
-	if err := json.Unmarshal(jsonData, &request); err != nil {
-		logger.Info("Error unmarshaling data: %v", err)
-		return
-	}
-
 	if s.tnet == nil {
 		logger.Info("Netstack not initialized")
 		return
 	}
 
-	prefix, err := netip.ParsePrefix(request.OldTarget.CIDR)
-	if err != nil {
-		logger.Info("Invalid CIDR %s: %v", request.OldTarget.CIDR, err)
+	// Try to unmarshal as array first
+	var requests UpdateTargetRequest
+	if err := json.Unmarshal(jsonData, &requests); err != nil {
+		logger.Warn("Error unmarshaling target data: %v", err)
 		return
 	}
 
-	s.tnet.RemoveProxySubnetRule(prefix)
+	// Process all update requests
+	for _, target := range requests.OldTargets {
+		sourcePrefix, err := netip.ParsePrefix(target.SourcePrefix)
+		if err != nil {
+			logger.Info("Invalid CIDR %s: %v", target.SourcePrefix, err)
+			continue
+		}
 
-	// Now add the new target
-	newPrefix, err := netip.ParsePrefix(request.NewTarget.CIDR)
-	if err != nil {
-		logger.Info("Invalid CIDR %s: %v", request.NewTarget.CIDR, err)
-		return
+		destPrefix, err := netip.ParsePrefix(target.DestPrefix)
+		if err != nil {
+			logger.Info("Invalid CIDR %s: %v", target.DestPrefix, err)
+			continue
+		}
+
+		s.tnet.RemoveProxySubnetRule(sourcePrefix, destPrefix)
 	}
 
-	var portRanges []netstack2.PortRange
-	for _, pr := range request.NewTarget.PortRange {
-		portRanges = append(portRanges, netstack2.PortRange{
-			Min: pr.Min,
-			Max: pr.Max,
-		})
+	for _, target := range requests.NewTargets {
+		// Now add the new target
+		sourcePrefix, err := netip.ParsePrefix(target.SourcePrefix)
+		if err != nil {
+			logger.Info("Invalid CIDR %s: %v", target.SourcePrefix, err)
+			continue
+		}
+
+		destPrefix, err := netip.ParsePrefix(target.DestPrefix)
+		if err != nil {
+			logger.Info("Invalid CIDR %s: %v", target.DestPrefix, err)
+			continue
+		}
+
+		var portRanges []netstack2.PortRange
+		for _, pr := range target.PortRange {
+			portRanges = append(portRanges, netstack2.PortRange{
+				Min: pr.Min,
+				Max: pr.Max,
+			})
+		}
+
+		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, portRanges)
 	}
-
-	s.tnet.AddProxySubnetRule(newPrefix, portRanges)
-
-	logger.Info("Updated target subnet from %s to %s", request.OldTarget.CIDR, request.NewTarget.CIDR)
-}
-
-func (s *WireGuardService) handleRemoveTarget(msg websocket.WSMessage) {
-	logger.Debug("Received message: %v", msg.Data)
-
-	type RemoveTargetRequest struct {
-		CIDR string `json:"cidr"`
-	}
-
-	jsonData, err := json.Marshal(msg.Data)
-	if err != nil {
-		logger.Info("Error marshaling data: %v", err)
-		return
-	}
-
-	var request RemoveTargetRequest
-	if err := json.Unmarshal(jsonData, &request); err != nil {
-		logger.Info("Error unmarshaling data: %v", err)
-		return
-	}
-
-	if s.tnet == nil {
-		logger.Info("Netstack not initialized")
-		return
-	}
-
-	prefix, err := netip.ParsePrefix(request.CIDR)
-	if err != nil {
-		logger.Info("Invalid CIDR %s: %v", request.CIDR, err)
-		return
-	}
-
-	s.tnet.RemoveProxySubnetRule(prefix)
-
-	logger.Info("Removed target subnet %s", request.CIDR)
 }
 
 // filterReadOnlyFields removes read-only fields from WireGuard IPC configuration

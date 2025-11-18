@@ -173,10 +173,10 @@ func (m *Manager) runMultipleExitNodes(exitNodes []ExitNode) {
 		}
 	}
 
-	ticker := time.NewTicker(250 * time.Millisecond)
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	timeout := time.NewTimer(15 * time.Second)
+	timeout := time.NewTimer(5 * time.Second)
 	defer timeout.Stop()
 
 	for {
@@ -226,10 +226,10 @@ func (m *Manager) runSingleEndpoint(endpoint, serverPubKey string) {
 		logger.Warn("Failed to send initial hole punch: %v", err)
 	}
 
-	ticker := time.NewTicker(250 * time.Millisecond)
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	timeout := time.NewTimer(15 * time.Second)
+	timeout := time.NewTimer(5 * time.Second)
 	defer timeout.Stop()
 
 	for {

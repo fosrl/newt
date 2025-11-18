@@ -368,7 +368,7 @@ func main() {
 		tlsClientCAs = append(tlsClientCAs, tlsClientCAsFlag...)
 	}
 
-	logger.Init()
+	logger.Init(nil)
 	loggerLevel := util.ParseLogLevel(logLevel)
 	logger.GetLogger().SetLevel(loggerLevel)
 
