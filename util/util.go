@@ -2,6 +2,7 @@ package util
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -151,4 +152,50 @@ func MapToWireGuardLogLevel(level logger.LogLevel) int {
 	default:
 		return device.LogLevelSilent
 	}
+}
+
+// GetProtocol returns protocol number from IPv4 packet (fast path)
+func GetProtocol(packet []byte) (uint8, bool) {
+	if len(packet) < 20 {
+		return 0, false
+	}
+	version := packet[0] >> 4
+	if version == 4 {
+		return packet[9], true
+	} else if version == 6 {
+		if len(packet) < 40 {
+			return 0, false
+		}
+		return packet[6], true
+	}
+	return 0, false
+}
+
+// GetDestPort returns destination port from TCP/UDP packet (fast path)
+func GetDestPort(packet []byte) (uint16, bool) {
+	if len(packet) < 20 {
+		return 0, false
+	}
+
+	version := packet[0] >> 4
+	var headerLen int
+
+	if version == 4 {
+		ihl := packet[0] & 0x0F
+		headerLen = int(ihl) * 4
+		if len(packet) < headerLen+4 {
+			return 0, false
+		}
+	} else if version == 6 {
+		headerLen = 40
+		if len(packet) < headerLen+4 {
+			return 0, false
+		}
+	} else {
+		return 0, false
+	}
+
+	// Destination port is at bytes 2-3 of TCP/UDP header
+	port := binary.BigEndian.Uint16(packet[headerLen+2 : headerLen+4])
+	return port, true
 }

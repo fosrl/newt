@@ -180,9 +180,9 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 	wsClient.RegisterHandler("newt/wg/peer/add", service.handleAddPeer)
 	wsClient.RegisterHandler("newt/wg/peer/remove", service.handleRemovePeer)
 	wsClient.RegisterHandler("newt/wg/peer/update", service.handleUpdatePeer)
-	wsClient.RegisterHandler("newt/wg/target/add", service.handleAddTarget)
-	wsClient.RegisterHandler("newt/wg/target/remove", service.handleRemoveTarget)
-	wsClient.RegisterHandler("newt/wg/target/update", service.handleUpdateTarget)
+	wsClient.RegisterHandler("newt/wg/targets/add", service.handleAddTarget)
+	wsClient.RegisterHandler("newt/wg/targets/remove", service.handleRemoveTarget)
+	wsClient.RegisterHandler("newt/wg/targets/update", service.handleUpdateTarget)
 
 	return service, nil
 }
@@ -482,7 +482,7 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 
 		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, portRanges)
 
-		logger.Info("Added target subnet %s with port ranges: %v", target.SourcePrefix, target.PortRange)
+		logger.Info("Added target subnet from %s to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.PortRange)
 	}
 
 	return nil
@@ -874,7 +874,7 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 
 		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, portRanges)
 
-		logger.Info("Added target subnet %s with port ranges: %v", target.SourcePrefix, target.PortRange)
+		logger.Info("Added target subnet from %s to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.PortRange)
 	}
 }
 
@@ -916,7 +916,7 @@ func (s *WireGuardService) handleRemoveTarget(msg websocket.WSMessage) {
 
 		s.tnet.RemoveProxySubnetRule(sourcePrefix, destPrefix)
 
-		logger.Info("Removed target subnet %s", target.SourcePrefix)
+		logger.Info("Removed target subnet %s with destination %s", target.SourcePrefix, target.DestPrefix)
 	}
 }
 
@@ -962,6 +962,7 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 		}
 
 		s.tnet.RemoveProxySubnetRule(sourcePrefix, destPrefix)
+		logger.Info("Removed target subnet %s with destination %s", target.SourcePrefix, target.DestPrefix)
 	}
 
 	for _, target := range requests.NewTargets {
@@ -987,6 +988,7 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 		}
 
 		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, portRanges)
+		logger.Info("Added target subnet from %s to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.PortRange)
 	}
 }
 
