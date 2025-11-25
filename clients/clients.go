@@ -37,6 +37,7 @@ type WgConfig struct {
 type Target struct {
 	SourcePrefix string      `json:"sourcePrefix"`
 	DestPrefix   string      `json:"destPrefix"`
+	RewriteTo    string      `json:"rewriteTo,omitempty"`
 	PortRange    []PortRange `json:"portRange,omitempty"`
 }
 
@@ -472,6 +473,15 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 			return fmt.Errorf("invalid CIDR %s: %v", target.DestPrefix, err)
 		}
 
+		var rewriteTo netip.Prefix
+		if target.RewriteTo != "" {
+			rewriteTo, err = netip.ParsePrefix(target.RewriteTo)
+			if err != nil {
+				logger.Info("Invalid CIDR %s: %v", target.RewriteTo, err)
+				continue
+			}
+		}
+
 		var portRanges []netstack2.PortRange
 		for _, pr := range target.PortRange {
 			portRanges = append(portRanges, netstack2.PortRange{
@@ -480,7 +490,7 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 			})
 		}
 
-		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, portRanges)
+		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, rewriteTo, portRanges)
 
 		logger.Info("Added target subnet from %s to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.PortRange)
 	}
@@ -864,6 +874,15 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 			continue
 		}
 
+		var rewriteTo netip.Prefix
+		if target.RewriteTo != "" {
+			rewriteTo, err = netip.ParsePrefix(target.RewriteTo)
+			if err != nil {
+				logger.Info("Invalid CIDR %s: %v", target.RewriteTo, err)
+				continue
+			}
+		}
+
 		var portRanges []netstack2.PortRange
 		for _, pr := range target.PortRange {
 			portRanges = append(portRanges, netstack2.PortRange{
@@ -872,7 +891,7 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 			})
 		}
 
-		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, portRanges)
+		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, rewriteTo, portRanges)
 
 		logger.Info("Added target subnet from %s to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.PortRange)
 	}
@@ -979,6 +998,15 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 			continue
 		}
 
+		var rewriteTo netip.Prefix
+		if target.RewriteTo != "" {
+			rewriteTo, err = netip.ParsePrefix(target.RewriteTo)
+			if err != nil {
+				logger.Info("Invalid CIDR %s: %v", target.RewriteTo, err)
+				continue
+			}
+		}
+
 		var portRanges []netstack2.PortRange
 		for _, pr := range target.PortRange {
 			portRanges = append(portRanges, netstack2.PortRange{
@@ -987,7 +1015,7 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 			})
 		}
 
-		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, portRanges)
+		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, rewriteTo, portRanges)
 		logger.Info("Added target subnet from %s to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.PortRange)
 	}
 }

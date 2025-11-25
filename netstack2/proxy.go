@@ -27,6 +27,7 @@ type PortRange struct {
 type SubnetRule struct {
 	SourcePrefix netip.Prefix // Source IP prefix (who is sending)
 	DestPrefix   netip.Prefix // Destination IP prefix (where it's going)
+	RewriteTo    netip.Prefix // Optional rewrite address for destination
 	PortRanges   []PortRange  // empty slice means all ports allowed
 }
 
@@ -51,7 +52,7 @@ func NewSubnetLookup() *SubnetLookup {
 
 // AddSubnet adds a subnet rule with source and destination prefixes and optional port restrictions
 // If portRanges is nil or empty, all ports are allowed for this subnet
-func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, portRanges []PortRange) {
+func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix, rewriteTo netip.Prefix, portRanges []PortRange) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
@@ -63,6 +64,7 @@ func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, portRan
 	sl.rules[key] = &SubnetRule{
 		SourcePrefix: sourcePrefix,
 		DestPrefix:   destPrefix,
+		RewriteTo:    rewriteTo,
 		PortRanges:   portRanges,
 	}
 }
@@ -200,11 +202,11 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 // sourcePrefix: The IP prefix of the peer sending the data
 // destPrefix: The IP prefix of the destination
 // If portRanges is nil or empty, all ports are allowed for this subnet
-func (p *ProxyHandler) AddSubnetRule(sourcePrefix, destPrefix netip.Prefix, portRanges []PortRange) {
+func (p *ProxyHandler) AddSubnetRule(sourcePrefix, destPrefix, rewriteTo netip.Prefix, portRanges []PortRange) {
 	if p == nil || !p.enabled {
 		return
 	}
-	p.subnetLookup.AddSubnet(sourcePrefix, destPrefix, portRanges)
+	p.subnetLookup.AddSubnet(sourcePrefix, destPrefix, rewriteTo, portRanges)
 }
 
 // RemoveSubnetRule removes a subnet from the proxy handler
