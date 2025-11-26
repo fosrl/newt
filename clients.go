@@ -1,14 +1,12 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/fosrl/newt/clients"
 	wgnetstack "github.com/fosrl/newt/clients"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/netstack2"
-	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/websocket"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 
@@ -106,13 +104,15 @@ func clientsOnConnect() {
 	}
 }
 
-func clientsAddProxyTarget(pm *proxy.ProxyManager, tunnelIp string) {
+// clientsStartDirectRelay starts a direct UDP relay from the main tunnel netstack
+// to the clients' WireGuard, bypassing the proxy for better performance.
+func clientsStartDirectRelay(tunnelIP string) {
 	if !ready {
 		return
 	}
-	// add a udp proxy for localost and the wgService port
-	// TODO: make sure this port is not used in a target
 	if wgService != nil {
-		pm.AddTarget("udp", tunnelIp, int(wgService.Port), fmt.Sprintf("127.0.0.1:%d", wgService.Port))
+		if err := wgService.StartDirectUDPRelay(tunnelIP); err != nil {
+			logger.Error("Failed to start direct UDP relay: %v", err)
+		}
 	}
 }

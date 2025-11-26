@@ -742,7 +742,8 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			// }
 		}
 
-		clientsAddProxyTarget(pm, wgData.TunnelIP)
+		// Start direct UDP relay from main tunnel to clients' WireGuard (bypasses proxy)
+		clientsStartDirectRelay(wgData.TunnelIP)
 
 		if err := healthMonitor.AddTargets(wgData.HealthCheckTargets); err != nil {
 			logger.Error("Failed to bulk add health check targets: %v", err)

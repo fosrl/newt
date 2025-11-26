@@ -98,6 +98,9 @@ type WireGuardService struct {
 	sharedBind         *bind.SharedBind
 	holePunchManager   *holepunch.Manager
 	useNativeInterface bool
+	// Direct UDP relay from main tunnel to clients' WireGuard
+	directRelayStop chan struct{}
+	directRelayWg   sync.WaitGroup
 }
 
 func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo string, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool) (*WireGuardService, error) {
@@ -211,6 +214,9 @@ func (s *WireGuardService) Close() {
 		s.stopGetConfig = nil
 	}
 
+	// Stop the direct UDP relay first
+	s.StopDirectUDPRelay()
+
 	// Stop hole punch manager
 	if s.holePunchManager != nil {
 		s.holePunchManager.Stop()
@@ -288,6 +294,114 @@ func (s *WireGuardService) StartHolepunch(publicKey string, endpoint string) {
 	logger.Info("Starting hole punch to %s with public key: %s", endpoint, publicKey)
 	if err := s.holePunchManager.StartSingleEndpoint(endpoint, publicKey); err != nil {
 		logger.Warn("Failed to start hole punch: %v", err)
+	}
+}
+
+// StartDirectUDPRelay starts a direct UDP relay from the main tunnel netstack to the clients' WireGuard.
+// This bypasses the proxy by listening on the main tunnel's netstack and forwarding packets
+// directly to the SharedBind that feeds the clients' WireGuard device.
+// tunnelIP is the IP address to listen on within the main tunnel's netstack.
+func (s *WireGuardService) StartDirectUDPRelay(tunnelIP string) error {
+	if s.othertnet == nil {
+		return fmt.Errorf("main tunnel netstack (othertnet) not set")
+	}
+	if s.sharedBind == nil {
+		return fmt.Errorf("shared bind not initialized")
+	}
+
+	// Stop any existing relay
+	s.StopDirectUDPRelay()
+
+	s.directRelayStop = make(chan struct{})
+
+	// Parse the tunnel IP
+	ip := net.ParseIP(tunnelIP)
+	if ip == nil {
+		return fmt.Errorf("invalid tunnel IP: %s", tunnelIP)
+	}
+
+	// Listen on the main tunnel netstack for UDP packets destined for the clients' WireGuard port
+	listenAddr := &net.UDPAddr{
+		IP:   ip,
+		Port: int(s.Port),
+	}
+
+	// Use othertnet (main tunnel's netstack) to listen
+	listener, err := s.othertnet.ListenUDP(listenAddr)
+	if err != nil {
+		return fmt.Errorf("failed to listen on main tunnel netstack: %v", err)
+	}
+
+	logger.Info("Started direct UDP relay on %s:%d (bypassing proxy)", tunnelIP, s.Port)
+
+	// Start the relay goroutine
+	s.directRelayWg.Add(1)
+	go s.runDirectUDPRelay(listener)
+
+	return nil
+}
+
+// runDirectUDPRelay handles the UDP relay between the main tunnel netstack and the SharedBind
+func (s *WireGuardService) runDirectUDPRelay(listener net.PacketConn) {
+	defer s.directRelayWg.Done()
+	defer listener.Close()
+
+	logger.Info("Direct UDP relay started (injecting directly into SharedBind)")
+
+	buf := make([]byte, 65535) // Max UDP packet size
+
+	for {
+		select {
+		case <-s.directRelayStop:
+			logger.Info("Stopping direct UDP relay")
+			return
+		default:
+		}
+
+		// Set a read deadline so we can check for stop signal periodically
+		listener.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+
+		n, remoteAddr, err := listener.ReadFrom(buf)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue // Just a timeout, check for stop and try again
+			}
+			if s.directRelayStop != nil {
+				select {
+				case <-s.directRelayStop:
+					return // Stopped
+				default:
+				}
+			}
+			logger.Debug("Direct UDP relay read error: %v", err)
+			continue
+		}
+
+		// Get the source address
+		var srcAddrPort netip.AddrPort
+		if udpAddr, ok := remoteAddr.(*net.UDPAddr); ok {
+			srcAddrPort = udpAddr.AddrPort()
+		} else {
+			logger.Debug("Unexpected address type in relay: %T", remoteAddr)
+			continue
+		}
+
+		// Inject the packet directly into the SharedBind
+		if err := s.sharedBind.InjectPacket(buf[:n], srcAddrPort); err != nil {
+			logger.Debug("Failed to inject packet into SharedBind: %v", err)
+			continue
+		}
+
+		logger.Debug("Injected %d bytes from %s into SharedBind", n, srcAddrPort.String())
+	}
+}
+
+// StopDirectUDPRelay stops the direct UDP relay
+func (s *WireGuardService) StopDirectUDPRelay() {
+	if s.directRelayStop != nil {
+		close(s.directRelayStop)
+		s.directRelayWg.Wait()
+		s.directRelayStop = nil
 	}
 }
 
