@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,9 +19,11 @@ import (
 	"github.com/fosrl/newt/holepunch"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/netstack2"
+	"github.com/fosrl/newt/network"
 	"github.com/fosrl/newt/util"
 	"github.com/fosrl/newt/websocket"
 	"golang.zx2c4.com/wireguard/device"
+	"golang.zx2c4.com/wireguard/ipc"
 	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -92,11 +95,12 @@ type WireGuardService struct {
 	// Proxy manager for tunnel
 	TunnelIP string
 	// Shared bind and holepunch manager
-	sharedBind       *bind.SharedBind
-	holePunchManager *holepunch.Manager
+	sharedBind         *bind.SharedBind
+	holePunchManager   *holepunch.Manager
+	useNativeInterface bool
 }
 
-func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo string, host string, newtId string, wsClient *websocket.Client, dns string) (*WireGuardService, error) {
+func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo string, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool) (*WireGuardService, error) {
 	var key wgtypes.Key
 	var err error
 
@@ -159,17 +163,18 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 	dnsAddrs := []netip.Addr{netip.MustParseAddr(dns)}
 
 	service := &WireGuardService{
-		interfaceName: interfaceName,
-		mtu:           mtu,
-		client:        wsClient,
-		key:           key,
-		keyFilePath:   generateAndSaveKeyTo,
-		newtId:        newtId,
-		host:          host,
-		lastReadings:  make(map[string]PeerReading),
-		Port:          port,
-		dns:           dnsAddrs,
-		sharedBind:    sharedBind,
+		interfaceName:      interfaceName,
+		mtu:                mtu,
+		client:             wsClient,
+		key:                key,
+		keyFilePath:        generateAndSaveKeyTo,
+		newtId:             newtId,
+		host:               host,
+		lastReadings:       make(map[string]PeerReading),
+		Port:               port,
+		dns:                dnsAddrs,
+		sharedBind:         sharedBind,
+		useNativeInterface: useNativeInterface,
 	}
 
 	// Create the holepunch manager with ResolveDomain function
@@ -200,7 +205,7 @@ func (s *WireGuardService) SetOthertnet(tnet *netstack.Net) {
 	s.othertnet = tnet
 }
 
-func (s *WireGuardService) Close(rm bool) {
+func (s *WireGuardService) Close() {
 	if s.stopGetConfig != nil {
 		s.stopGetConfig()
 		s.stopGetConfig = nil
@@ -356,11 +361,94 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		s.holePunchManager.Stop()
 	}
 
-	// Parse the IP address from the config
-	// tunnelIP := netip.MustParseAddr(wgconfig.IpAddress)
+	var err error
+
+	if s.useNativeInterface {
+		// Create native TUN device
+		var interfaceName = s.interfaceName
+		if runtime.GOOS == "darwin" {
+			interfaceName, err = network.FindUnusedUTUN()
+			if err != nil {
+				s.mu.Unlock()
+				return fmt.Errorf("failed to find unused utun: %v", err)
+			}
+		}
+
+		s.tun, err = tun.CreateTUN(interfaceName, s.mtu)
+		if err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("failed to create native TUN device: %v", err)
+		}
+
+		// Get the real interface name (may differ on some platforms)
+		if realName, err := s.tun.Name(); err == nil {
+			interfaceName = realName
+		}
+
+		s.TunnelIP = tunnelIP.String()
+		// s.tnet is nil for native interface - proxy features not available
+		s.tnet = nil
+
+		// Create WireGuard device using the shared bind
+		s.device = device.NewDevice(s.tun, s.sharedBind, device.NewLogger(
+			device.LogLevelSilent,
+			"wireguard: ",
+		))
+
+		fileUAPI, err := func() (*os.File, error) {
+			return ipc.UAPIOpen(interfaceName)
+		}()
+		if err != nil {
+			logger.Error("UAPI listen error: %v", err)
+		}
+
+		uapiListener, err := ipc.UAPIListen(interfaceName, fileUAPI)
+		if err != nil {
+			logger.Error("Failed to listen on uapi socket: %v", err)
+			os.Exit(1)
+		}
+
+		go func() {
+			for {
+				conn, err := uapiListener.Accept()
+				if err != nil {
+
+					return
+				}
+				go s.device.IpcHandle(conn)
+			}
+		}()
+		logger.Info("UAPI listener started")
+
+		// Configure WireGuard with private key
+		config := fmt.Sprintf("private_key=%s", util.FixKey(s.key.String()))
+
+		err = s.device.IpcSet(config)
+		if err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("failed to configure WireGuard device: %v", err)
+		}
+
+		// Bring up the device
+		err = s.device.Up()
+		if err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("failed to bring up WireGuard device: %v", err)
+		}
+
+		// Configure the network interface with IP address
+		if err := network.ConfigureInterface(interfaceName, wgconfig.IpAddress, s.mtu); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("failed to configure interface: %v", err)
+		}
+
+		logger.Info("WireGuard native device created and configured on %s", interfaceName)
+
+		s.mu.Unlock()
+		return nil
+	}
 
 	// Create TUN device and network stack using netstack
-	var err error
 	s.tun, s.tnet, err = netstack2.CreateNetTUNWithOptions(
 		[]netip.Addr{tunnelIP},
 		s.dns,
@@ -382,8 +470,6 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		device.LogLevelSilent, // Use silent logging by default - could be made configurable
 		"wireguard: ",
 	))
-
-	// logger.Info("Private key is %s", fixKey(s.key.String()))
 
 	// Configure WireGuard with private key
 	config := fmt.Sprintf("private_key=%s", util.FixKey(s.key.String()))
@@ -459,7 +545,9 @@ func (s *WireGuardService) ensureWireguardPeers(peers []Peer) error {
 
 func (s *WireGuardService) ensureTargets(targets []Target) error {
 	if s.tnet == nil {
-		return fmt.Errorf("netstack not initialized")
+		// Native interface mode - proxy features not available, skip silently
+		logger.Debug("Skipping target configuration - using native interface (no proxy support)")
+		return nil
 	}
 
 	for _, target := range targets {
@@ -849,7 +937,8 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 	}
 
 	if s.tnet == nil {
-		logger.Info("Netstack not initialized")
+		// Native interface mode - proxy features not available, skip silently
+		logger.Debug("Skipping add target - using native interface (no proxy support)")
 		return
 	}
 
@@ -908,7 +997,8 @@ func (s *WireGuardService) handleRemoveTarget(msg websocket.WSMessage) {
 	}
 
 	if s.tnet == nil {
-		logger.Info("Netstack not initialized")
+		// Native interface mode - proxy features not available, skip silently
+		logger.Debug("Skipping remove target - using native interface (no proxy support)")
 		return
 	}
 
@@ -955,7 +1045,8 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 	}
 
 	if s.tnet == nil {
-		logger.Info("Netstack not initialized")
+		// Native interface mode - proxy features not available, skip silently
+		logger.Debug("Skipping update target - using native interface (no proxy support)")
 		return
 	}
 

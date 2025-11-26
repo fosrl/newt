@@ -29,19 +29,9 @@ func setupClients(client *websocket.Client) {
 
 	host = strings.TrimSuffix(host, "/")
 
-	if useNativeInterface {
-		// setupClientsNative(client, host)
-	} else {
-		setupClientsNetstack(client, host)
-	}
-
-	ready = true
-}
-
-func setupClientsNetstack(client *websocket.Client, host string) {
 	logger.Info("Setting up clients with netstack2...")
 	// Create WireGuard service
-	wgService, err = wgnetstack.NewWireGuardService(interfaceName, mtuInt, generateAndSaveKeyTo, host, id, client, "9.9.9.9")
+	wgService, err = wgnetstack.NewWireGuardService(interfaceName, mtuInt, generateAndSaveKeyTo, host, id, client, "9.9.9.9", useNativeInterface)
 	if err != nil {
 		logger.Fatal("Failed to create WireGuard service: %v", err)
 	}
@@ -66,6 +56,8 @@ func setupClientsNetstack(client *websocket.Client, host string) {
 	client.OnTokenUpdate(func(token string) {
 		wgService.SetToken(token)
 	})
+
+	ready = true
 }
 
 func setDownstreamTNetstack(tnet *netstack.Net) {
@@ -77,11 +69,9 @@ func setDownstreamTNetstack(tnet *netstack.Net) {
 func closeClients() {
 	logger.Info("Closing clients...")
 	if wgService != nil {
-		wgService.Close(!keepInterface)
+		wgService.Close()
 		wgService = nil
 	}
-
-	// closeWgServiceNative()
 
 	if wgTesterServer != nil {
 		wgTesterServer.Stop()
@@ -105,8 +95,6 @@ func clientsHandleNewtConnection(publicKey string, endpoint string) {
 	if wgService != nil {
 		wgService.StartHolepunch(publicKey, endpoint)
 	}
-
-	// clientsHandleNewtConnectionNative(publicKey, endpoint)
 }
 
 func clientsOnConnect() {
@@ -116,8 +104,6 @@ func clientsOnConnect() {
 	if wgService != nil {
 		wgService.LoadRemoteConfig()
 	}
-
-	// clientsOnConnectNative()
 }
 
 func clientsAddProxyTarget(pm *proxy.ProxyManager, tunnelIp string) {
@@ -129,6 +115,4 @@ func clientsAddProxyTarget(pm *proxy.ProxyManager, tunnelIp string) {
 	if wgService != nil {
 		pm.AddTarget("udp", tunnelIp, int(wgService.Port), fmt.Sprintf("127.0.0.1:%d", wgService.Port))
 	}
-
-	// clientsAddProxyTargetNative(pm, tunnelIp)
 }

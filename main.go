@@ -117,7 +117,6 @@ var (
 	logLevel                           string
 	interfaceName                      string
 	generateAndSaveKeyTo               string
-	keepInterface                      bool
 	acceptClients                      bool
 	updownScript                       string
 	dockerSocket                       string
@@ -178,8 +177,6 @@ func main() {
 	regionEnv := os.Getenv("NEWT_REGION")
 	asyncBytesEnv := os.Getenv("NEWT_METRICS_ASYNC_BYTES")
 
-	keepInterfaceEnv := os.Getenv("KEEP_INTERFACE")
-	keepInterface = keepInterfaceEnv == "true"
 	acceptClientsEnv := os.Getenv("ACCEPT_CLIENTS")
 	acceptClients = acceptClientsEnv == "true"
 	useNativeInterfaceEnv := os.Getenv("USE_NATIVE_INTERFACE")
@@ -242,9 +239,6 @@ func main() {
 	}
 	if generateAndSaveKeyTo == "" {
 		flag.StringVar(&generateAndSaveKeyTo, "generateAndSaveKeyTo", "", "Path to save generated private key")
-	}
-	if keepInterfaceEnv == "" {
-		flag.BoolVar(&keepInterface, "keep-interface", false, "Keep the WireGuard interface")
 	}
 	if useNativeInterfaceEnv == "" {
 		flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface (requires WireGuard kernel module) and linux")
