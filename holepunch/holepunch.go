@@ -42,6 +42,8 @@ func NewManager(sharedBind *bind.SharedBind, ID string, clientType string) *Mana
 	}
 }
 
+const sendHolepunchInterval = 15 * time.Second
+
 // SetToken updates the authentication token used for hole punching
 func (m *Manager) SetToken(token string) {
 	m.mu.Lock()
@@ -173,19 +175,13 @@ func (m *Manager) runMultipleExitNodes(exitNodes []ExitNode) {
 		}
 	}
 
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(sendHolepunchInterval)
 	defer ticker.Stop()
-
-	timeout := time.NewTimer(5 * time.Second)
-	defer timeout.Stop()
 
 	for {
 		select {
 		case <-m.stopChan:
 			logger.Debug("Hole punch stopped by signal")
-			return
-		case <-timeout.C:
-			logger.Debug("Hole punch timeout reached")
 			return
 		case <-ticker.C:
 			// Send hole punch to all exit nodes
@@ -226,19 +222,13 @@ func (m *Manager) runSingleEndpoint(endpoint, serverPubKey string) {
 		logger.Warn("Failed to send initial hole punch: %v", err)
 	}
 
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(sendHolepunchInterval)
 	defer ticker.Stop()
-
-	timeout := time.NewTimer(5 * time.Second)
-	defer timeout.Stop()
 
 	for {
 		select {
 		case <-m.stopChan:
 			logger.Debug("Hole punch stopped by signal")
-			return
-		case <-timeout.C:
-			logger.Debug("Hole punch timeout reached")
 			return
 		case <-ticker.C:
 			if err := m.sendHolePunch(remoteAddr, serverPubKey); err != nil {
