@@ -422,3 +422,184 @@ func TestParseEndpoint(t *testing.T) {
 		})
 	}
 }
+
+// TestNetstackRouting tests that packets from netstack endpoints are routed back through netstack
+func TestNetstackRouting(t *testing.T) {
+	// Create the SharedBind with a physical UDP socket
+	physicalConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("Failed to create physical UDP connection: %v", err)
+	}
+
+	sharedBind, err := New(physicalConn)
+	if err != nil {
+		t.Fatalf("Failed to create SharedBind: %v", err)
+	}
+	defer sharedBind.Close()
+
+	// Create a mock "netstack" connection (just another UDP socket for testing)
+	netstackConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("Failed to create netstack UDP connection: %v", err)
+	}
+	defer netstackConn.Close()
+
+	// Set the netstack connection
+	sharedBind.SetNetstackConn(netstackConn)
+
+	// Create a "client" that would receive packets
+	clientConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("Failed to create client UDP connection: %v", err)
+	}
+	defer clientConn.Close()
+
+	clientAddr := clientConn.LocalAddr().(*net.UDPAddr)
+	clientAddrPort := clientAddr.AddrPort()
+
+	// Inject a packet from the "netstack" source - this should track the endpoint
+	testData := []byte("test packet from netstack")
+	err = sharedBind.InjectPacket(testData, clientAddrPort)
+	if err != nil {
+		t.Fatalf("InjectPacket failed: %v", err)
+	}
+
+	// Now when we send a response to this endpoint, it should go through netstack
+	endpoint := &wgConn.StdNetEndpoint{AddrPort: clientAddrPort}
+	responseData := []byte("response packet")
+	err = sharedBind.Send([][]byte{responseData}, endpoint)
+	if err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	// The packet should be received by the client from the netstack connection
+	buf := make([]byte, 1024)
+	clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, fromAddr, err := clientConn.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("Failed to receive response: %v", err)
+	}
+
+	if string(buf[:n]) != string(responseData) {
+		t.Errorf("Expected to receive %q, got %q", responseData, buf[:n])
+	}
+
+	// Verify the response came from the netstack connection, not the physical one
+	netstackAddr := netstackConn.LocalAddr().(*net.UDPAddr)
+	if fromAddr.Port != netstackAddr.Port {
+		t.Errorf("Expected response from netstack port %d, got %d", netstackAddr.Port, fromAddr.Port)
+	}
+}
+
+// TestSocketRouting tests that packets from socket endpoints are routed through socket
+func TestSocketRouting(t *testing.T) {
+	// Create the SharedBind with a physical UDP socket
+	physicalConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("Failed to create physical UDP connection: %v", err)
+	}
+
+	sharedBind, err := New(physicalConn)
+	if err != nil {
+		t.Fatalf("Failed to create SharedBind: %v", err)
+	}
+	defer sharedBind.Close()
+
+	// Create a mock "netstack" connection
+	netstackConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("Failed to create netstack UDP connection: %v", err)
+	}
+	defer netstackConn.Close()
+
+	// Set the netstack connection
+	sharedBind.SetNetstackConn(netstackConn)
+
+	// Create a "client" that would receive packets (this simulates a hole-punched client)
+	clientConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("Failed to create client UDP connection: %v", err)
+	}
+	defer clientConn.Close()
+
+	clientAddr := clientConn.LocalAddr().(*net.UDPAddr)
+	clientAddrPort := clientAddr.AddrPort()
+
+	// Don't inject from netstack - this endpoint is NOT tracked as netstack-sourced
+	// So Send should use the physical socket
+
+	endpoint := &wgConn.StdNetEndpoint{AddrPort: clientAddrPort}
+	responseData := []byte("response packet via socket")
+	err = sharedBind.Send([][]byte{responseData}, endpoint)
+	if err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	// The packet should be received by the client from the physical connection
+	buf := make([]byte, 1024)
+	clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, fromAddr, err := clientConn.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("Failed to receive response: %v", err)
+	}
+
+	if string(buf[:n]) != string(responseData) {
+		t.Errorf("Expected to receive %q, got %q", responseData, buf[:n])
+	}
+
+	// Verify the response came from the physical connection, not the netstack one
+	physicalAddr := physicalConn.LocalAddr().(*net.UDPAddr)
+	if fromAddr.Port != physicalAddr.Port {
+		t.Errorf("Expected response from physical port %d, got %d", physicalAddr.Port, fromAddr.Port)
+	}
+}
+
+// TestClearNetstackConn tests that clearing the netstack connection works correctly
+func TestClearNetstackConn(t *testing.T) {
+	physicalConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("Failed to create physical UDP connection: %v", err)
+	}
+
+	sharedBind, err := New(physicalConn)
+	if err != nil {
+		t.Fatalf("Failed to create SharedBind: %v", err)
+	}
+	defer sharedBind.Close()
+
+	// Set a netstack connection
+	netstackConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("Failed to create netstack UDP connection: %v", err)
+	}
+	defer netstackConn.Close()
+
+	sharedBind.SetNetstackConn(netstackConn)
+
+	// Inject a packet to track an endpoint
+	testAddrPort := netip.MustParseAddrPort("192.168.1.100:51820")
+	err = sharedBind.InjectPacket([]byte("test"), testAddrPort)
+	if err != nil {
+		t.Fatalf("InjectPacket failed: %v", err)
+	}
+
+	// Verify the endpoint is tracked
+	_, tracked := sharedBind.netstackEndpoints.Load(testAddrPort.String())
+	if !tracked {
+		t.Error("Expected endpoint to be tracked as netstack-sourced")
+	}
+
+	// Clear the netstack connection
+	sharedBind.ClearNetstackConn()
+
+	// Verify the netstack connection is cleared
+	if sharedBind.GetNetstackConn() != nil {
+		t.Error("Expected netstack connection to be nil after clear")
+	}
+
+	// Verify the tracked endpoints are cleared
+	_, stillTracked := sharedBind.netstackEndpoints.Load(testAddrPort.String())
+	if stillTracked {
+		t.Error("Expected endpoint tracking to be cleared")
+	}
+}

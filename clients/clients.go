@@ -99,8 +99,10 @@ type WireGuardService struct {
 	holePunchManager   *holepunch.Manager
 	useNativeInterface bool
 	// Direct UDP relay from main tunnel to clients' WireGuard
-	directRelayStop chan struct{}
-	directRelayWg   sync.WaitGroup
+	directRelayStop    chan struct{}
+	directRelayWg      sync.WaitGroup
+	netstackListener   net.PacketConn
+	netstackListenerMu sync.Mutex
 }
 
 func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo string, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool) (*WireGuardService, error) {
@@ -300,6 +302,7 @@ func (s *WireGuardService) StartHolepunch(publicKey string, endpoint string) {
 // StartDirectUDPRelay starts a direct UDP relay from the main tunnel netstack to the clients' WireGuard.
 // This bypasses the proxy by listening on the main tunnel's netstack and forwarding packets
 // directly to the SharedBind that feeds the clients' WireGuard device.
+// Responses are automatically routed back through the netstack by the SharedBind.
 // tunnelIP is the IP address to listen on within the main tunnel's netstack.
 func (s *WireGuardService) StartDirectUDPRelay(tunnelIP string) error {
 	if s.othertnet == nil {
@@ -332,21 +335,33 @@ func (s *WireGuardService) StartDirectUDPRelay(tunnelIP string) error {
 		return fmt.Errorf("failed to listen on main tunnel netstack: %v", err)
 	}
 
-	logger.Info("Started direct UDP relay on %s:%d (bypassing proxy)", tunnelIP, s.Port)
+	// Store the listener reference so we can close it later
+	s.netstackListenerMu.Lock()
+	s.netstackListener = listener
+	s.netstackListenerMu.Unlock()
 
-	// Start the relay goroutine
+	// Set the netstack connection on the SharedBind so responses go back through the tunnel
+	s.sharedBind.SetNetstackConn(listener)
+
+	logger.Info("Started direct UDP relay on %s:%d (bidirectional via SharedBind)", tunnelIP, s.Port)
+
+	// Start the relay goroutine to read from netstack and inject into SharedBind
 	s.directRelayWg.Add(1)
 	go s.runDirectUDPRelay(listener)
 
 	return nil
 }
 
-// runDirectUDPRelay handles the UDP relay between the main tunnel netstack and the SharedBind
+// runDirectUDPRelay handles receiving UDP packets from the main tunnel netstack
+// and injecting them into the SharedBind for processing by WireGuard.
+// Responses are handled automatically by SharedBind.Send() which routes them
+// back through the netstack connection.
 func (s *WireGuardService) runDirectUDPRelay(listener net.PacketConn) {
 	defer s.directRelayWg.Done()
-	defer listener.Close()
+	// Note: Don't close listener here - it's also used by SharedBind for sending responses
+	// It will be closed when the relay is stopped
 
-	logger.Info("Direct UDP relay started (injecting directly into SharedBind)")
+	logger.Info("Direct UDP relay started (bidirectional through SharedBind)")
 
 	buf := make([]byte, 65535) // Max UDP packet size
 
@@ -386,23 +401,36 @@ func (s *WireGuardService) runDirectUDPRelay(listener net.PacketConn) {
 			continue
 		}
 
-		// Inject the packet directly into the SharedBind
+		// Inject the packet directly into the SharedBind (also tracks this endpoint as netstack-sourced)
 		if err := s.sharedBind.InjectPacket(buf[:n], srcAddrPort); err != nil {
 			logger.Debug("Failed to inject packet into SharedBind: %v", err)
 			continue
 		}
 
-		logger.Debug("Injected %d bytes from %s into SharedBind", n, srcAddrPort.String())
+		logger.Debug("Relayed %d bytes from %s into WireGuard", n, srcAddrPort.String())
 	}
 }
 
-// StopDirectUDPRelay stops the direct UDP relay
+// StopDirectUDPRelay stops the direct UDP relay and closes the netstack listener
 func (s *WireGuardService) StopDirectUDPRelay() {
 	if s.directRelayStop != nil {
 		close(s.directRelayStop)
 		s.directRelayWg.Wait()
 		s.directRelayStop = nil
 	}
+
+	// Clear the netstack connection from SharedBind so responses don't try to use it
+	if s.sharedBind != nil {
+		s.sharedBind.ClearNetstackConn()
+	}
+
+	// Close the netstack listener
+	s.netstackListenerMu.Lock()
+	if s.netstackListener != nil {
+		s.netstackListener.Close()
+		s.netstackListener = nil
+	}
+	s.netstackListenerMu.Unlock()
 }
 
 func (s *WireGuardService) LoadRemoteConfig() error {
