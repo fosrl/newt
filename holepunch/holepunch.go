@@ -12,7 +12,7 @@ import (
 	"github.com/fosrl/newt/util"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"
-	"golang.org/x/exp/rand"
+	mrand "golang.org/x/exp/rand"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -559,7 +559,7 @@ func encryptPayload(payload []byte, serverPublicKey string) (interface{}, error)
 
 	// Generate a random nonce
 	nonce := make([]byte, aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
+	if _, err := mrand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("failed to generate nonce: %v", err)
 	}
 

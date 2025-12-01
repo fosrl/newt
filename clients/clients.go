@@ -148,7 +148,6 @@ func NewWireGuardService(interfaceName string, mtu int, host string, newtId stri
 		mtu:                mtu,
 		client:             wsClient,
 		key:                key,
-		keyFilePath:        generateAndSaveKeyTo,
 		newtId:             newtId,
 		host:               host,
 		lastReadings:       make(map[string]PeerReading),

@@ -3,6 +3,7 @@
 package bind
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"net/netip"
@@ -13,6 +14,30 @@ import (
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 	wgConn "golang.zx2c4.com/wireguard/conn"
+)
+
+// Magic packet constants for connection testing
+// These packets are intercepted by SharedBind and responded to directly,
+// without being passed to the WireGuard device.
+var (
+	// MagicTestRequest is the prefix for a test request packet
+	// Format: PANGOLIN_TEST_REQ + 8 bytes of random data (for echo)
+	MagicTestRequest = []byte("PANGOLIN_TEST_REQ")
+
+	// MagicTestResponse is the prefix for a test response packet
+	// Format: PANGOLIN_TEST_RSP + 8 bytes echoed from request
+	MagicTestResponse = []byte("PANGOLIN_TEST_RSP")
+)
+
+const (
+	// MagicPacketDataLen is the length of random data included in test packets
+	MagicPacketDataLen = 8
+
+	// MagicTestRequestLen is the total length of a test request packet
+	MagicTestRequestLen = 17 + MagicPacketDataLen // len("PANGOLIN_TEST_REQ") + 8
+
+	// MagicTestResponseLen is the total length of a test response packet
+	MagicTestResponseLen = 17 + MagicPacketDataLen // len("PANGOLIN_TEST_RSP") + 8
 )
 
 // PacketSource identifies where a packet came from
@@ -115,7 +140,13 @@ type SharedBind struct {
 
 	// Shutdown signal for receive goroutines
 	closeChan chan struct{}
+
+	// Callback for magic test responses (used for holepunch testing)
+	magicResponseCallback atomic.Pointer[func(addr netip.AddrPort, echoData []byte)]
 }
+
+// MagicResponseCallback is the function signature for magic packet response callbacks
+type MagicResponseCallback func(addr netip.AddrPort, echoData []byte)
 
 // New creates a new SharedBind from an existing UDP connection.
 // The SharedBind takes ownership of the connection and will close it
@@ -273,6 +304,21 @@ func (b *SharedBind) IsClosed() bool {
 	return b.closed.Load()
 }
 
+// SetMagicResponseCallback sets a callback function that will be called when
+// a magic test response packet is received. This is used for holepunch testing.
+// Pass nil to clear the callback.
+func (b *SharedBind) SetMagicResponseCallback(callback MagicResponseCallback) {
+	if callback == nil {
+		b.magicResponseCallback.Store(nil)
+	} else {
+		// Convert to the function type the atomic.Pointer expects
+		fn := func(addr netip.AddrPort, echoData []byte) {
+			callback(addr, echoData)
+		}
+		b.magicResponseCallback.Store(&fn)
+	}
+}
+
 // WriteToUDP writes data to a specific UDP address.
 // This is thread-safe and can be used by hole punch senders.
 func (b *SharedBind) WriteToUDP(data []byte, addr *net.UDPAddr) (int, error) {
@@ -397,37 +443,108 @@ func (b *SharedBind) receiveIPv4Batch(pc *ipv4.PacketConn, bufs [][]byte, sizes 
 		return 0, err
 	}
 
+	// Process messages and filter out magic packets
+	writeIdx := 0
 	for i := 0; i < numMsgs; i++ {
-		sizes[i] = b.ipv4Msgs[i].N
-		if sizes[i] == 0 {
+		if b.ipv4Msgs[i].N == 0 {
 			continue
 		}
+
+		// Check for magic packet
+		if b.ipv4Msgs[i].Addr != nil {
+			if udpAddr, ok := b.ipv4Msgs[i].Addr.(*net.UDPAddr); ok {
+				data := bufs[i][:b.ipv4Msgs[i].N]
+				if b.handleMagicPacket(data, udpAddr) {
+					// Magic packet handled, skip this message
+					continue
+				}
+			}
+		}
+
+		// Not a magic packet, include in output
+		if writeIdx != i {
+			// Need to copy data to the correct position
+			copy(bufs[writeIdx], bufs[i][:b.ipv4Msgs[i].N])
+		}
+		sizes[writeIdx] = b.ipv4Msgs[i].N
 
 		if b.ipv4Msgs[i].Addr != nil {
 			if udpAddr, ok := b.ipv4Msgs[i].Addr.(*net.UDPAddr); ok {
 				addrPort := udpAddr.AddrPort()
-				eps[i] = &wgConn.StdNetEndpoint{AddrPort: addrPort}
+				eps[writeIdx] = &wgConn.StdNetEndpoint{AddrPort: addrPort}
 			}
 		}
+		writeIdx++
 	}
 
-	return numMsgs, nil
+	return writeIdx, nil
 }
 
 // receiveIPv4Simple uses simple ReadFromUDP for non-Linux platforms
 func (b *SharedBind) receiveIPv4Simple(conn *net.UDPConn, bufs [][]byte, sizes []int, eps []wgConn.Endpoint) (int, error) {
-	n, addr, err := conn.ReadFromUDP(bufs[0])
-	if err != nil {
-		return 0, err
+	for {
+		n, addr, err := conn.ReadFromUDP(bufs[0])
+		if err != nil {
+			return 0, err
+		}
+
+		// Check for magic test packet and handle it directly
+		if b.handleMagicPacket(bufs[0][:n], addr) {
+			// Magic packet was handled, read another packet
+			continue
+		}
+
+		sizes[0] = n
+		if addr != nil {
+			addrPort := addr.AddrPort()
+			eps[0] = &wgConn.StdNetEndpoint{AddrPort: addrPort}
+		}
+
+		return 1, nil
+	}
+}
+
+// handleMagicPacket checks if the packet is a magic test packet and responds if so.
+// Returns true if the packet was a magic packet and was handled (should not be passed to WireGuard).
+func (b *SharedBind) handleMagicPacket(data []byte, addr *net.UDPAddr) bool {
+	// Check if this is a test request packet
+	if len(data) >= MagicTestRequestLen && bytes.HasPrefix(data, MagicTestRequest) {
+		// Extract the random data portion to echo back
+		echoData := data[len(MagicTestRequest) : len(MagicTestRequest)+MagicPacketDataLen]
+
+		// Build response packet
+		response := make([]byte, MagicTestResponseLen)
+		copy(response, MagicTestResponse)
+		copy(response[len(MagicTestResponse):], echoData)
+
+		// Send response back to sender
+		b.mu.RLock()
+		conn := b.udpConn
+		b.mu.RUnlock()
+
+		if conn != nil {
+			_, _ = conn.WriteToUDP(response, addr)
+		}
+
+		return true
 	}
 
-	sizes[0] = n
-	if addr != nil {
-		addrPort := addr.AddrPort()
-		eps[0] = &wgConn.StdNetEndpoint{AddrPort: addrPort}
+	// Check if this is a test response packet
+	if len(data) >= MagicTestResponseLen && bytes.HasPrefix(data, MagicTestResponse) {
+		// Extract the echoed data
+		echoData := data[len(MagicTestResponse) : len(MagicTestResponse)+MagicPacketDataLen]
+
+		// Call the callback if set
+		callbackPtr := b.magicResponseCallback.Load()
+		if callbackPtr != nil {
+			callback := *callbackPtr
+			callback(addr.AddrPort(), echoData)
+		}
+
+		return true
 	}
 
-	return 1, nil
+	return false
 }
 
 // Send implements the WireGuard Bind interface.
