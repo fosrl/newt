@@ -3,6 +3,7 @@ package wgtester
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -187,6 +188,10 @@ func (s *Server) handleConnections() {
 				case <-s.shutdownCh:
 					return // Don't log error if we're shutting down
 				default:
+					// Don't log EOF errors during shutdown - these are expected when connection is closed
+					if err == io.EOF {
+						return
+					}
 					logger.Error("%sError reading from UDP: %v", s.outputPrefix, err)
 				}
 				continue
