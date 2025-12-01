@@ -184,7 +184,7 @@ func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo str
 
 	// Create the holepunch manager with ResolveDomain function
 	// We'll need to pass a domain resolver function
-	service.holePunchManager = holepunch.NewManager(sharedBind, newtId, "newt")
+	service.holePunchManager = holepunch.NewManager(sharedBind, newtId, "newt", key.PublicKey().String())
 
 	// Register websocket handlers
 	wsClient.RegisterHandler("newt/wg/receive-config", service.handleConfig)
