@@ -105,34 +105,10 @@ type WireGuardService struct {
 	netstackListenerMu sync.Mutex
 }
 
-func NewWireGuardService(interfaceName string, mtu int, generateAndSaveKeyTo string, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool) (*WireGuardService, error) {
-	var key wgtypes.Key
-	var err error
-
-	key, err = wgtypes.GeneratePrivateKey()
+func NewWireGuardService(interfaceName string, mtu int, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool) (*WireGuardService, error) {
+	key, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %v", err)
-	}
-
-	// Load or generate private key
-	if generateAndSaveKeyTo != "" {
-		if _, err := os.Stat(generateAndSaveKeyTo); os.IsNotExist(err) {
-			// File doesn't exist, save the generated key
-			err = os.WriteFile(generateAndSaveKeyTo, []byte(key.String()), 0600)
-			if err != nil {
-				return nil, fmt.Errorf("failed to save private key: %v", err)
-			}
-		} else {
-			// File exists, read the existing key
-			keyData, err := os.ReadFile(generateAndSaveKeyTo)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read private key: %v", err)
-			}
-			key, err = wgtypes.ParseKey(strings.TrimSpace(string(keyData)))
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse private key: %v", err)
-			}
-		}
 	}
 
 	// Find an available port

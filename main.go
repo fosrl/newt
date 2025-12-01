@@ -116,7 +116,6 @@ var (
 	err                                error
 	logLevel                           string
 	interfaceName                      string
-	generateAndSaveKeyTo               string
 	acceptClients                      bool
 	updownScript                       string
 	dockerSocket                       string
@@ -168,7 +167,6 @@ func main() {
 	logLevel = os.Getenv("LOG_LEVEL")
 	updownScript = os.Getenv("UPDOWN_SCRIPT")
 	interfaceName = os.Getenv("INTERFACE")
-	generateAndSaveKeyTo = os.Getenv("GENERATE_AND_SAVE_KEY_TO")
 
 	// Metrics/observability env mirrors
 	metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED")
@@ -236,9 +234,6 @@ func main() {
 	}
 	if interfaceName == "" {
 		flag.StringVar(&interfaceName, "interface", "newt", "Name of the WireGuard interface")
-	}
-	if generateAndSaveKeyTo == "" {
-		flag.StringVar(&generateAndSaveKeyTo, "generateAndSaveKeyTo", "", "Path to save generated private key")
 	}
 	if useNativeInterfaceEnv == "" {
 		flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface (requires WireGuard kernel module) and linux")
