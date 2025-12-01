@@ -196,6 +196,11 @@ func (b *SharedBind) InjectPacket(data []byte, fromAddr netip.AddrPort) error {
 		return net.ErrClosed
 	}
 
+	// Unmap IPv4-in-IPv6 addresses to ensure consistency with parsed endpoints
+	if fromAddr.Addr().Is4In6() {
+		fromAddr = netip.AddrPortFrom(fromAddr.Addr().Unmap(), fromAddr.Port())
+	}
+
 	// Track this endpoint as coming from netstack so responses go back the same way
 	// Use AddrPort directly as key (more efficient than string)
 	b.netstackEndpoints.Store(fromAddr, struct{}{})
@@ -471,6 +476,10 @@ func (b *SharedBind) receiveIPv4Batch(pc *ipv4.PacketConn, bufs [][]byte, sizes 
 		if b.ipv4Msgs[i].Addr != nil {
 			if udpAddr, ok := b.ipv4Msgs[i].Addr.(*net.UDPAddr); ok {
 				addrPort := udpAddr.AddrPort()
+				// Unmap IPv4-in-IPv6 addresses to ensure consistency with parsed endpoints
+				if addrPort.Addr().Is4In6() {
+					addrPort = netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port())
+				}
 				eps[writeIdx] = &wgConn.StdNetEndpoint{AddrPort: addrPort}
 			}
 		}
@@ -497,6 +506,10 @@ func (b *SharedBind) receiveIPv4Simple(conn *net.UDPConn, bufs [][]byte, sizes [
 		sizes[0] = n
 		if addr != nil {
 			addrPort := addr.AddrPort()
+			// Unmap IPv4-in-IPv6 addresses to ensure consistency with parsed endpoints
+			if addrPort.Addr().Is4In6() {
+				addrPort = netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port())
+			}
 			eps[0] = &wgConn.StdNetEndpoint{AddrPort: addrPort}
 		}
 
@@ -538,7 +551,12 @@ func (b *SharedBind) handleMagicPacket(data []byte, addr *net.UDPAddr) bool {
 		callbackPtr := b.magicResponseCallback.Load()
 		if callbackPtr != nil {
 			callback := *callbackPtr
-			callback(addr.AddrPort(), echoData)
+			addrPort := addr.AddrPort()
+			// Unmap IPv4-in-IPv6 addresses to ensure consistency
+			if addrPort.Addr().Is4In6() {
+				addrPort = netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port())
+			}
+			callback(addrPort, echoData)
 		}
 
 		return true

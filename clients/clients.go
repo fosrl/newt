@@ -371,6 +371,10 @@ func (s *WireGuardService) runDirectUDPRelay(listener net.PacketConn) {
 		var srcAddrPort netip.AddrPort
 		if udpAddr, ok := remoteAddr.(*net.UDPAddr); ok {
 			srcAddrPort = udpAddr.AddrPort()
+			// Unmap IPv4-in-IPv6 addresses to ensure consistency with parsed endpoints
+			if srcAddrPort.Addr().Is4In6() {
+				srcAddrPort = netip.AddrPortFrom(srcAddrPort.Addr().Unmap(), srcAddrPort.Port())
+			}
 		} else {
 			logger.Debug("Unexpected address type in relay: %T", remoteAddr)
 			continue
