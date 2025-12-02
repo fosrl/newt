@@ -791,6 +791,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 		// Close the WireGuard device and TUN
 		closeWgTunnel()
+		closeClients()
 
 		if stopFunc != nil {
 			stopFunc()     // stop the ws from sending more requests
