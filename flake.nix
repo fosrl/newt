@@ -45,7 +45,9 @@
               description = "A tunneling client for Pangolin";
               homepage = "https://github.com/fosrl/newt";
               license = lib.licenses.gpl3;
-              maintainers = [ ];
+              maintainers = [
+                lib.maintainers.water-sucks
+              ];
             };
           };
         }
