@@ -2,7 +2,7 @@
   description = "newt - A tunneling client for Pangolin";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   };
 
   outputs =
@@ -40,7 +40,7 @@
             pname = "pangolin-newt";
             version = version;
             src = srcWithReplacedVersion;
-            vendorHash = "sha256-PENsCO2yFxLVZNPgx2OP+gWVNfjJAfXkwWS7tzlm490=";
+            vendorHash = "sha256-iLUeQ16KLRPdAZT3DCe4eGjlqPrNJJ27BNLtTpeQlC0=";
             meta = with pkgs.lib; {
               description = "A tunneling client for Pangolin";
               homepage = "https://github.com/fosrl/newt";
