@@ -22,6 +22,7 @@
         system:
         let
           pkgs = pkgsFor system;
+          inherit (pkgs) lib;
 
           # Update version when releasing
           version = "1.4.2";
@@ -40,10 +41,10 @@
               "-X main.newtVersion=${version}"
             ];
 
-            meta = with pkgs.lib; {
+            meta = {
               description = "A tunneling client for Pangolin";
               homepage = "https://github.com/fosrl/newt";
-              license = licenses.gpl3;
+              license = lib.licenses.gpl3;
               maintainers = [ ];
             };
           };
@@ -53,10 +54,20 @@
         system:
         let
           pkgs = pkgsFor system;
+
+          inherit (pkgs)
+            go
+            gopls
+            gotools
+            go-outline
+            gopkgs
+            godef
+            golint
+            ;
         in
         {
           default = pkgs.mkShell {
-            buildInputs = with pkgs; [
+            buildInputs = [
               go
               gopls
               gotools
