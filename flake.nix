@@ -37,6 +37,10 @@
 
             vendorHash = "sha256-Jbu0pz+okV4N9MHUXLcTqSr3s/k5OVZ09hNuS/+4LFY=";
 
+            env = {
+              CGO_ENABLED = 0;
+            };
+
             ldflags = [
               "-X main.newtVersion=${version}"
             ];
