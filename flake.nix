@@ -34,7 +34,7 @@
             inherit version;
             src = pkgs.nix-gitignore.gitignoreSource [ ] ./.;
 
-            vendorHash = "sha256-iLUeQ16KLRPdAZT3DCe4eGjlqPrNJJ27BNLtTpeQlC0=";
+            vendorHash = "sha256-Jbu0pz+okV4N9MHUXLcTqSr3s/k5OVZ09hNuS/+4LFY=";
 
             ldflags = [
               "-X main.newtVersion=${version}"
