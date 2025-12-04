@@ -206,6 +206,26 @@ func (c *Client) SendMessage(messageType string, data interface{}) error {
 	return nil
 }
 
+// SendMessage sends a message through the WebSocket connection
+func (c *Client) SendMessageNoLog(messageType string, data interface{}) error {
+	if c.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	msg := WSMessage{
+		Type: messageType,
+		Data: data,
+	}
+
+	c.writeMux.Lock()
+	defer c.writeMux.Unlock()
+	if err := c.conn.WriteJSON(msg); err != nil {
+		return err
+	}
+	telemetry.IncWSMessage(c.metricsContext(), "out", "text")
+	return nil
+}
+
 func (c *Client) SendMessageInterval(messageType string, data interface{}, interval time.Duration) (stop func()) {
 	stopChan := make(chan struct{})
 	go func() {

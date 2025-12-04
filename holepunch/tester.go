@@ -140,16 +140,19 @@ func (t *HolepunchTester) Stop() {
 
 // handleResponse is called by SharedBind when a magic response is received
 func (t *HolepunchTester) handleResponse(addr netip.AddrPort, echoData []byte) {
+	logger.Debug("Received magic response from %s", addr.String())
 	key := string(echoData)
 
 	value, ok := t.pendingRequests.LoadAndDelete(key)
 	if !ok {
 		// No matching request found
+		logger.Debug("No pending request found for magic response from %s", addr.String())
 		return
 	}
 
 	req := value.(*pendingRequest)
 	rtt := time.Since(req.sentAt)
+	logger.Debug("Magic response matched pending request for %s (RTT: %v)", req.endpoint, rtt)
 
 	// Send RTT to the waiting goroutine (non-blocking)
 	select {

@@ -1,9 +1,12 @@
 package netstack2
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/netip"
 	"sync"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -26,14 +29,18 @@ type PortRange struct {
 
 // SubnetRule represents a subnet with optional port restrictions and source address
 // When RewriteTo is set, DNAT (Destination Network Address Translation) is performed:
-//   - Incoming packets: destination IP is rewritten to RewriteTo.Addr()
+//   - Incoming packets: destination IP is rewritten to the resolved RewriteTo address
 //   - Outgoing packets: source IP is rewritten back to the original destination
+//
+// RewriteTo can be either:
+//   - An IP address with CIDR notation (e.g., "192.168.1.1/32")
+//   - A domain name (e.g., "example.com") which will be resolved at request time
 //
 // This allows transparent proxying where traffic appears to come from the rewritten address
 type SubnetRule struct {
 	SourcePrefix netip.Prefix // Source IP prefix (who is sending)
 	DestPrefix   netip.Prefix // Destination IP prefix (where it's going)
-	RewriteTo    netip.Prefix // Optional rewrite address for DNAT (destination NAT)
+	RewriteTo    string       // Optional rewrite address for DNAT - can be IP/CIDR or domain name
 	PortRanges   []PortRange  // empty slice means all ports allowed
 }
 
@@ -58,7 +65,8 @@ func NewSubnetLookup() *SubnetLookup {
 
 // AddSubnet adds a subnet rule with source and destination prefixes and optional port restrictions
 // If portRanges is nil or empty, all ports are allowed for this subnet
-func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix, rewriteTo netip.Prefix, portRanges []PortRange) {
+// rewriteTo can be either an IP/CIDR (e.g., "192.168.1.1/32") or a domain name (e.g., "example.com")
+func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
@@ -225,8 +233,9 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 // AddSubnetRule adds a subnet with optional port restrictions to the proxy handler
 // sourcePrefix: The IP prefix of the peer sending the data
 // destPrefix: The IP prefix of the destination
+// rewriteTo: Optional address to rewrite destination to - can be IP/CIDR or domain name
 // If portRanges is nil or empty, all ports are allowed for this subnet
-func (p *ProxyHandler) AddSubnetRule(sourcePrefix, destPrefix, rewriteTo netip.Prefix, portRanges []PortRange) {
+func (p *ProxyHandler) AddSubnetRule(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange) {
 	if p == nil || !p.enabled {
 		return
 	}
@@ -239,6 +248,43 @@ func (p *ProxyHandler) RemoveSubnetRule(sourcePrefix, destPrefix netip.Prefix) {
 		return
 	}
 	p.subnetLookup.RemoveSubnet(sourcePrefix, destPrefix)
+}
+
+// resolveRewriteAddress resolves a rewrite address which can be either:
+// - An IP address with CIDR notation (e.g., "192.168.1.1/32") - returns the IP directly
+// - A plain IP address (e.g., "192.168.1.1") - returns the IP directly
+// - A domain name (e.g., "example.com") - performs DNS lookup at request time
+func (p *ProxyHandler) resolveRewriteAddress(rewriteTo string) (netip.Addr, error) {
+	// First, try to parse as a CIDR prefix (e.g., "192.168.1.1/32")
+	if prefix, err := netip.ParsePrefix(rewriteTo); err == nil {
+		return prefix.Addr(), nil
+	}
+
+	// Try to parse as a plain IP address (e.g., "192.168.1.1")
+	if addr, err := netip.ParseAddr(rewriteTo); err == nil {
+		return addr, nil
+	}
+
+	// Not an IP address, treat as domain name and perform DNS lookup
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip4", rewriteTo)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("failed to resolve domain %s: %w", rewriteTo, err)
+	}
+
+	if len(ips) == 0 {
+		return netip.Addr{}, fmt.Errorf("no IP addresses found for domain %s", rewriteTo)
+	}
+
+	// Use the first resolved IP address
+	ip := ips[0]
+	if ip4 := ip.To4(); ip4 != nil {
+		return netip.AddrFrom4([4]byte{ip4[0], ip4[1], ip4[2], ip4[3]}), nil
+	}
+
+	return netip.Addr{}, fmt.Errorf("no IPv4 address found for domain %s", rewriteTo)
 }
 
 // Initialize sets up the promiscuous NIC with the netTun's notification system
@@ -334,10 +380,20 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 	matchedRule := p.subnetLookup.Match(srcAddr, dstAddr, dstPort)
 	if matchedRule != nil {
 		// Check if we need to perform DNAT
-		if matchedRule.RewriteTo.IsValid() && matchedRule.RewriteTo.Addr().IsValid() {
+		if matchedRule.RewriteTo != "" {
+			// Resolve the rewrite address (could be IP or domain)
+			newDst, err := p.resolveRewriteAddress(matchedRule.RewriteTo)
+			if err != nil {
+				// Failed to resolve, skip DNAT but still proxy the packet
+				pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{
+					Payload: buffer.MakeWithData(packet),
+				})
+				p.proxyEp.InjectInbound(header.IPv4ProtocolNumber, pkb)
+				return true
+			}
+
 			// Perform DNAT - rewrite destination IP
 			originalDst := dstAddr
-			newDst := matchedRule.RewriteTo.Addr()
 
 			// Create connection tracking key
 			var srcPort uint16

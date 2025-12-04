@@ -3,6 +3,7 @@ package logger
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -139,6 +140,10 @@ type WireGuardLogger struct {
 func (l *Logger) GetWireGuardLogger(prepend string) *WireGuardLogger {
 	return &WireGuardLogger{
 		Verbosef: func(format string, args ...any) {
+			// if the format string contains "Sending keepalive packet", skip debug logging to reduce noise
+			if strings.Contains(format, "Sending keepalive packet") {
+				return
+			}
 			l.Debug(prepend+format, args...)
 		},
 		Errorf: func(format string, args ...any) {

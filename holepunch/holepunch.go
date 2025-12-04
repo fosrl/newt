@@ -38,7 +38,7 @@ type Manager struct {
 	sendHolepunchInterval time.Duration
 }
 
-const sendHolepunchIntervalMax = 60 * time.Second
+const sendHolepunchIntervalMax = 3 * time.Second
 const sendHolepunchIntervalMin = 1 * time.Second
 
 // NewManager creates a new hole punch manager
@@ -150,6 +150,28 @@ func (m *Manager) GetExitNodes() []ExitNode {
 		nodes = append(nodes, node)
 	}
 	return nodes
+}
+
+// ResetInterval resets the hole punch interval back to the minimum value,
+// allowing it to climb back up through exponential backoff.
+// This is useful when network conditions change or connectivity is restored.
+func (m *Manager) ResetInterval() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.sendHolepunchInterval != sendHolepunchIntervalMin {
+		m.sendHolepunchInterval = sendHolepunchIntervalMin
+		logger.Info("Reset hole punch interval to minimum (%v)", sendHolepunchIntervalMin)
+	}
+
+	// Signal the goroutine to apply the new interval if running
+	if m.running && m.updateChan != nil {
+		select {
+		case m.updateChan <- struct{}{}:
+		default:
+			// Channel full or closed, skip
+		}
+	}
 }
 
 // TriggerHolePunch sends an immediate hole punch packet to all configured exit nodes
@@ -266,27 +288,6 @@ func (m *Manager) Start() error {
 	return nil
 }
 
-// StartSingleEndpoint starts hole punching to a single endpoint (legacy mode)
-func (m *Manager) StartSingleEndpoint(endpoint, serverPubKey string) error {
-	m.mu.Lock()
-
-	if m.running {
-		m.mu.Unlock()
-		logger.Debug("UDP hole punch already running, skipping new request")
-		return fmt.Errorf("hole punch already running")
-	}
-
-	m.running = true
-	m.stopChan = make(chan struct{})
-	m.mu.Unlock()
-
-	logger.Info("Starting UDP hole punch to %s with shared bind", endpoint)
-
-	go m.runSingleEndpoint(endpoint, serverPubKey)
-
-	return nil
-}
-
 // runMultipleExitNodes performs hole punching to multiple exit nodes
 func (m *Manager) runMultipleExitNodes() {
 	defer func() {
@@ -387,67 +388,6 @@ func (m *Manager) runMultipleExitNodes() {
 				if err := m.sendHolePunch(node.remoteAddr, node.publicKey); err != nil {
 					logger.Debug("Failed to send hole punch to %s: %v", node.endpointName, err)
 				}
-			}
-			// Exponential backoff: double the interval up to max
-			m.mu.Lock()
-			newInterval := m.sendHolepunchInterval * 2
-			if newInterval > sendHolepunchIntervalMax {
-				newInterval = sendHolepunchIntervalMax
-			}
-			if newInterval != m.sendHolepunchInterval {
-				m.sendHolepunchInterval = newInterval
-				ticker.Reset(m.sendHolepunchInterval)
-				logger.Debug("Increased hole punch interval to %v", m.sendHolepunchInterval)
-			}
-			m.mu.Unlock()
-		}
-	}
-}
-
-// runSingleEndpoint performs hole punching to a single endpoint
-func (m *Manager) runSingleEndpoint(endpoint, serverPubKey string) {
-	defer func() {
-		m.mu.Lock()
-		m.running = false
-		m.mu.Unlock()
-		logger.Info("UDP hole punch goroutine ended for %s", endpoint)
-	}()
-
-	host, err := util.ResolveDomain(endpoint)
-	if err != nil {
-		logger.Error("Failed to resolve domain %s: %v", endpoint, err)
-		return
-	}
-
-	serverAddr := net.JoinHostPort(host, "21820")
-
-	remoteAddr, err := net.ResolveUDPAddr("udp", serverAddr)
-	if err != nil {
-		logger.Error("Failed to resolve UDP address %s: %v", serverAddr, err)
-		return
-	}
-
-	// Execute once immediately before starting the loop
-	if err := m.sendHolePunch(remoteAddr, serverPubKey); err != nil {
-		logger.Warn("Failed to send initial hole punch: %v", err)
-	}
-
-	// Start with minimum interval
-	m.mu.Lock()
-	m.sendHolepunchInterval = sendHolepunchIntervalMin
-	m.mu.Unlock()
-
-	ticker := time.NewTicker(m.sendHolepunchInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-m.stopChan:
-			logger.Debug("Hole punch stopped by signal")
-			return
-		case <-ticker.C:
-			if err := m.sendHolePunch(remoteAddr, serverPubKey); err != nil {
-				logger.Debug("Failed to send hole punch: %v", err)
 			}
 			// Exponential backoff: double the interval up to max
 			m.mu.Lock()

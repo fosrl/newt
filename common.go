@@ -25,7 +25,7 @@ import (
 const msgHealthFileWriteFailed = "Failed to write health file: %v"
 
 func ping(tnet *netstack.Net, dst string, timeout time.Duration) (time.Duration, error) {
-	logger.Debug("Pinging %s", dst)
+	// logger.Debug("Pinging %s", dst)
 	socket, err := tnet.Dial("ping4", dst)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create ICMP socket: %w", err)
@@ -84,7 +84,7 @@ func ping(tnet *netstack.Net, dst string, timeout time.Duration) (time.Duration,
 
 	latency := time.Since(start)
 
-	logger.Debug("Ping to %s successful, latency: %v", dst, latency)
+	// logger.Debug("Ping to %s successful, latency: %v", dst, latency)
 
 	return latency, nil
 }
@@ -122,7 +122,7 @@ func reliablePing(tnet *netstack.Net, dst string, baseTimeout time.Duration, max
 		// If we get at least one success, we can return early for health checks
 		if successCount > 0 {
 			avgLatency := totalLatency / time.Duration(successCount)
-			logger.Debug("Reliable ping succeeded after %d attempts, avg latency: %v", attempt, avgLatency)
+			// logger.Debug("Reliable ping succeeded after %d attempts, avg latency: %v", attempt, avgLatency)
 			return avgLatency, nil
 		}
 	}

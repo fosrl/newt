@@ -2,8 +2,6 @@ package clients
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -73,7 +71,6 @@ type WireGuardService struct {
 	client        *websocket.Client
 	config        WgConfig
 	key           wgtypes.Key
-	keyFilePath   string
 	newtId        string
 	lastReadings  map[string]PeerReading
 	mu            sync.Mutex
@@ -268,10 +265,20 @@ func (s *WireGuardService) StartHolepunch(publicKey string, endpoint string) {
 		return
 	}
 
-	logger.Info("Starting hole punch to %s with public key: %s", endpoint, publicKey)
-	if err := s.holePunchManager.StartSingleEndpoint(endpoint, publicKey); err != nil {
+	// Convert websocket.ExitNode to holepunch.ExitNode
+	hpExitNodes := []holepunch.ExitNode{
+		{
+			Endpoint:  endpoint,
+			PublicKey: publicKey,
+		},
+	}
+
+	// Start hole punching using the manager
+	if err := s.holePunchManager.StartMultipleExitNodes(hpExitNodes); err != nil {
 		logger.Warn("Failed to start hole punch: %v", err)
 	}
+
+	logger.Info("Starting hole punch to %s with public key: %s", endpoint, publicKey)
 }
 
 // StartDirectUDPRelay starts a direct UDP relay from the main tunnel netstack to the clients' WireGuard.
@@ -386,7 +393,7 @@ func (s *WireGuardService) runDirectUDPRelay(listener net.PacketConn) {
 			continue
 		}
 
-		logger.Debug("Relayed %d bytes from %s into WireGuard", n, srcAddrPort.String())
+		// logger.Debug("Relayed %d bytes from %s into WireGuard", n, srcAddrPort.String())
 	}
 }
 
@@ -476,11 +483,6 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 	}
 	// Parse the IP address and CIDR mask
 	tunnelIP := netip.MustParseAddr(parts[0])
-
-	// Stop any ongoing hole punch operations
-	if s.holePunchManager != nil {
-		s.holePunchManager.Stop()
-	}
 
 	var err error
 
@@ -682,15 +684,6 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 			return fmt.Errorf("invalid CIDR %s: %v", target.DestPrefix, err)
 		}
 
-		var rewriteTo netip.Prefix
-		if target.RewriteTo != "" {
-			rewriteTo, err = netip.ParsePrefix(target.RewriteTo)
-			if err != nil {
-				logger.Info("Invalid CIDR %s: %v", target.RewriteTo, err)
-				continue
-			}
-		}
-
 		var portRanges []netstack2.PortRange
 		for _, pr := range target.PortRange {
 			portRanges = append(portRanges, netstack2.PortRange{
@@ -699,7 +692,7 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 			})
 		}
 
-		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, rewriteTo, portRanges)
+		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges)
 
 		logger.Info("Added target subnet from %s to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.PortRange)
 	}
@@ -758,6 +751,8 @@ func (s *WireGuardService) handleAddPeer(msg websocket.WSMessage) {
 		logger.Info("WireGuard device is not initialized")
 		return
 	}
+
+	s.holePunchManager.TriggerHolePunch()
 
 	err = s.addPeerToDevice(peer)
 	if err != nil {
@@ -835,6 +830,8 @@ func (s *WireGuardService) handleUpdatePeer(msg websocket.WSMessage) {
 		logger.Info("Error unmarshaling peer data: %v", err)
 		return
 	}
+
+	s.holePunchManager.TriggerHolePunch()
 
 	// Parse the public key
 	pubKey, err := wgtypes.ParseKey(request.PublicKey)
@@ -970,13 +967,7 @@ func (s *WireGuardService) calculatePeerBandwidth() ([]PeerBandwidth, error) {
 
 	// parse the public keys and have them as base64 in the opposite order to fixKey
 	for i := range peerBandwidths {
-		pubKeyBytes, err := base64.StdEncoding.DecodeString(peerBandwidths[i].PublicKey)
-		if err != nil {
-			logger.Info("Failed to decode public key %s: %v", peerBandwidths[i].PublicKey, err)
-			continue
-		}
-		// Convert to hex
-		peerBandwidths[i].PublicKey = hex.EncodeToString(pubKeyBytes)
+		peerBandwidths[i].PublicKey = util.UnfixKey(peerBandwidths[i].PublicKey) // its in the long form but we need base64
 	}
 
 	return peerBandwidths, nil
@@ -1037,7 +1028,7 @@ func (s *WireGuardService) reportPeerBandwidth() error {
 		return fmt.Errorf("failed to calculate peer bandwidth: %v", err)
 	}
 
-	err = s.client.SendMessage("newt/receive-bandwidth", map[string]interface{}{
+	err = s.client.SendMessageNoLog("newt/receive-bandwidth", map[string]interface{}{
 		"bandwidthData": bandwidths,
 	})
 	if err != nil {
@@ -1084,15 +1075,6 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 			continue
 		}
 
-		var rewriteTo netip.Prefix
-		if target.RewriteTo != "" {
-			rewriteTo, err = netip.ParsePrefix(target.RewriteTo)
-			if err != nil {
-				logger.Info("Invalid CIDR %s: %v", target.RewriteTo, err)
-				continue
-			}
-		}
-
 		var portRanges []netstack2.PortRange
 		for _, pr := range target.PortRange {
 			portRanges = append(portRanges, netstack2.PortRange{
@@ -1101,7 +1083,7 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 			})
 		}
 
-		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, rewriteTo, portRanges)
+		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges)
 
 		logger.Info("Added target subnet from %s to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.PortRange)
 	}
@@ -1210,15 +1192,6 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 			continue
 		}
 
-		var rewriteTo netip.Prefix
-		if target.RewriteTo != "" {
-			rewriteTo, err = netip.ParsePrefix(target.RewriteTo)
-			if err != nil {
-				logger.Info("Invalid CIDR %s: %v", target.RewriteTo, err)
-				continue
-			}
-		}
-
 		var portRanges []netstack2.PortRange
 		for _, pr := range target.PortRange {
 			portRanges = append(portRanges, netstack2.PortRange{
@@ -1227,7 +1200,7 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 			})
 		}
 
-		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, rewriteTo, portRanges)
+		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges)
 		logger.Info("Added target subnet from %s to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.PortRange)
 	}
 }

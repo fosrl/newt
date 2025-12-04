@@ -139,6 +139,18 @@ func FixKey(key string) string {
 	return hex.EncodeToString(decoded)
 }
 
+// this is the opposite of FixKey
+func UnfixKey(hexKey string) string {
+	// Decode from hex
+	decoded, err := hex.DecodeString(hexKey)
+	if err != nil {
+		logger.Fatal("Error decoding hex: %v", err)
+	}
+
+	// Convert to base64
+	return base64.StdEncoding.EncodeToString(decoded)
+}
+
 func MapToWireGuardLogLevel(level logger.LogLevel) int {
 	switch level {
 	case logger.DEBUG:

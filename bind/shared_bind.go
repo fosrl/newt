@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/fosrl/newt/logger"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 	wgConn "golang.zx2c4.com/wireguard/conn"
@@ -522,6 +523,7 @@ func (b *SharedBind) receiveIPv4Simple(conn *net.UDPConn, bufs [][]byte, sizes [
 func (b *SharedBind) handleMagicPacket(data []byte, addr *net.UDPAddr) bool {
 	// Check if this is a test request packet
 	if len(data) >= MagicTestRequestLen && bytes.HasPrefix(data, MagicTestRequest) {
+		logger.Debug("Received magic test REQUEST from %s, sending response", addr.String())
 		// Extract the random data portion to echo back
 		echoData := data[len(MagicTestRequest) : len(MagicTestRequest)+MagicPacketDataLen]
 
@@ -544,6 +546,7 @@ func (b *SharedBind) handleMagicPacket(data []byte, addr *net.UDPAddr) bool {
 
 	// Check if this is a test response packet
 	if len(data) >= MagicTestResponseLen && bytes.HasPrefix(data, MagicTestResponse) {
+		logger.Debug("Received magic test RESPONSE from %s", addr.String())
 		// Extract the echoed data
 		echoData := data[len(MagicTestResponse) : len(MagicTestResponse)+MagicPacketDataLen]
 
@@ -557,6 +560,8 @@ func (b *SharedBind) handleMagicPacket(data []byte, addr *net.UDPAddr) bool {
 				addrPort = netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port())
 			}
 			callback(addrPort, echoData)
+		} else {
+			logger.Debug("Magic response received but no callback registered")
 		}
 
 		return true
