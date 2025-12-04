@@ -25,7 +25,7 @@
           inherit (pkgs) lib;
 
           # Update version when releasing
-          version = "1.4.2";
+          version = "1.6.0";
         in
         {
           default = self.packages.${system}.pangolin-newt;
