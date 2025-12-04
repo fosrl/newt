@@ -38,7 +38,7 @@ type Manager struct {
 	sendHolepunchInterval time.Duration
 }
 
-const sendHolepunchIntervalMax = 3 * time.Second
+const sendHolepunchIntervalMax = 60 * time.Second
 const sendHolepunchIntervalMin = 1 * time.Second
 
 // NewManager creates a new hole punch manager
