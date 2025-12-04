@@ -48,6 +48,7 @@ type Config struct {
 	Headers           map[string]string `json:"hcHeaders"`
 	Method            string            `json:"hcMethod"`
 	Status            int               `json:"hcStatus"` // HTTP status code
+	TLSServerName     string            `json:"hcTlsServerName"`
 }
 
 // Target represents a health check target with its current status
@@ -70,7 +71,6 @@ type Monitor struct {
 	targets     map[int]*Target
 	mutex       sync.RWMutex
 	callback    StatusChangeCallback
-	client      *http.Client
 	enforceCert bool
 }
 
@@ -78,21 +78,10 @@ type Monitor struct {
 func NewMonitor(callback StatusChangeCallback, enforceCert bool) *Monitor {
 	logger.Debug("Creating new health check monitor with certificate enforcement: %t", enforceCert)
 
-	// Configure TLS settings based on certificate enforcement
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: !enforceCert,
-		},
-	}
-
 	return &Monitor{
 		targets:     make(map[int]*Target),
 		callback:    callback,
 		enforceCert: enforceCert,
-		client: &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: transport,
-		},
 	}
 }
 
@@ -388,6 +377,17 @@ func (m *Monitor) performHealthCheck(target *Target) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(target.Config.Timeout)*time.Second)
 	defer cancel()
 
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				// Configure TLS settings based on certificate enforcement
+				InsecureSkipVerify: !m.enforceCert,
+				// Use SNI TLS header if present
+				ServerName: target.Config.TLSServerName,
+			},
+		},
+	}
+
 	req, err := http.NewRequestWithContext(ctx, target.Config.Method, url, nil)
 	if err != nil {
 		target.Status = StatusUnhealthy
@@ -402,7 +402,7 @@ func (m *Monitor) performHealthCheck(target *Target) {
 	}
 
 	// Perform request
-	resp, err := m.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		target.Status = StatusUnhealthy
 		target.LastError = fmt.Sprintf("request failed: %v", err)
