@@ -116,7 +116,7 @@ var (
 	err                                error
 	logLevel                           string
 	interfaceName                      string
-	acceptClients                      bool
+	disableClients                     bool
 	updownScript                       string
 	dockerSocket                       string
 	dockerEnforceNetworkValidation     string
@@ -175,8 +175,8 @@ func main() {
 	regionEnv := os.Getenv("NEWT_REGION")
 	asyncBytesEnv := os.Getenv("NEWT_METRICS_ASYNC_BYTES")
 
-	acceptClientsEnv := os.Getenv("ACCEPT_CLIENTS")
-	acceptClients = acceptClientsEnv == "true"
+	disableClientsEnv := os.Getenv("DISABLE_CLIENTS")
+	disableClients = disableClientsEnv == "true"
 	useNativeInterfaceEnv := os.Getenv("USE_NATIVE_INTERFACE")
 	useNativeInterface = useNativeInterfaceEnv == "true"
 	enforceHealthcheckCertEnv := os.Getenv("ENFORCE_HC_CERT")
@@ -238,8 +238,8 @@ func main() {
 	if useNativeInterfaceEnv == "" {
 		flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface (requires WireGuard kernel module) and linux")
 	}
-	if acceptClientsEnv == "" {
-		flag.BoolVar(&acceptClients, "accept-clients", false, "Accept clients on the WireGuard interface")
+	if disableClientsEnv == "" {
+		flag.BoolVar(&disableClients, "disable-clients", false, "Disable clients on the WireGuard interface")
 	}
 	if enforceHealthcheckCertEnv == "" {
 		flag.BoolVar(&enforceHealthcheckCert, "enforce-hc-cert", false, "Enforce certificate validation for health checks (default: false, accepts any cert)")
@@ -528,7 +528,7 @@ func main() {
 	var wgData WgData
 	var dockerEventMonitor *docker.EventMonitor
 
-	if acceptClients {
+	if !disableClients {
 		setupClients(client)
 	}
 
