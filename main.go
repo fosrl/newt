@@ -236,7 +236,7 @@ func main() {
 		flag.StringVar(&interfaceName, "interface", "newt", "Name of the WireGuard interface")
 	}
 	if useNativeInterfaceEnv == "" {
-		flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface (requires WireGuard kernel module) and linux")
+		flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface")
 	}
 	if disableClientsEnv == "" {
 		flag.BoolVar(&disableClients, "disable-clients", false, "Disable clients on the WireGuard interface")

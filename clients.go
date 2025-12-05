@@ -5,6 +5,7 @@ import (
 
 	"github.com/fosrl/newt/clients"
 	wgnetstack "github.com/fosrl/newt/clients"
+	"github.com/fosrl/newt/clients/permissions"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/netstack2"
 	"github.com/fosrl/newt/websocket"
@@ -28,6 +29,17 @@ func setupClients(client *websocket.Client) {
 	host = strings.TrimSuffix(host, "/")
 
 	logger.Info("Setting up clients with netstack2...")
+
+	// if useNativeInterface is true make sure we have permission to use native interface
+	if useNativeInterface {
+		logger.Debug("Checking permissions for native interface")
+		err := permissions.CheckNativeInterfacePermissions()
+		if err != nil {
+			logger.Fatal("Insufficient permissions to create native TUN interface: %v", err)
+			return
+		}
+	}
+
 	// Create WireGuard service
 	wgService, err = wgnetstack.NewWireGuardService(interfaceName, mtuInt, host, id, client, dns, useNativeInterface)
 	if err != nil {
