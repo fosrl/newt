@@ -20,6 +20,7 @@ import (
 	"github.com/fosrl/newt/network"
 	"github.com/fosrl/newt/util"
 	"github.com/fosrl/newt/websocket"
+	"github.com/fosrl/newt/wgtester"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/ipc"
 	"golang.zx2c4.com/wireguard/tun"
@@ -100,6 +101,7 @@ type WireGuardService struct {
 	directRelayWg      sync.WaitGroup
 	netstackListener   net.PacketConn
 	netstackListenerMu sync.Mutex
+	wgTesterServer     *wgtester.Server
 }
 
 func NewWireGuardService(interfaceName string, mtu int, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool) (*WireGuardService, error) {
@@ -220,6 +222,11 @@ func (s *WireGuardService) Close() {
 		s.sharedBind.Release()
 		s.sharedBind = nil
 		logger.Info("Released shared UDP bind")
+	}
+
+	if s.wgTesterServer != nil {
+		s.wgTesterServer.Stop()
+		s.wgTesterServer = nil
 	}
 }
 
@@ -565,6 +572,12 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 			return fmt.Errorf("failed to configure interface: %v", err)
 		}
 
+		s.wgTesterServer = wgtester.NewServer("0.0.0.0", s.Port, s.newtId) // TODO: maybe make this the same ip of the wg server?
+		err = s.wgTesterServer.Start()
+		if err != nil {
+			logger.Error("Failed to start WireGuard tester server: %v", err)
+		}
+
 		logger.Info("WireGuard native device created and configured on %s", interfaceName)
 
 		s.mu.Unlock()
@@ -612,16 +625,13 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 
 	logger.Info("WireGuard netstack device created and configured")
 
-	// Store callback and tnet reference before releasing mutex
-	callback := s.onNetstackReady
-	tnet := s.tnet
-
 	// Release the mutex before calling the callback
 	s.mu.Unlock()
 
-	// Call the callback if it's set to notify that netstack is ready
-	if callback != nil {
-		callback(tnet)
+	s.wgTesterServer = wgtester.NewServerWithNetstack("0.0.0.0", s.Port, s.newtId, s.tnet) // TODO: maybe make this the same ip of the wg server?
+	err = s.wgTesterServer.Start()
+	if err != nil {
+		logger.Error("Failed to start WireGuard tester server: %v", err)
 	}
 
 	// Note: we already unlocked above, so don't use defer unlock

@@ -7,15 +7,11 @@ import (
 	wgnetstack "github.com/fosrl/newt/clients"
 	"github.com/fosrl/newt/clients/permissions"
 	"github.com/fosrl/newt/logger"
-	"github.com/fosrl/newt/netstack2"
 	"github.com/fosrl/newt/websocket"
 	"golang.zx2c4.com/wireguard/tun/netstack"
-
-	"github.com/fosrl/newt/wgtester"
 )
 
 var wgService *clients.WireGuardService
-var wgTesterServer *wgtester.Server
 var ready bool
 
 func setupClients(client *websocket.Client) {
@@ -46,23 +42,6 @@ func setupClients(client *websocket.Client) {
 		logger.Fatal("Failed to create WireGuard service: %v", err)
 	}
 
-	// // Set up callback to restart wgtester with netstack when WireGuard is ready
-	wgService.SetOnNetstackReady(func(tnet *netstack2.Net) {
-
-		wgTesterServer = wgtester.NewServerWithNetstack("0.0.0.0", wgService.Port, id, tnet) // TODO: maybe make this the same ip of the wg server?
-		err := wgTesterServer.Start()
-		if err != nil {
-			logger.Error("Failed to start WireGuard tester server: %v", err)
-		}
-	})
-
-	wgService.SetOnNetstackClose(func() {
-		if wgTesterServer != nil {
-			wgTesterServer.Stop()
-			wgTesterServer = nil
-		}
-	})
-
 	client.OnTokenUpdate(func(token string) {
 		wgService.SetToken(token)
 	})
@@ -81,11 +60,6 @@ func closeClients() {
 	if wgService != nil {
 		wgService.Close()
 		wgService = nil
-	}
-
-	if wgTesterServer != nil {
-		wgTesterServer.Stop()
-		wgTesterServer = nil
 	}
 }
 
