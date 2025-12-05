@@ -145,6 +145,14 @@ type connKey struct {
 	proto   uint8
 }
 
+// destKey identifies a destination for handler lookups (without source port since it may change)
+type destKey struct {
+	srcIP   string
+	dstIP   string
+	dstPort uint16
+	proto   uint8
+}
+
 // natState tracks NAT translation state for reverse translation
 type natState struct {
 	originalDst netip.Addr // Original destination before DNAT
@@ -160,6 +168,7 @@ type ProxyHandler struct {
 	udpHandler        *UDPHandler
 	subnetLookup      *SubnetLookup
 	natTable          map[connKey]*natState
+	destRewriteTable  map[destKey]netip.Addr // Maps original dest to rewritten dest for handler lookups
 	natMu             sync.RWMutex
 	enabled           bool
 }
@@ -178,10 +187,11 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 	}
 
 	handler := &ProxyHandler{
-		enabled:      true,
-		subnetLookup: NewSubnetLookup(),
-		natTable:     make(map[connKey]*natState),
-		proxyEp:      channel.New(1024, uint32(options.MTU), ""),
+		enabled:          true,
+		subnetLookup:     NewSubnetLookup(),
+		natTable:         make(map[connKey]*natState),
+		destRewriteTable: make(map[destKey]netip.Addr),
+		proxyEp:          channel.New(1024, uint32(options.MTU), ""),
 		proxyStack: stack.New(stack.Options{
 			NetworkProtocols: []stack.NetworkProtocolFactory{
 				ipv4.NewProtocol,
@@ -198,7 +208,7 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 
 	// Initialize TCP handler if enabled
 	if options.EnableTCP {
-		handler.tcpHandler = NewTCPHandler(handler.proxyStack)
+		handler.tcpHandler = NewTCPHandler(handler.proxyStack, handler)
 		if err := handler.tcpHandler.InstallTCPHandler(); err != nil {
 			return nil, fmt.Errorf("failed to install TCP handler: %v", err)
 		}
@@ -206,7 +216,7 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 
 	// Initialize UDP handler if enabled
 	if options.EnableUDP {
-		handler.udpHandler = NewUDPHandler(handler.proxyStack)
+		handler.udpHandler = NewUDPHandler(handler.proxyStack, handler)
 		if err := handler.udpHandler.InstallUDPHandler(); err != nil {
 			return nil, fmt.Errorf("failed to install UDP handler: %v", err)
 		}
@@ -249,6 +259,27 @@ func (p *ProxyHandler) RemoveSubnetRule(sourcePrefix, destPrefix netip.Prefix) {
 		return
 	}
 	p.subnetLookup.RemoveSubnet(sourcePrefix, destPrefix)
+}
+
+// LookupDestinationRewrite looks up the rewritten destination for a connection
+// This is used by TCP/UDP handlers to find the actual target address
+func (p *ProxyHandler) LookupDestinationRewrite(srcIP, dstIP string, dstPort uint16, proto uint8) (netip.Addr, bool) {
+	if p == nil || !p.enabled {
+		return netip.Addr{}, false
+	}
+
+	key := destKey{
+		srcIP:   srcIP,
+		dstIP:   dstIP,
+		dstPort: dstPort,
+		proto:   proto,
+	}
+
+	p.natMu.RLock()
+	defer p.natMu.RUnlock()
+
+	addr, ok := p.destRewriteTable[key]
+	return addr, ok
 }
 
 // resolveRewriteAddress resolves a rewrite address which can be either:
@@ -407,6 +438,14 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 				proto:   uint8(protocol),
 			}
 
+			// Key for handler lookups (doesn't include srcPort for flexibility)
+			dKey := destKey{
+				srcIP:   srcAddr.String(),
+				dstIP:   dstAddr.String(),
+				dstPort: dstPort,
+				proto:   uint8(protocol),
+			}
+
 			// Check if we already have a NAT entry for this connection
 			p.natMu.RLock()
 			existingEntry, exists := p.natTable[key]
@@ -437,14 +476,23 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 					originalDst: dstAddr,
 					rewrittenTo: newDst,
 				}
+				// Store destination rewrite for handler lookups
+				p.destRewriteTable[dKey] = newDst
 				p.natMu.Unlock()
 				logger.Debug("New NAT entry for connection: %s -> %s", dstAddr, newDst)
 			}
 
-			// Rewrite the packet
-			packet = p.rewritePacketDestination(packet, newDst)
-			if packet == nil {
-				return false
+			// Check if target is loopback - if so, don't rewrite packet destination
+			// as gVisor will drop martian packets. Instead, the handlers will use
+			// destRewriteTable to find the actual target address.
+			if !newDst.IsLoopback() {
+				// Rewrite the packet only for non-loopback destinations
+				packet = p.rewritePacketDestination(packet, newDst)
+				if packet == nil {
+					return false
+				}
+			} else {
+				logger.Debug("Target is loopback, not rewriting packet - handlers will use rewrite table")
 			}
 		}
 

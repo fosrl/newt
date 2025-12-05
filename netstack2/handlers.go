@@ -62,22 +62,24 @@ const (
 
 // TCPHandler handles TCP connections from netstack
 type TCPHandler struct {
-	stack *stack.Stack
+	stack        *stack.Stack
+	proxyHandler *ProxyHandler
 }
 
 // UDPHandler handles UDP connections from netstack
 type UDPHandler struct {
-	stack *stack.Stack
+	stack        *stack.Stack
+	proxyHandler *ProxyHandler
 }
 
 // NewTCPHandler creates a new TCP handler
-func NewTCPHandler(s *stack.Stack) *TCPHandler {
-	return &TCPHandler{stack: s}
+func NewTCPHandler(s *stack.Stack, ph *ProxyHandler) *TCPHandler {
+	return &TCPHandler{stack: s, proxyHandler: ph}
 }
 
 // NewUDPHandler creates a new UDP handler
-func NewUDPHandler(s *stack.Stack) *UDPHandler {
-	return &UDPHandler{stack: s}
+func NewUDPHandler(s *stack.Stack, ph *ProxyHandler) *UDPHandler {
+	return &UDPHandler{stack: s, proxyHandler: ph}
 }
 
 // InstallTCPHandler installs the TCP forwarder on the stack
@@ -125,7 +127,16 @@ func (h *TCPHandler) handleTCPConn(netstackConn *gonet.TCPConn, id stack.Transpo
 
 	logger.Info("TCP Forwarder: Handling connection %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
 
-	targetAddr := fmt.Sprintf("%s:%d", dstIP, dstPort)
+	// Check if there's a destination rewrite for this connection (e.g., localhost targets)
+	actualDstIP := dstIP
+	if h.proxyHandler != nil {
+		if rewrittenAddr, ok := h.proxyHandler.LookupDestinationRewrite(srcIP, dstIP, dstPort, uint8(tcp.ProtocolNumber)); ok {
+			actualDstIP = rewrittenAddr.String()
+			logger.Info("TCP Forwarder: Using rewritten destination %s (original: %s)", actualDstIP, dstIP)
+		}
+	}
+
+	targetAddr := fmt.Sprintf("%s:%d", actualDstIP, dstPort)
 
 	// Create context with timeout for connection establishment
 	ctx, cancel := context.WithTimeout(context.Background(), tcpConnectTimeout)
@@ -238,7 +249,16 @@ func (h *UDPHandler) handleUDPConn(netstackConn *gonet.UDPConn, id stack.Transpo
 
 	logger.Info("UDP Forwarder: Handling connection %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
 
-	targetAddr := fmt.Sprintf("%s:%d", dstIP, dstPort)
+	// Check if there's a destination rewrite for this connection (e.g., localhost targets)
+	actualDstIP := dstIP
+	if h.proxyHandler != nil {
+		if rewrittenAddr, ok := h.proxyHandler.LookupDestinationRewrite(srcIP, dstIP, dstPort, uint8(udp.ProtocolNumber)); ok {
+			actualDstIP = rewrittenAddr.String()
+			logger.Info("UDP Forwarder: Using rewritten destination %s (original: %s)", actualDstIP, dstIP)
+		}
+	}
+
+	targetAddr := fmt.Sprintf("%s:%d", actualDstIP, dstPort)
 
 	// Resolve target address
 	remoteUDPAddr, err := net.ResolveUDPAddr("udp", targetAddr)
