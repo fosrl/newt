@@ -3,7 +3,7 @@ module github.com/fosrl/newt
 go 1.25
 
 require (
-	github.com/docker/docker v28.5.1+incompatible
+	github.com/docker/docker v28.5.2+incompatible
 	github.com/google/gopacket v1.1.19
 	github.com/gorilla/websocket v1.5.3
 	github.com/prometheus/client_golang v1.23.2
