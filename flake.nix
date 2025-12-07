@@ -2,7 +2,7 @@
   description = "newt - A tunneling client for Pangolin";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   };
 
   outputs =
@@ -22,30 +22,36 @@
         system:
         let
           pkgs = pkgsFor system;
+          inherit (pkgs) lib;
 
           # Update version when releasing
-          version = "1.4.2";
-
-          # Update the version in a new source tree
-          srcWithReplacedVersion = pkgs.runCommand "newt-src-with-version" { } ''
-            cp -r ${./.} $out
-            chmod -R +w $out
-            rm -rf $out/.git $out/result $out/.envrc $out/.direnv
-            sed -i "s/version_replaceme/${version}/g" $out/main.go
-          '';
+          version = "1.6.0";
         in
         {
           default = self.packages.${system}.pangolin-newt;
+
           pangolin-newt = pkgs.buildGoModule {
             pname = "pangolin-newt";
-            version = version;
-            src = srcWithReplacedVersion;
-            vendorHash = "sha256-PENsCO2yFxLVZNPgx2OP+gWVNfjJAfXkwWS7tzlm490=";
-            meta = with pkgs.lib; {
+            inherit version;
+            src = pkgs.nix-gitignore.gitignoreSource [ ] ./.;
+
+            vendorHash = "sha256-Jbu0pz+okV4N9MHUXLcTqSr3s/k5OVZ09hNuS/+4LFY=";
+
+            env = {
+              CGO_ENABLED = 0;
+            };
+
+            ldflags = [
+              "-X main.newtVersion=${version}"
+            ];
+
+            meta = {
               description = "A tunneling client for Pangolin";
               homepage = "https://github.com/fosrl/newt";
-              license = licenses.gpl3;
-              maintainers = [ ];
+              license = lib.licenses.gpl3;
+              maintainers = [
+                lib.maintainers.water-sucks
+              ];
             };
           };
         }
@@ -54,10 +60,20 @@
         system:
         let
           pkgs = pkgsFor system;
+
+          inherit (pkgs)
+            go
+            gopls
+            gotools
+            go-outline
+            gopkgs
+            godef
+            golint
+            ;
         in
         {
           default = pkgs.mkShell {
-            buildInputs = with pkgs; [
+            buildInputs = [
               go
               gopls
               gotools
