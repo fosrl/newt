@@ -236,12 +236,6 @@ func (m *Manager) StartMultipleExitNodes(exitNodes []ExitNode) error {
 		return fmt.Errorf("hole punch already running")
 	}
 
-	if len(exitNodes) == 0 {
-		m.mu.Unlock()
-		logger.Warn("No exit nodes provided for hole punching")
-		return fmt.Errorf("no exit nodes provided")
-	}
-
 	// Populate exit nodes map
 	m.exitNodes = make(map[string]ExitNode)
 	for _, node := range exitNodes {
@@ -270,18 +264,17 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("hole punch already running")
 	}
 
-	if len(m.exitNodes) == 0 {
-		m.mu.Unlock()
-		logger.Warn("No exit nodes configured for hole punching")
-		return fmt.Errorf("no exit nodes configured")
-	}
-
 	m.running = true
 	m.stopChan = make(chan struct{})
 	m.updateChan = make(chan struct{}, 1)
+	nodeCount := len(m.exitNodes)
 	m.mu.Unlock()
 
-	logger.Info("Starting UDP hole punch with %d exit nodes", len(m.exitNodes))
+	if nodeCount == 0 {
+		logger.Info("Starting UDP hole punch manager (waiting for exit nodes to be added)")
+	} else {
+		logger.Info("Starting UDP hole punch with %d exit nodes", nodeCount)
+	}
 
 	go m.runMultipleExitNodes()
 
@@ -340,14 +333,13 @@ func (m *Manager) runMultipleExitNodes() {
 	resolvedNodes := resolveNodes()
 
 	if len(resolvedNodes) == 0 {
-		logger.Error("No exit nodes could be resolved")
-		return
-	}
-
-	// Send initial hole punch to all exit nodes
-	for _, node := range resolvedNodes {
-		if err := m.sendHolePunch(node.remoteAddr, node.publicKey); err != nil {
-			logger.Warn("Failed to send initial hole punch to %s: %v", node.endpointName, err)
+		logger.Info("No exit nodes available yet, waiting for nodes to be added")
+	} else {
+		// Send initial hole punch to all exit nodes
+		for _, node := range resolvedNodes {
+			if err := m.sendHolePunch(node.remoteAddr, node.publicKey); err != nil {
+				logger.Warn("Failed to send initial hole punch to %s: %v", node.endpointName, err)
+			}
 		}
 	}
 
@@ -370,6 +362,8 @@ func (m *Manager) runMultipleExitNodes() {
 			resolvedNodes = resolveNodes()
 			if len(resolvedNodes) == 0 {
 				logger.Warn("No exit nodes available after refresh")
+			} else {
+				logger.Info("Updated resolved nodes count: %d", len(resolvedNodes))
 			}
 			// Reset interval to minimum on update
 			m.mu.Lock()
@@ -383,24 +377,26 @@ func (m *Manager) runMultipleExitNodes() {
 				}
 			}
 		case <-ticker.C:
-			// Send hole punch to all exit nodes
-			for _, node := range resolvedNodes {
-				if err := m.sendHolePunch(node.remoteAddr, node.publicKey); err != nil {
-					logger.Debug("Failed to send hole punch to %s: %v", node.endpointName, err)
+			// Send hole punch to all exit nodes (if any are available)
+			if len(resolvedNodes) > 0 {
+				for _, node := range resolvedNodes {
+					if err := m.sendHolePunch(node.remoteAddr, node.publicKey); err != nil {
+						logger.Debug("Failed to send hole punch to %s: %v", node.endpointName, err)
+					}
 				}
+				// Exponential backoff: double the interval up to max
+				m.mu.Lock()
+				newInterval := m.sendHolepunchInterval * 2
+				if newInterval > sendHolepunchIntervalMax {
+					newInterval = sendHolepunchIntervalMax
+				}
+				if newInterval != m.sendHolepunchInterval {
+					m.sendHolepunchInterval = newInterval
+					ticker.Reset(m.sendHolepunchInterval)
+					logger.Debug("Increased hole punch interval to %v", m.sendHolepunchInterval)
+				}
+				m.mu.Unlock()
 			}
-			// Exponential backoff: double the interval up to max
-			m.mu.Lock()
-			newInterval := m.sendHolepunchInterval * 2
-			if newInterval > sendHolepunchIntervalMax {
-				newInterval = sendHolepunchIntervalMax
-			}
-			if newInterval != m.sendHolepunchInterval {
-				m.sendHolepunchInterval = newInterval
-				ticker.Reset(m.sendHolepunchInterval)
-				logger.Debug("Increased hole punch interval to %v", m.sendHolepunchInterval)
-			}
-			m.mu.Unlock()
 		}
 	}
 }
