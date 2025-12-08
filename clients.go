@@ -1,20 +1,17 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 
+	"github.com/fosrl/newt/clients"
+	wgnetstack "github.com/fosrl/newt/clients"
+	"github.com/fosrl/newt/clients/permissions"
 	"github.com/fosrl/newt/logger"
-	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/websocket"
 	"golang.zx2c4.com/wireguard/tun/netstack"
-
-	"github.com/fosrl/newt/wgnetstack"
-	"github.com/fosrl/newt/wgtester"
 )
 
-var wgService *wgnetstack.WireGuardService
-var wgTesterServer *wgtester.Server
+var wgService *clients.WireGuardService
 var ready bool
 
 func setupClients(client *websocket.Client) {
@@ -27,43 +24,29 @@ func setupClients(client *websocket.Client) {
 
 	host = strings.TrimSuffix(host, "/")
 
+	logger.Info("Setting up clients with netstack2...")
+
+	// if useNativeInterface is true make sure we have permission to use native interface
 	if useNativeInterface {
-		setupClientsNative(client, host)
-	} else {
-		setupClientsNetstack(client, host)
+		logger.Debug("Checking permissions for native interface")
+		err := permissions.CheckNativeInterfacePermissions()
+		if err != nil {
+			logger.Fatal("Insufficient permissions to create native TUN interface: %v", err)
+			return
+		}
 	}
 
-	ready = true
-}
-
-func setupClientsNetstack(client *websocket.Client, host string) {
-	logger.Info("Setting up clients with netstack...")
 	// Create WireGuard service
-	wgService, err = wgnetstack.NewWireGuardService(interfaceName, mtuInt, generateAndSaveKeyTo, host, id, client, "9.9.9.9")
+	wgService, err = wgnetstack.NewWireGuardService(interfaceName, mtuInt, host, id, client, dns, useNativeInterface)
 	if err != nil {
 		logger.Fatal("Failed to create WireGuard service: %v", err)
 	}
 
-	// // Set up callback to restart wgtester with netstack when WireGuard is ready
-	wgService.SetOnNetstackReady(func(tnet *netstack.Net) {
-
-		wgTesterServer = wgtester.NewServerWithNetstack("0.0.0.0", wgService.Port, id, tnet) // TODO: maybe make this the same ip of the wg server?
-		err := wgTesterServer.Start()
-		if err != nil {
-			logger.Error("Failed to start WireGuard tester server: %v", err)
-		}
-	})
-
-	wgService.SetOnNetstackClose(func() {
-		if wgTesterServer != nil {
-			wgTesterServer.Stop()
-			wgTesterServer = nil
-		}
-	})
-
 	client.OnTokenUpdate(func(token string) {
 		wgService.SetToken(token)
 	})
+
+	ready = true
 }
 
 func setDownstreamTNetstack(tnet *netstack.Net) {
@@ -75,15 +58,8 @@ func setDownstreamTNetstack(tnet *netstack.Net) {
 func closeClients() {
 	logger.Info("Closing clients...")
 	if wgService != nil {
-		wgService.Close(!keepInterface)
+		wgService.Close()
 		wgService = nil
-	}
-
-	closeWgServiceNative()
-
-	if wgTesterServer != nil {
-		wgTesterServer.Stop()
-		wgTesterServer = nil
 	}
 }
 
@@ -103,8 +79,6 @@ func clientsHandleNewtConnection(publicKey string, endpoint string) {
 	if wgService != nil {
 		wgService.StartHolepunch(publicKey, endpoint)
 	}
-
-	clientsHandleNewtConnectionNative(publicKey, endpoint)
 }
 
 func clientsOnConnect() {
@@ -114,19 +88,17 @@ func clientsOnConnect() {
 	if wgService != nil {
 		wgService.LoadRemoteConfig()
 	}
-
-	clientsOnConnectNative()
 }
 
-func clientsAddProxyTarget(pm *proxy.ProxyManager, tunnelIp string) {
+// clientsStartDirectRelay starts a direct UDP relay from the main tunnel netstack
+// to the clients' WireGuard, bypassing the proxy for better performance.
+func clientsStartDirectRelay(tunnelIP string) {
 	if !ready {
 		return
 	}
-	// add a udp proxy for localost and the wgService port
-	// TODO: make sure this port is not used in a target
 	if wgService != nil {
-		pm.AddTarget("udp", tunnelIp, int(wgService.Port), fmt.Sprintf("127.0.0.1:%d", wgService.Port))
+		if err := wgService.StartDirectUDPRelay(tunnelIP); err != nil {
+			logger.Error("Failed to start direct UDP relay: %v", err)
+		}
 	}
-
-	clientsAddProxyTargetNative(pm, tunnelIp)
 }

@@ -32,3 +32,8 @@ func clientsAddProxyTargetNative(pm *proxy.ProxyManager, tunnelIp string) {
 	_ = tunnelIp
 	// No-op for non-Linux systems
 }
+
+func clientsStartDirectRelayNative(tunnelIP string) {
+	_ = tunnelIP
+	// No-op for non-Linux systems
+}

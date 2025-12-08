@@ -2,16 +2,15 @@ package logger
 
 import (
 	"fmt"
-	"io"
-	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
 
 // Logger struct holds the logger instance
 type Logger struct {
-	logger *log.Logger
+	writer LogWriter
 	level  LogLevel
 }
 
@@ -20,17 +19,29 @@ var (
 	once          sync.Once
 )
 
-// NewLogger creates a new logger instance
+// NewLogger creates a new logger instance with the default StandardWriter
 func NewLogger() *Logger {
 	return &Logger{
-		logger: log.New(os.Stdout, "", 0),
+		writer: NewStandardWriter(),
+		level:  DEBUG,
+	}
+}
+
+// NewLoggerWithWriter creates a new logger instance with a custom LogWriter
+func NewLoggerWithWriter(writer LogWriter) *Logger {
+	return &Logger{
+		writer: writer,
 		level:  DEBUG,
 	}
 }
 
 // Init initializes the default logger
-func Init() *Logger {
+func Init(logger *Logger) *Logger {
 	once.Do(func() {
+		if logger != nil {
+			defaultLogger = logger
+			return
+		}
 		defaultLogger = NewLogger()
 	})
 	return defaultLogger
@@ -39,7 +50,7 @@ func Init() *Logger {
 // GetLogger returns the default logger instance
 func GetLogger() *Logger {
 	if defaultLogger == nil {
-		Init()
+		Init(nil)
 	}
 	return defaultLogger
 }
@@ -49,9 +60,11 @@ func (l *Logger) SetLevel(level LogLevel) {
 	l.level = level
 }
 
-// SetOutput sets the output destination for the logger
-func (l *Logger) SetOutput(w io.Writer) {
-	l.logger.SetOutput(w)
+// SetOutput sets the output destination for the logger (only works with StandardWriter)
+func (l *Logger) SetOutput(output *os.File) {
+	if sw, ok := l.writer.(*StandardWriter); ok {
+		sw.SetOutput(output)
+	}
 }
 
 // log handles the actual logging
@@ -60,24 +73,8 @@ func (l *Logger) log(level LogLevel, format string, args ...interface{}) {
 		return
 	}
 
-	// Get timezone from environment variable or use local timezone
-	timezone := os.Getenv("LOGGER_TIMEZONE")
-	var location *time.Location
-	var err error
-
-	if timezone != "" {
-		location, err = time.LoadLocation(timezone)
-		if err != nil {
-			// If invalid timezone, fall back to local
-			location = time.Local
-		}
-	} else {
-		location = time.Local
-	}
-
-	timestamp := time.Now().In(location).Format("2006/01/02 15:04:05")
 	message := fmt.Sprintf(format, args...)
-	l.logger.Printf("%s: %s %s", level.String(), timestamp, message)
+	l.writer.Write(level, time.Now(), message)
 }
 
 // Debug logs debug level messages
@@ -128,6 +125,29 @@ func Fatal(format string, args ...interface{}) {
 }
 
 // SetOutput sets the output destination for the default logger
-func SetOutput(w io.Writer) {
-	GetLogger().SetOutput(w)
+func SetOutput(output *os.File) {
+	GetLogger().SetOutput(output)
+}
+
+// WireGuardLogger is a wrapper type that matches WireGuard's Logger interface
+type WireGuardLogger struct {
+	Verbosef func(format string, args ...any)
+	Errorf   func(format string, args ...any)
+}
+
+// GetWireGuardLogger returns a WireGuard-compatible logger that writes to the newt logger
+// The prepend string is added as a prefix to all log messages
+func (l *Logger) GetWireGuardLogger(prepend string) *WireGuardLogger {
+	return &WireGuardLogger{
+		Verbosef: func(format string, args ...any) {
+			// if the format string contains "Sending keepalive packet", skip debug logging to reduce noise
+			if strings.Contains(format, "Sending keepalive packet") {
+				return
+			}
+			l.Debug(prepend+format, args...)
+		},
+		Errorf: func(format string, args ...any) {
+			l.Error(prepend+format, args...)
+		},
+	}
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/updates"
+	"github.com/fosrl/newt/util"
 	"github.com/fosrl/newt/websocket"
 
 	"github.com/fosrl/newt/internal/state"
@@ -115,9 +116,7 @@ var (
 	err                                error
 	logLevel                           string
 	interfaceName                      string
-	generateAndSaveKeyTo               string
-	keepInterface                      bool
-	acceptClients                      bool
+	disableClients                     bool
 	updownScript                       string
 	dockerSocket                       string
 	dockerEnforceNetworkValidation     string
@@ -168,7 +167,6 @@ func main() {
 	logLevel = os.Getenv("LOG_LEVEL")
 	updownScript = os.Getenv("UPDOWN_SCRIPT")
 	interfaceName = os.Getenv("INTERFACE")
-	generateAndSaveKeyTo = os.Getenv("GENERATE_AND_SAVE_KEY_TO")
 
 	// Metrics/observability env mirrors
 	metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED")
@@ -177,10 +175,8 @@ func main() {
 	regionEnv := os.Getenv("NEWT_REGION")
 	asyncBytesEnv := os.Getenv("NEWT_METRICS_ASYNC_BYTES")
 
-	keepInterfaceEnv := os.Getenv("KEEP_INTERFACE")
-	keepInterface = keepInterfaceEnv == "true"
-	acceptClientsEnv := os.Getenv("ACCEPT_CLIENTS")
-	acceptClients = acceptClientsEnv == "true"
+	disableClientsEnv := os.Getenv("DISABLE_CLIENTS")
+	disableClients = disableClientsEnv == "true"
 	useNativeInterfaceEnv := os.Getenv("USE_NATIVE_INTERFACE")
 	useNativeInterface = useNativeInterfaceEnv == "true"
 	enforceHealthcheckCertEnv := os.Getenv("ENFORCE_HC_CERT")
@@ -239,17 +235,11 @@ func main() {
 	if interfaceName == "" {
 		flag.StringVar(&interfaceName, "interface", "newt", "Name of the WireGuard interface")
 	}
-	if generateAndSaveKeyTo == "" {
-		flag.StringVar(&generateAndSaveKeyTo, "generateAndSaveKeyTo", "", "Path to save generated private key")
-	}
-	if keepInterfaceEnv == "" {
-		flag.BoolVar(&keepInterface, "keep-interface", false, "Keep the WireGuard interface")
-	}
 	if useNativeInterfaceEnv == "" {
-		flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface (requires WireGuard kernel module) and linux")
+		flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface")
 	}
-	if acceptClientsEnv == "" {
-		flag.BoolVar(&acceptClients, "accept-clients", false, "Accept clients on the WireGuard interface")
+	if disableClientsEnv == "" {
+		flag.BoolVar(&disableClients, "disable-clients", false, "Disable clients on the WireGuard interface")
 	}
 	if enforceHealthcheckCertEnv == "" {
 		flag.BoolVar(&enforceHealthcheckCert, "enforce-hc-cert", false, "Enforce certificate validation for health checks (default: false, accepts any cert)")
@@ -367,9 +357,9 @@ func main() {
 		tlsClientCAs = append(tlsClientCAs, tlsClientCAsFlag...)
 	}
 
-	logger.Init()
-	loggerLevel := parseLogLevel(logLevel)
-	logger.GetLogger().SetLevel(parseLogLevel(logLevel))
+	logger.Init(nil)
+	loggerLevel := util.ParseLogLevel(logLevel)
+	logger.GetLogger().SetLevel(loggerLevel)
 
 	// Initialize telemetry after flags are parsed (so flags override env)
 	tcfg := telemetry.FromEnv()
@@ -538,7 +528,7 @@ func main() {
 	var wgData WgData
 	var dockerEventMonitor *docker.EventMonitor
 
-	if acceptClients {
+	if !disableClients {
 		setupClients(client)
 	}
 
@@ -650,7 +640,7 @@ func main() {
 
 		// Create WireGuard device
 		dev = device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(
-			mapToWireGuardLogLevel(loggerLevel),
+			util.MapToWireGuardLogLevel(loggerLevel),
 			"wireguard: ",
 		))
 
@@ -663,7 +653,7 @@ func main() {
 
 		logger.Info("Connecting to endpoint: %s", host)
 
-		endpoint, err := resolveDomain(wgData.Endpoint)
+		endpoint, err := util.ResolveDomain(wgData.Endpoint)
 		if err != nil {
 			logger.Error("Failed to resolve endpoint: %v", err)
 			regResult = "failure"
@@ -677,7 +667,7 @@ func main() {
 public_key=%s
 allowed_ip=%s/32
 endpoint=%s
-persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.PublicKey), wgData.ServerIP, endpoint)
+persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(wgData.PublicKey), wgData.ServerIP, endpoint)
 
 		err = dev.IpcSet(config)
 		if err != nil {
@@ -747,7 +737,8 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 			// }
 		}
 
-		clientsAddProxyTarget(pm, wgData.TunnelIP)
+		// Start direct UDP relay from main tunnel to clients' WireGuard (bypasses proxy)
+		clientsStartDirectRelay(wgData.TunnelIP)
 
 		if err := healthMonitor.AddTargets(wgData.HealthCheckTargets); err != nil {
 			logger.Error("Failed to bulk add health check targets: %v", err)
@@ -800,6 +791,7 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 
 		// Close the WireGuard device and TUN
 		closeWgTunnel()
+		closeClients()
 
 		if stopFunc != nil {
 			stopFunc()     // stop the ws from sending more requests
@@ -1397,7 +1389,12 @@ persistent_keepalive_interval=5`, fixKey(privateKey.String()), fixKey(wgData.Pub
 				"noCloud": noCloud,
 			}, 3*time.Second)
 			logger.Debug("Requesting exit nodes from server")
-			clientsOnConnect()
+
+			if client.GetServerVersion() != "" { // to prevent issues with running newt > 1.7 versions with older servers
+				clientsOnConnect()
+			} else {
+				logger.Warn("CLIENTS WILL NOT WORK ON THIS VERSION OF NEWT WITH THIS VERSION OF PANGOLIN, PLEASE UPDATE THE SERVER TO 1.13 OR HIGHER OR DOWNGRADE NEWT")
+			}
 		}
 
 		// Send registration message to the server for backward compatibility

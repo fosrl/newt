@@ -46,6 +46,7 @@ type Client struct {
 	metricsCtxMu      sync.RWMutex
 	metricsCtx        context.Context
 	configNeedsSave   bool // Flag to track if config needs to be saved
+	serverVersion     string
 }
 
 type ClientOption func(*Client)
@@ -149,6 +150,10 @@ func (c *Client) GetConfig() *Config {
 	return c.config
 }
 
+func (c *Client) GetServerVersion() string {
+	return c.serverVersion
+}
+
 // Connect establishes the WebSocket connection
 func (c *Client) Connect() error {
 	go c.connectWithRetry()
@@ -196,6 +201,26 @@ func (c *Client) SendMessage(messageType string, data interface{}) error {
 	}
 
 	logger.Debug("Sending message: %s, data: %+v", messageType, data)
+
+	c.writeMux.Lock()
+	defer c.writeMux.Unlock()
+	if err := c.conn.WriteJSON(msg); err != nil {
+		return err
+	}
+	telemetry.IncWSMessage(c.metricsContext(), "out", "text")
+	return nil
+}
+
+// SendMessage sends a message through the WebSocket connection
+func (c *Client) SendMessageNoLog(messageType string, data interface{}) error {
+	if c.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	msg := WSMessage{
+		Type: messageType,
+		Data: data,
+	}
 
 	c.writeMux.Lock()
 	defer c.writeMux.Unlock()
@@ -331,9 +356,11 @@ func (c *Client) getToken() (string, error) {
 	}
 	defer resp.Body.Close()
 
+	body, _ := io.ReadAll(resp.Body)
+	logger.Debug("Token response body: %s", string(body))
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		logger.Error("Failed to get token with status code: %d, body: %s", resp.StatusCode, string(body))
+		logger.Error("Failed to get token with status code: %d", resp.StatusCode)
 		telemetry.IncConnAttempt(ctx, "auth", "failure")
 		etype := "io_error"
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
@@ -348,7 +375,7 @@ func (c *Client) getToken() (string, error) {
 	}
 
 	var tokenResp TokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
 		logger.Error("Failed to decode token response.")
 		return "", fmt.Errorf("failed to decode token response: %w", err)
 	}
@@ -360,6 +387,11 @@ func (c *Client) getToken() (string, error) {
 	if tokenResp.Data.Token == "" {
 		return "", fmt.Errorf("received empty token from server")
 	}
+
+	// print server version
+	logger.Info("Server version: %s", tokenResp.Data.ServerVersion)
+
+	c.serverVersion = tokenResp.Data.ServerVersion
 
 	logger.Debug("Received token: %s", tokenResp.Data.Token)
 	telemetry.IncConnAttempt(ctx, "auth", "success")
