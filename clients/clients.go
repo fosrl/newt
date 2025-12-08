@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/fosrl/newt/bind"
+	newtDevice "github.com/fosrl/newt/device"
 	"github.com/fosrl/newt/holepunch"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/netstack2"
@@ -22,7 +23,6 @@ import (
 	"github.com/fosrl/newt/websocket"
 	"github.com/fosrl/newt/wgtester"
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/ipc"
 	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -526,13 +526,13 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		))
 
 		fileUAPI, err := func() (*os.File, error) {
-			return ipc.UAPIOpen(interfaceName)
+			return newtDevice.UapiOpen(interfaceName)
 		}()
 		if err != nil {
 			logger.Error("UAPI listen error: %v", err)
 		}
 
-		uapiListener, err := ipc.UAPIListen(interfaceName, fileUAPI)
+		uapiListener, err := newtDevice.UapiListen(interfaceName, fileUAPI)
 		if err != nil {
 			logger.Error("Failed to listen on uapi socket: %v", err)
 			os.Exit(1)
