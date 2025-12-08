@@ -108,7 +108,7 @@ jobs:
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
         with:
           registry: docker.io
-          username: fosrl
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
 
       - name: Log in to GHCR
@@ -247,7 +247,7 @@ jobs:
         run: |
           set -euo pipefail
           images="${GHCR_IMAGE}"
-          if [ -n "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" ] && [ -n "fosrl" ]; then
+          if [ -n "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" ] && [ -n "${{ secrets.DOCKER_HUB_USERNAME }}" ]; then
             images="${images}\n${DOCKERHUB_IMAGE}"
           fi
           {
@@ -290,7 +290,7 @@ jobs:
           IMAGE_LICENSE:      ${{ env.IMAGE_LICENSE }}
           DOCKERHUB_IMAGE:    ${{ env.DOCKERHUB_IMAGE }}
           GHCR_IMAGE:         ${{ env.GHCR_IMAGE }}
-          DOCKER_HUB_USER:    fosrl
+          DOCKER_HUB_USER:    ${{ secrets.DOCKER_HUB_USERNAME }}
           REPO:               ${{ github.repository }}
           OWNER:              ${{ github.repository_owner }}
           WORKFLOW_REF:       ${{ github.workflow_ref }}
