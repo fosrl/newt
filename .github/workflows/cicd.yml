@@ -311,7 +311,7 @@ jobs:
           echo "=== Images ==="
           echo "DOCKERHUB_IMAGE=${DOCKERHUB_IMAGE}"
           echo "GHCR_IMAGE=${GHCR_IMAGE}"
-          echo "DOCKER_HUB_USERNAME=fosrl
+          echo "DOCKER_HUB_USERNAME=${DOCKER_HUB_USER}"
           echo
           echo "=== GitHub Kontext ==="
           echo "repository=${REPO}"
