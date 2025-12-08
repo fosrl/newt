@@ -1389,7 +1389,12 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				"noCloud": noCloud,
 			}, 3*time.Second)
 			logger.Debug("Requesting exit nodes from server")
-			clientsOnConnect()
+
+			if client.GetServerVersion() != "" { // to prevent issues with running newt > 1.7 versions with older servers
+				clientsOnConnect()
+			} else {
+				logger.Warn("CLIENTS WILL NOT WORK ON THIS VERSION OF NEWT WITH THIS VERSION OF PANGOLIN, PLEASE UPDATE THE SERVER TO 1.13 OR HIGHER OR DOWNGRADE NEWT")
+			}
 		}
 
 		// Send registration message to the server for backward compatibility
