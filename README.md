@@ -47,13 +47,11 @@ When Newt receives WireGuard control messages, it will use the information encod
 -   `docker-socket` (optional): Set the Docker socket to use the container discovery integration
 -   `docker-enforce-network-validation` (optional): Validate the container target is on the same network as the newt process. Default: false
 
-### Accpet Client Connection 
+### Client Connections
 
--   `accept-clients` (optional): Enable WireGuard server mode to accept incoming newt client connections. Default: false
-    -   `generateAndSaveKeyTo` (optional): Path to save generated private key
-    -   `native` (optional): Use native WireGuard interface when accepting clients (requires WireGuard kernel module and Linux, must run as root). Default: false (uses userspace netstack)
-        -   `interface` (optional): Name of the WireGuard interface. Default: newt
-        -   `keep-interface` (optional): Keep the WireGuard interface. Default: false
+-   `disable-clients` (optional): Disable clients on the WireGuard interface. Default: false (clients enabled)
+-   `native` (optional): Use native WireGuard interface (requires WireGuard kernel module and Linux, must run as root). Default: false (uses userspace netstack)
+-   `interface` (optional): Name of the WireGuard interface. Default: newt
 
 ### Metrics & Observability
 
@@ -73,9 +71,11 @@ When Newt receives WireGuard control messages, it will use the information encod
 ### Security & TLS
 
 -   `enforce-hc-cert` (optional): Enforce certificate validation for health checks. Default: false (accepts any cert)
--   `tls-client-cert` (optional): Client certificate (p12 or pfx) for mTLS or path to client certificate (PEM format). See [mTLS](#mtls)
--   `tls-client-key` (optional): Path to private key for mTLS (PEM format, optional if using PKCS12)
--   `tls-ca-cert` (optional): Path to CA certificate to verify server (PEM format, optional if using PKCS12)
+-   `tls-client-cert-file` (optional): Path to client certificate file (PEM/DER format) for mTLS. See [mTLS](#mtls)
+-   `tls-client-key` (optional): Path to client private key file (PEM/DER format) for mTLS
+-   `tls-client-ca` (optional): Path to CA certificate file for validating remote certificates (can be specified multiple times)
+-   `tls-client-cert` (optional): Path to client certificate (PKCS12 format) - DEPRECATED: use `--tls-client-cert-file` and `--tls-client-key` instead
+-   `prefer-endpoint` (optional): Prefer this endpoint for the connection (if set, will override the endpoint from the server)
 
 ### Monitoring & Health
 
@@ -101,13 +101,11 @@ All CLI arguments can be set using environment variables as an alternative to co
 -   `DOCKER_SOCKET`: Path to Docker socket for container discovery (equivalent to `--docker-socket`)
 -   `DOCKER_ENFORCE_NETWORK_VALIDATION`: Validate container targets are on same network. Default: false (equivalent to `--docker-enforce-network-validation`)
 
-### Accept Client Connections
+### Client Connections
 
--   `ACCEPT_CLIENTS`: Enable WireGuard server mode. Default: false (equivalent to `--accept-clients`)
--   `GENERATE_AND_SAVE_KEY_TO`: Path to save generated private key (equivalent to `--generateAndSaveKeyTo`)
+-   `DISABLE_CLIENTS`: Disable clients on the WireGuard interface. Default: false (equivalent to `--disable-clients`)
 -   `USE_NATIVE_INTERFACE`: Use native WireGuard interface (Linux only). Default: false (equivalent to `--native`)
 -   `INTERFACE`: Name of the WireGuard interface. Default: newt (equivalent to `--interface`)
--   `KEEP_INTERFACE`: Keep the WireGuard interface after shutdown. Default: false (equivalent to `--keep-interface`)
 
 ### Monitoring & Health
 
@@ -132,10 +130,10 @@ All CLI arguments can be set using environment variables as an alternative to co
 ### Security & TLS
 
 -   `ENFORCE_HC_CERT`: Enforce certificate validation for health checks. Default: false (equivalent to `--enforce-hc-cert`)
--   `TLS_CLIENT_CERT`: Path to client certificate for mTLS (equivalent to `--tls-client-cert`)
--   `TLS_CLIENT_KEY`: Path to private key for mTLS (equivalent to `--tls-client-key`)
--   `TLS_CA_CERT`: Path to CA certificate to verify server (equivalent to `--tls-ca-cert`)
--   `SKIP_TLS_VERIFY`: Skip TLS verification for server connections. Default: false
+-   `TLS_CLIENT_CERT`: Path to client certificate file (PEM/DER format) for mTLS (equivalent to `--tls-client-cert-file`)
+-   `TLS_CLIENT_KEY`: Path to client private key file (PEM/DER format) for mTLS (equivalent to `--tls-client-key`)
+-   `TLS_CLIENT_CAS`: Comma-separated list of CA certificate file paths for validating remote certificates (equivalent to multiple `--tls-client-ca` flags)
+-   `TLS_CLIENT_CERT_PKCS12`: Path to client certificate (PKCS12 format) - DEPRECATED: use `TLS_CLIENT_CERT` and `TLS_CLIENT_KEY` instead
 
 ## Loading secrets from files
 
@@ -202,9 +200,9 @@ services:
             - --health-file /tmp/healthy
 ```
 
-## Accept Client Connections
+## Client Connections
 
-When the `--accept-clients` flag is enabled (or `ACCEPT_CLIENTS=true` environment variable is set), Newt operates as a WireGuard server that can accept incoming client connections from other devices. This enables peer-to-peer connectivity through the Newt instance.
+By default, Newt can accept incoming client connections from other devices, enabling peer-to-peer connectivity through the Newt instance. This behavior can be disabled with the `--disable-clients` flag (or `DISABLE_CLIENTS=true` environment variable).
 
 ### How It Works
 
@@ -260,7 +258,7 @@ To use native mode:
 3. Run Newt as root (`sudo`)
 4. Ensure the system allows creation of network interfaces
 
-Docker Compose example:
+Docker Compose example (with clients enabled by default):
 
 ```yaml
 services:
@@ -272,7 +270,6 @@ services:
             - PANGOLIN_ENDPOINT=https://example.com
             - NEWT_ID=2ix2t8xk22ubpfy
             - NEWT_SECRET=nnisrfsdfc7prqsp9ewo1dvtvci50j5uiqotez00dgap0ii2
-            - ACCEPT_CLIENTS=true
 ```
 
 ### Technical Details
@@ -394,9 +391,9 @@ newt \
 
 You can now provide separate files for:
 
-* `--tls-client-cert`: client certificate (`.crt` or `.pem`)
+* `--tls-client-cert-file`: client certificate (`.crt` or `.pem`)
 * `--tls-client-key`: client private key (`.key` or `.pem`)
-* `--tls-ca-cert`: CA cert to verify the server
+* `--tls-client-ca`: CA cert to verify the server (can be specified multiple times)
 
 Example:
 
@@ -405,9 +402,9 @@ newt \
 --id 31frd0uzbjvp721 \
 --secret h51mmlknrvrwv8s4r1i210azhumt6isgbpyavxodibx1k2d6 \
 --endpoint https://example.com \
---tls-client-cert ./client.crt \
+--tls-client-cert-file ./client.crt \
 --tls-client-key ./client.key \
---tls-ca-cert ./ca.crt
+--tls-client-ca ./ca.crt
 ```
 
 
