@@ -85,7 +85,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      DOCKERHUB_IMAGE: docker.io/${{ vars.DOCKER_HUB_USERNAME }}/${{ github.event.repository.name }}
+      DOCKERHUB_IMAGE: docker.io/${{ secrets.DOCKER_HUB_USERNAME }}/${{ github.event.repository.name }}
       GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
 
     steps:
@@ -108,7 +108,7 @@ jobs:
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
         with:
           registry: docker.io
-          username: ${{ vars.DOCKER_HUB_USERNAME }}
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
 
       - name: Log in to GHCR
@@ -247,7 +247,7 @@ jobs:
         run: |
           set -euo pipefail
           images="${GHCR_IMAGE}"
-          if [ -n "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" ] && [ -n "${{ vars.DOCKER_HUB_USERNAME }}" ]; then
+          if [ -n "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" ] && [ -n "${{ secrets.DOCKER_HUB_USERNAME }}" ]; then
             images="${images}\n${DOCKERHUB_IMAGE}"
           fi
           {
@@ -290,7 +290,7 @@ jobs:
           IMAGE_LICENSE:      ${{ env.IMAGE_LICENSE }}
           DOCKERHUB_IMAGE:    ${{ env.DOCKERHUB_IMAGE }}
           GHCR_IMAGE:         ${{ env.GHCR_IMAGE }}
-          DOCKER_HUB_USER:    ${{ vars.DOCKER_HUB_USERNAME }}
+          DOCKER_HUB_USER:    ${{ secrets.DOCKER_HUB_USERNAME }}
           REPO:               ${{ github.repository }}
           OWNER:              ${{ github.repository_owner }}
           WORKFLOW_REF:       ${{ github.workflow_ref }}
@@ -364,7 +364,7 @@ jobs:
         id: attest-dh
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
-          subject-name: index.docker.io/${{ vars.DOCKER_HUB_USERNAME }}/${{ github.event.repository.name }}
+          subject-name: index.docker.io/${{ secrets.DOCKER_HUB_USERNAME }}/${{ github.event.repository.name }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
           show-summary: true
