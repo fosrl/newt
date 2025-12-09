@@ -35,7 +35,7 @@
             inherit version;
             src = pkgs.nix-gitignore.gitignoreSource [ ] ./.;
 
-            vendorHash = "sha256-Jbu0pz+okV4N9MHUXLcTqSr3s/k5OVZ09hNuS/+4LFY=";
+            vendorHash = "sha256-krxkfH+4z0rgmFi8OyCzWIrxU5Rpb7gjtGcn3LnZCig=";
 
             env = {
               CGO_ENABLED = 0;
