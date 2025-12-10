@@ -37,7 +37,7 @@ func setupClients(client *websocket.Client) {
 	}
 
 	// Create WireGuard service
-	wgService, err = wgnetstack.NewWireGuardService(interfaceName, mtuInt, host, id, client, dns, useNativeInterface)
+	wgService, err = wgnetstack.NewWireGuardService(interfaceName, port, mtuInt, host, id, client, dns, useNativeInterface)
 	if err != nil {
 		logger.Fatal("Failed to create WireGuard service: %v", err)
 	}

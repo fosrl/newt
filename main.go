@@ -116,6 +116,7 @@ var (
 	err                                error
 	logLevel                           string
 	interfaceName                      string
+	port                               uint16
 	disableClients                     bool
 	updownScript                       string
 	dockerSocket                       string
@@ -167,6 +168,7 @@ func main() {
 	logLevel = os.Getenv("LOG_LEVEL")
 	updownScript = os.Getenv("UPDOWN_SCRIPT")
 	interfaceName = os.Getenv("INTERFACE")
+	portStr := os.Getenv("PORT")
 
 	// Metrics/observability env mirrors
 	metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED")
@@ -235,6 +237,9 @@ func main() {
 	if interfaceName == "" {
 		flag.StringVar(&interfaceName, "interface", "newt", "Name of the WireGuard interface")
 	}
+	if portStr == "" {
+		flag.StringVar(&portStr, "port", "", "Port for client WireGuard interface")
+	}
 	if useNativeInterfaceEnv == "" {
 		flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface")
 	}
@@ -295,6 +300,15 @@ func main() {
 		}
 	} else {
 		pingTimeout = 5 * time.Second
+	}
+
+	if portStr != "" {
+		portInt, err := strconv.Atoi(portStr)
+		if err != nil {
+			logger.Warn("Failed to parse PORT, choosing a random port")
+		} else {
+			port = uint16(portInt)
+		}
 	}
 
 	if dockerEnforceNetworkValidation == "" {
@@ -641,7 +655,7 @@ func main() {
 		// Create WireGuard device
 		dev = device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(
 			util.MapToWireGuardLogLevel(loggerLevel),
-			"wireguard: ",
+			"gerbil-wireguard: ",
 		))
 
 		host, _, err := net.SplitHostPort(wgData.Endpoint)
