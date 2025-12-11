@@ -594,6 +594,7 @@ jobs:
           files: |
             bin/*
           fail_on_unmatched_files: true
+          draft: true
           body: |
             ## Container Images
             - GHCR: `${{ env.GHCR_REF }}`
