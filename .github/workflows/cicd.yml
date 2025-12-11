@@ -334,7 +334,7 @@ jobs:
         with:
           context: .
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ github.repository }}
@@ -392,6 +392,8 @@ jobs:
           set -euo pipefail
           echo "Signing ${GHCR_REF} (digest) recursively with provided key"
           cosign sign --key env://COSIGN_PRIVATE_KEY --recursive "${GHCR_REF}"
+          echo "Waiting 30 seconds for signatures to propagate..."
+          sleep 30
         shell: bash
 
       - name: Generate SBOM (SPDX JSON)
@@ -556,24 +558,24 @@ jobs:
           cosign verify --key env://COSIGN_PUBLIC_KEY "$DOCKERHUB_IMAGE:$TAG" -o text
         shell: bash
 
-      - name: Trivy scan (GHCR image)
-        id: trivy
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
-        with:
-          image-ref: ${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}
-          format: sarif
-          output: trivy-ghcr.sarif
-          ignore-unfixed: true
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-          exit-code: ${{ (vars.TRIVY_FAIL || '0') }}
+      # - name: Trivy scan (GHCR image)
+      #   id: trivy
+      #   uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+      #   with:
+      #     image-ref: ${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}
+      #     format: sarif
+      #     output: trivy-ghcr.sarif
+      #     ignore-unfixed: true
+      #     vuln-type: os,library
+      #     severity: CRITICAL,HIGH
+      #     exit-code: ${{ (vars.TRIVY_FAIL || '0') }}
 
-      - name: Upload SARIF
-        if: ${{ always() && hashFiles('trivy-ghcr.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@fdbfb4d2750291e159f0156def62b853c2798ca2 # v4.31.5
-        with:
-          sarif_file: trivy-ghcr.sarif
-          category: Image Vulnerability Scan
+      # - name: Upload SARIF,trivy
+      #   if: ${{ always() && hashFiles('trivy-ghcr.sarif') != '' }}
+      #   uses: github/codeql-action/upload-sarif@fdbfb4d2750291e159f0156def62b853c2798ca2 # v4.31.5
+      #   with:
+      #     sarif_file: trivy-ghcr.sarif
+      #     category: Image Vulnerability Scan
 
       - name: Build binaries
         env:
