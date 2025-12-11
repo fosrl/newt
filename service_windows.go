@@ -415,9 +415,14 @@ func debugService(args []string) error {
 		}
 	}
 
-	// Run the service in debug mode (runs in current process)
-	runService(serviceName, true, args)
-	return nil
+	// Start the service with the provided arguments
+	err := startService(args)
+	if err != nil {
+		return fmt.Errorf("failed to start service: %v", err)
+	}
+
+	// Watch the log file
+	return watchLogFile(true)
 }
 
 func watchLogFile(end bool) error {
@@ -699,9 +704,24 @@ func handleServiceCommand() bool {
 		fmt.Printf("Service status: %s\n", status)
 		return true
 	case "debug":
+		// get the status and if it is Not Installed then install it first
+		status, err := getServiceStatus()
+		if err != nil {
+			fmt.Printf("Failed to get service status: %v\n", err)
+			os.Exit(1)
+		}
+		if status == "Not Installed" {
+			err := installService()
+			if err != nil {
+				fmt.Printf("Failed to install service: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("Service installed successfully, now running in debug mode")
+		}
+
 		// Pass the remaining arguments (after "debug") to the service
 		serviceArgs := os.Args[2:]
-		err := debugService(serviceArgs)
+		err = debugService(serviceArgs)
 		if err != nil {
 			fmt.Printf("Failed to debug service: %v\n", err)
 			os.Exit(1)
