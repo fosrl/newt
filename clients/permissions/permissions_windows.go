@@ -6,14 +6,24 @@ import (
 	"fmt"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc"
 )
 
 // CheckNativeInterfacePermissions checks if the process has sufficient
 // permissions to create a native TUN interface on Windows.
-// This requires Administrator privileges.
+// This requires Administrator privileges and must be running as a Windows service.
 func CheckNativeInterfacePermissions() error {
+	// Check if running as a Windows service
+	isService, err := svc.IsWindowsService()
+	if err != nil {
+		return fmt.Errorf("failed to check if running as Windows service: %v", err)
+	}
+	if !isService {
+		return fmt.Errorf("native TUN interface requires running as a Windows service")
+	}
+
 	var sid *windows.SID
-	err := windows.AllocateAndInitializeSid(
+	err = windows.AllocateAndInitializeSid(
 		&windows.SECURITY_NT_AUTHORITY,
 		2,
 		windows.SECURITY_BUILTIN_DOMAIN_RID,
