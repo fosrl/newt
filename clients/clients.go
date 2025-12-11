@@ -104,17 +104,19 @@ type WireGuardService struct {
 	wgTesterServer     *wgtester.Server
 }
 
-func NewWireGuardService(interfaceName string, mtu int, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool) (*WireGuardService, error) {
+func NewWireGuardService(interfaceName string, port uint16, mtu int, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool) (*WireGuardService, error) {
 	key, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %v", err)
 	}
 
-	// Find an available port
-	port, err := util.FindAvailableUDPPort(49152, 65535)
-
-	if err != nil {
-		return nil, fmt.Errorf("error finding available port: %v", err)
+	if port == 0 {
+		// Find an available port
+		portRandom, err := util.FindAvailableUDPPort(49152, 65535)
+		if err != nil {
+			return nil, fmt.Errorf("error finding available port: %v", err)
+		}
+		port = uint16(portRandom)
 	}
 
 	// Create shared UDP socket for both holepunch and WireGuard
@@ -522,7 +524,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		// Create WireGuard device using the shared bind
 		s.device = device.NewDevice(s.tun, s.sharedBind, device.NewLogger(
 			device.LogLevelSilent,
-			"wireguard: ",
+			"client-wireguard: ",
 		))
 
 		fileUAPI, err := func() (*os.File, error) {

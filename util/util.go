@@ -33,6 +33,19 @@ func ResolveDomain(domain string) (string, error) {
 		port = ""
 	}
 
+	// Check if host is already an IP address (IPv4 or IPv6)
+	// For IPv6, the host from SplitHostPort will already have brackets stripped
+	// but if there was no port, we need to handle bracketed IPv6 addresses
+	cleanHost := strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if ip := net.ParseIP(cleanHost); ip != nil {
+		// It's already an IP address, no need to resolve
+		ipAddr := ip.String()
+		if port != "" {
+			return net.JoinHostPort(ipAddr, port), nil
+		}
+		return ipAddr, nil
+	}
+
 	// Lookup IP addresses
 	ips, err := net.LookupIP(host)
 	if err != nil {

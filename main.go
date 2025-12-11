@@ -116,6 +116,7 @@ var (
 	err                                error
 	logLevel                           string
 	interfaceName                      string
+	port                               uint16
 	disableClients                     bool
 	updownScript                       string
 	dockerSocket                       string
@@ -154,10 +155,27 @@ var (
 )
 
 func main() {
+	// Check if we're running as a Windows service
+	if isWindowsService() {
+		runService("NewtWireguardService", false, os.Args[1:])
+		return
+	}
+
+	// Handle service management commands on Windows (install, remove, start, stop, etc.)
+	if handleServiceCommand() {
+		return
+	}
+
 	// Prepare context for graceful shutdown and signal handling
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Run the main newt logic
+	runNewtMain(ctx)
+}
+
+// runNewtMain contains the main newt logic, extracted for service support
+func runNewtMain(ctx context.Context) {
 	// if PANGOLIN_ENDPOINT, NEWT_ID, and NEWT_SECRET are set as environment variables, they will be used as default values
 	endpoint = os.Getenv("PANGOLIN_ENDPOINT")
 	id = os.Getenv("NEWT_ID")
@@ -167,6 +185,7 @@ func main() {
 	logLevel = os.Getenv("LOG_LEVEL")
 	updownScript = os.Getenv("UPDOWN_SCRIPT")
 	interfaceName = os.Getenv("INTERFACE")
+	portStr := os.Getenv("PORT")
 
 	// Metrics/observability env mirrors
 	metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED")
@@ -235,6 +254,9 @@ func main() {
 	if interfaceName == "" {
 		flag.StringVar(&interfaceName, "interface", "newt", "Name of the WireGuard interface")
 	}
+	if portStr == "" {
+		flag.StringVar(&portStr, "port", "", "Port for client WireGuard interface")
+	}
 	if useNativeInterfaceEnv == "" {
 		flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface")
 	}
@@ -295,6 +317,15 @@ func main() {
 		}
 	} else {
 		pingTimeout = 5 * time.Second
+	}
+
+	if portStr != "" {
+		portInt, err := strconv.Atoi(portStr)
+		if err != nil {
+			logger.Warn("Failed to parse PORT, choosing a random port")
+		} else {
+			port = uint16(portInt)
+		}
 	}
 
 	if dockerEnforceNetworkValidation == "" {
@@ -641,7 +672,7 @@ func main() {
 		// Create WireGuard device
 		dev = device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(
 			util.MapToWireGuardLogLevel(loggerLevel),
-			"wireguard: ",
+			"gerbil-wireguard: ",
 		))
 
 		host, _, err := net.SplitHostPort(wgData.Endpoint)
@@ -1448,10 +1479,8 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
 	}
 
-	// Wait for interrupt signal
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	// Wait for context cancellation (from signal or service stop)
+	<-ctx.Done()
 
 	// Close clients first (including WGTester)
 	closeClients()
@@ -1476,7 +1505,20 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		client.Close()
 	}
 	logger.Info("Exiting...")
-	os.Exit(0)
+}
+
+// runNewtMainWithArgs is used by the Windows service to run newt with specific arguments
+// It sets os.Args and then calls runNewtMain
+func runNewtMainWithArgs(ctx context.Context, args []string) {
+	// Set os.Args to include the program name plus the provided args
+	// This allows flag parsing to work correctly
+	os.Args = append([]string{os.Args[0]}, args...)
+
+	// Setup Windows logging if running as a service
+	setupWindowsEventLog()
+
+	// Run the main newt logic
+	runNewtMain(ctx)
 }
 
 // validateTLSConfig validates the TLS configuration
