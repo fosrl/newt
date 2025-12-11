@@ -398,7 +398,12 @@ func (m *Monitor) performHealthCheck(target *Target) {
 
 	// Add headers
 	for key, value := range target.Config.Headers {
-		req.Header.Set(key, value)
+		// Handle Host header specially - it must be set on req.Host, not in headers
+		if strings.EqualFold(key, "Host") {
+			req.Host = value
+		} else {
+			req.Header.Set(key, value)
+		}
 	}
 
 	// Perform request
