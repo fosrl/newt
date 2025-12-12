@@ -14,8 +14,11 @@ import (
 	"time"
 
 	"github.com/fosrl/newt/logger"
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
@@ -56,6 +59,9 @@ const (
 	// udpSessionTimeout is the default timeout for UDP sessions.
 	udpSessionTimeout = 60 * time.Second
 
+	// icmpTimeout is the default timeout for ICMP ping requests.
+	icmpTimeout = 5 * time.Second
+
 	// Buffer size for copying data
 	bufferSize = 32 * 1024
 )
@@ -72,6 +78,12 @@ type UDPHandler struct {
 	proxyHandler *ProxyHandler
 }
 
+// ICMPHandler handles ICMP ping requests from netstack
+type ICMPHandler struct {
+	stack        *stack.Stack
+	proxyHandler *ProxyHandler
+}
+
 // NewTCPHandler creates a new TCP handler
 func NewTCPHandler(s *stack.Stack, ph *ProxyHandler) *TCPHandler {
 	return &TCPHandler{stack: s, proxyHandler: ph}
@@ -80,6 +92,11 @@ func NewTCPHandler(s *stack.Stack, ph *ProxyHandler) *TCPHandler {
 // NewUDPHandler creates a new UDP handler
 func NewUDPHandler(s *stack.Stack, ph *ProxyHandler) *UDPHandler {
 	return &UDPHandler{stack: s, proxyHandler: ph}
+}
+
+// NewICMPHandler creates a new ICMP handler
+func NewICMPHandler(s *stack.Stack, ph *ProxyHandler) *ICMPHandler {
+	return &ICMPHandler{stack: s, proxyHandler: ph}
 }
 
 // InstallTCPHandler installs the TCP forwarder on the stack
@@ -347,4 +364,199 @@ func copyPacketData(dst, src net.PacketConn, to net.Addr, timeout time.Duration)
 
 		dst.SetReadDeadline(time.Now().Add(timeout))
 	}
+}
+
+// HandleICMPPacket processes an ICMP packet and proxies it to the real destination
+// This is called directly from the proxy handler when an ICMP packet is detected
+// Returns true if the packet was handled (and a reply was sent), false otherwise
+func (h *ICMPHandler) HandleICMPPacket(packet []byte, sendReply func([]byte)) bool {
+	if len(packet) < header.IPv4MinimumSize {
+		return false
+	}
+
+	// Parse IPv4 header
+	ipHdr := header.IPv4(packet)
+	if ipHdr.TransportProtocol() != header.ICMPv4ProtocolNumber {
+		return false
+	}
+
+	headerLen := int(ipHdr.HeaderLength())
+	if len(packet) < headerLen+header.ICMPv4MinimumSize {
+		return false
+	}
+
+	// Parse ICMP header
+	icmpHdr := header.ICMPv4(packet[headerLen:])
+	icmpType := icmpHdr.Type()
+
+	// Only handle echo requests
+	if icmpType != header.ICMPv4Echo {
+		return false
+	}
+
+	srcIP := ipHdr.SourceAddress()
+	dstIP := ipHdr.DestinationAddress()
+
+	logger.Info("ICMP Handler: Echo request from %s to %s", srcIP, dstIP)
+
+	// Extract ICMP echo data (identifier, sequence, payload)
+	icmpPayload := packet[headerLen:]
+
+	// Handle the ping in a goroutine to avoid blocking
+	go h.proxyPing(srcIP.String(), dstIP.String(), icmpPayload, sendReply)
+
+	return true
+}
+
+// proxyPing sends a real ICMP echo request to the destination and forwards the reply
+func (h *ICMPHandler) proxyPing(srcIP, dstIP string, originalICMP []byte, sendReply func([]byte)) {
+	// Try privileged raw socket first, fall back to unprivileged
+	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+	if err != nil {
+		// Try unprivileged ICMP (uses UDP-based ICMP sockets on Linux)
+		conn, err = icmp.ListenPacket("udp4", "0.0.0.0")
+		if err != nil {
+			logger.Info("ICMP Handler: Failed to create ICMP socket: %v", err)
+			return
+		}
+	}
+	defer conn.Close()
+
+	// The ICMP echo header has: Type(1) + Code(1) + Checksum(2) + ID(2) + Seq(2) + Data
+	if len(originalICMP) < 8 {
+		logger.Info("ICMP Handler: ICMP packet too short")
+		return
+	}
+
+	// Extract identifier and sequence from original packet
+	identifier := int(originalICMP[4])<<8 | int(originalICMP[5])
+	sequence := int(originalICMP[6])<<8 | int(originalICMP[7])
+	echoData := originalICMP[8:] // Everything after the ICMP header
+
+	logger.Info("ICMP Handler: Proxying ping to %s (id=%d, seq=%d, data_len=%d)", 
+		dstIP, identifier, sequence, len(echoData))
+
+	// Create ICMP echo request message
+	msg := icmp.Message{
+		Type: ipv4.ICMPTypeEcho,
+		Code: 0,
+		Body: &icmp.Echo{
+			ID:   identifier,
+			Seq:  sequence,
+			Data: echoData,
+		},
+	}
+
+	msgBytes, err := msg.Marshal(nil)
+	if err != nil {
+		logger.Info("ICMP Handler: Failed to marshal ICMP message: %v", err)
+		return
+	}
+
+	// Resolve destination address
+	dst, err := net.ResolveIPAddr("ip4", dstIP)
+	if err != nil {
+		logger.Info("ICMP Handler: Failed to resolve destination %s: %v", dstIP, err)
+		return
+	}
+
+	// Send the echo request
+	if _, err := conn.WriteTo(msgBytes, dst); err != nil {
+		logger.Info("ICMP Handler: Failed to send ICMP request: %v", err)
+		return
+	}
+
+	// Wait for reply with timeout
+	conn.SetReadDeadline(time.Now().Add(icmpTimeout))
+
+	reply := make([]byte, 1500)
+	n, peer, err := conn.ReadFrom(reply)
+	if err != nil {
+		logger.Info("ICMP Handler: Failed to receive ICMP reply: %v", err)
+		return
+	}
+
+	// Parse the reply
+	parsedReply, err := icmp.ParseMessage(1, reply[:n]) // 1 = ICMP for IPv4
+	if err != nil {
+		logger.Info("ICMP Handler: Failed to parse ICMP reply: %v", err)
+		return
+	}
+
+	// Verify it's an echo reply
+	if parsedReply.Type != ipv4.ICMPTypeEchoReply {
+		logger.Info("ICMP Handler: Received non-echo-reply: %v", parsedReply.Type)
+		return
+	}
+
+	echoReply, ok := parsedReply.Body.(*icmp.Echo)
+	if !ok {
+		logger.Info("ICMP Handler: Failed to parse echo reply body")
+		return
+	}
+
+	// Verify the reply matches our request
+	if echoReply.ID != identifier || echoReply.Seq != sequence {
+		logger.Info("ICMP Handler: Reply ID/Seq mismatch (got id=%d seq=%d, expected id=%d seq=%d)",
+			echoReply.ID, echoReply.Seq, identifier, sequence)
+		return
+	}
+
+	logger.Info("ICMP Handler: Received reply from %s (id=%d, seq=%d)", peer, echoReply.ID, echoReply.Seq)
+
+	// Construct the reply packet to send back through the tunnel
+	// Source = original destination (the target we pinged)
+	// Destination = original source (the client that sent the ping)
+	replyPacket := h.constructICMPReplyPacket(dstIP, srcIP, echoReply)
+	if replyPacket != nil {
+		sendReply(replyPacket)
+		logger.Info("ICMP Handler: Sent reply back through tunnel")
+	}
+}
+
+// constructICMPReplyPacket builds a complete IPv4 + ICMP echo reply packet
+func (h *ICMPHandler) constructICMPReplyPacket(srcIP, dstIP string, echo *icmp.Echo) []byte {
+	// Parse IPs
+	src := net.ParseIP(srcIP).To4()
+	dst := net.ParseIP(dstIP).To4()
+	if src == nil || dst == nil {
+		logger.Info("ICMP Handler: Invalid IP addresses for reply packet")
+		return nil
+	}
+
+	// Calculate total packet size
+	icmpLen := 8 + len(echo.Data) // ICMP header (8 bytes) + data
+	totalLen := header.IPv4MinimumSize + icmpLen
+
+	// Create packet buffer
+	packet := make([]byte, totalLen)
+
+	// Build IPv4 header
+	ipHdr := header.IPv4(packet)
+	ipHdr.Encode(&header.IPv4Fields{
+		TotalLength: uint16(totalLen),
+		TTL:         64,
+		Protocol:    uint8(header.ICMPv4ProtocolNumber),
+		SrcAddr:     tcpip.AddrFrom4([4]byte{src[0], src[1], src[2], src[3]}),
+		DstAddr:     tcpip.AddrFrom4([4]byte{dst[0], dst[1], dst[2], dst[3]}),
+	})
+	ipHdr.SetChecksum(^ipHdr.CalculateChecksum())
+
+	// Build ICMP header
+	icmpHdr := header.ICMPv4(packet[header.IPv4MinimumSize:])
+	icmpHdr.SetType(header.ICMPv4EchoReply)
+	icmpHdr.SetCode(header.ICMPv4UnusedCode)
+	
+	// Set identifier and sequence
+	icmpHdr.SetIdent(uint16(echo.ID))
+	icmpHdr.SetSequence(uint16(echo.Seq))
+	
+	// Copy echo data
+	copy(packet[header.IPv4MinimumSize+8:], echo.Data)
+	
+	// Calculate ICMP checksum
+	icmpHdr.SetChecksum(0)
+	icmpHdr.SetChecksum(header.ICMPv4Checksum(icmpHdr, 0))
+
+	return packet
 }

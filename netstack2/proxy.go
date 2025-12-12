@@ -166,6 +166,7 @@ type ProxyHandler struct {
 	proxyNotifyHandle *channel.NotificationHandle
 	tcpHandler        *TCPHandler
 	udpHandler        *UDPHandler
+	icmpHandler       *ICMPHandler
 	subnetLookup      *SubnetLookup
 	natTable          map[connKey]*natState
 	destRewriteTable  map[destKey]netip.Addr // Maps original dest to rewritten dest for handler lookups
@@ -175,14 +176,15 @@ type ProxyHandler struct {
 
 // ProxyHandlerOptions configures the proxy handler
 type ProxyHandlerOptions struct {
-	EnableTCP bool
-	EnableUDP bool
-	MTU       int
+	EnableTCP  bool
+	EnableUDP  bool
+	EnableICMP bool
+	MTU        int
 }
 
 // NewProxyHandler creates a new proxy handler for promiscuous mode
 func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
-	if !options.EnableTCP && !options.EnableUDP {
+	if !options.EnableTCP && !options.EnableUDP && !options.EnableICMP {
 		return nil, nil // No proxy needed
 	}
 
@@ -220,6 +222,11 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 		if err := handler.udpHandler.InstallUDPHandler(); err != nil {
 			return nil, fmt.Errorf("failed to install UDP handler: %v", err)
 		}
+	}
+
+	// Initialize ICMP handler if enabled
+	if options.EnableICMP {
+		handler.icmpHandler = NewICMPHandler(handler.proxyStack, handler)
 	}
 
 	// // Example 1: Add a rule with no port restrictions (all ports allowed)
@@ -407,8 +414,33 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 		}
 		udpHeader := header.UDP(packet[headerLen:])
 		dstPort = udpHeader.DestinationPort()
+	case header.ICMPv4ProtocolNumber:
+		// ICMP doesn't have ports, use 0 for matching rules with no port restrictions
+		dstPort = 0
+		
+		// If we have an ICMP handler, handle ICMP packets directly
+		if p.icmpHandler != nil {
+			// Check if the source IP and destination IP match any subnet rule
+			matchedRule := p.subnetLookup.Match(srcAddr, dstAddr, dstPort)
+			if matchedRule != nil {
+				// Create a callback to send the reply back through the tunnel
+				sendReply := func(replyPacket []byte) {
+					// Inject the reply packet into the proxy endpoint so it gets sent back
+					pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{
+						Payload: buffer.MakeWithData(replyPacket),
+					})
+					p.proxyEp.InjectInbound(header.IPv4ProtocolNumber, pkb)
+				}
+				
+				// Handle the ICMP packet (this will proxy the ping)
+				if p.icmpHandler.HandleICMPPacket(packet, sendReply) {
+					return true
+				}
+			}
+		}
+		return false
 	default:
-		// For other protocols (ICMP, etc.), use port 0 (must match rules with no port restrictions)
+		// For other protocols, use port 0 (must match rules with no port restrictions)
 		dstPort = 0
 	}
 
