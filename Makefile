@@ -1,17 +1,24 @@
-.PHONY: all local docker-build-release
+.PHONY: all local docker-build docker-build-release
 
 all: local
 
 local:
 	CGO_ENABLED=0 go build -o ./bin/newt
 
+docker-build:
+	docker build -t fosrl/newt:latest .
+
 docker-build-release:
 	@if [ -z "$(tag)" ]; then \
 		echo "Error: tag is required. Usage: make docker-build-release tag=<tag>"; \
 		exit 1; \
 	fi
-	docker buildx build --platform linux/arm/v7,linux/arm64,linux/amd64 -t fosrl/newt:latest -f Dockerfile --push .
-	docker buildx build --platform linux/arm/v7,linux/arm64,linux/amd64 -t fosrl/newt:$(tag) -f Dockerfile --push .
+	docker buildx build . \
+		--platform linux/arm/v7,linux/arm64,linux/amd64 \
+		-t fosrl/newt:latest \
+		-t fosrl/newt:$(tag) \
+		-f Dockerfile \
+		--push
 
 .PHONY: go-build-release \
         go-build-release-linux-arm64 go-build-release-linux-arm32-v7 \
