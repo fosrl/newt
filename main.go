@@ -388,6 +388,13 @@ func runNewtMain(ctx context.Context) {
 		tlsClientCAs = append(tlsClientCAs, tlsClientCAsFlag...)
 	}
 
+	if *version {
+		fmt.Println("Newt version " + newtVersion)
+		os.Exit(0)
+	} else {
+		logger.Info("Newt version %s", newtVersion)
+	}
+
 	logger.Init(nil)
 	loggerLevel := util.ParseLogLevel(logLevel)
 	logger.GetLogger().SetLevel(loggerLevel)
@@ -437,13 +444,6 @@ func runNewtMain(ctx context.Context) {
 			_ = admin.Shutdown(ctx)
 		}()
 		defer func() { _ = tel.Shutdown(context.Background()) }()
-	}
-
-	if *version {
-		fmt.Println("Newt version " + newtVersion)
-		os.Exit(0)
-	} else {
-		logger.Info("Newt version %s", newtVersion)
 	}
 
 	if err := updates.CheckForUpdate("fosrl", "newt", newtVersion); err != nil {
