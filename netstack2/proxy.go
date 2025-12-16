@@ -22,10 +22,12 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
 
-// PortRange represents an allowed range of ports (inclusive)
+// PortRange represents an allowed range of ports (inclusive) with optional protocol filtering
+// Protocol can be "tcp", "udp", or "" (empty string means both protocols)
 type PortRange struct {
-	Min uint16
-	Max uint16
+	Min      uint16
+	Max      uint16
+	Protocol string // "tcp", "udp", or "" for both
 }
 
 // SubnetRule represents a subnet with optional port restrictions and source address
@@ -98,14 +100,16 @@ func (sl *SubnetLookup) RemoveSubnet(sourcePrefix, destPrefix netip.Prefix) {
 	delete(sl.rules, key)
 }
 
-// Match checks if a source IP, destination IP, and port match any subnet rule
-// Returns the matched rule if BOTH:
+// Match checks if a source IP, destination IP, port, and protocol match any subnet rule
+// Returns the matched rule if ALL of these conditions are met:
 //   - The source IP is in the rule's source prefix
 //   - The destination IP is in the rule's destination prefix
 //   - The port is in an allowed range (or no port restrictions exist)
+//   - The protocol matches (or the port range allows both protocols)
 //
+// proto should be header.TCPProtocolNumber or header.UDPProtocolNumber
 // Returns nil if no rule matches
-func (sl *SubnetLookup) Match(srcIP, dstIP netip.Addr, port uint16) *SubnetRule {
+func (sl *SubnetLookup) Match(srcIP, dstIP netip.Addr, port uint16, proto tcpip.TransportProtocolNumber) *SubnetRule {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
 
@@ -126,10 +130,20 @@ func (sl *SubnetLookup) Match(srcIP, dstIP netip.Addr, port uint16) *SubnetRule 
 			return rule
 		}
 
-		// Check if port is in any of the allowed ranges
+		// Check if port and protocol are in any of the allowed ranges
 		for _, pr := range rule.PortRanges {
 			if port >= pr.Min && port <= pr.Max {
-				return rule
+				// Check protocol compatibility
+				if pr.Protocol == "" {
+					// Empty protocol means allow both TCP and UDP
+					return rule
+				}
+				// Check if the packet protocol matches the port range protocol
+				if (pr.Protocol == "tcp" && proto == header.TCPProtocolNumber) ||
+					(pr.Protocol == "udp" && proto == header.UDPProtocolNumber) {
+					return rule
+				}
+				// Port matches but protocol doesn't - continue checking other ranges
 			}
 		}
 	}
@@ -435,8 +449,8 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 		logger.Debug("HandleIncomingPacket: Unknown protocol %d from %s to %s", protocol, srcAddr, dstAddr)
 	}
 
-	// Check if the source IP, destination IP, and port match any subnet rule
-	matchedRule := p.subnetLookup.Match(srcAddr, dstAddr, dstPort)
+	// Check if the source IP, destination IP, port, and protocol match any subnet rule
+	matchedRule := p.subnetLookup.Match(srcAddr, dstAddr, dstPort, protocol)
 	if matchedRule != nil {
 		logger.Debug("HandleIncomingPacket: Matched rule for %s -> %s (proto=%d, port=%d)",
 			srcAddr, dstAddr, protocol, dstPort)
