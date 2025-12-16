@@ -594,6 +594,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		netstack2.NetTunOptions{
 			EnableTCPProxy: true,
 			EnableUDPProxy: true,
+			EnableICMPProxy: true,
 		},
 	)
 	if err != nil {
