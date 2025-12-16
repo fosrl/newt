@@ -46,6 +46,7 @@ type Target struct {
 type PortRange struct {
 	Min uint16 `json:"min"`
 	Max uint16 `json:"max"`
+	Protocol string `json:"protocol"` // "tcp" or "udp"
 }
 
 type Peer struct {
@@ -701,6 +702,7 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 			portRanges = append(portRanges, netstack2.PortRange{
 				Min: pr.Min,
 				Max: pr.Max,
+				Protocol: pr.Protocol,
 			})
 		}
 
