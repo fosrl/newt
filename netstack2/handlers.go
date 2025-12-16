@@ -508,35 +508,50 @@ func (h *ICMPHandler) proxyPing(srcIP, originalDstIP, actualDstIP string, ident,
 		return
 	}
 
-	logger.Debug("ICMP Handler: Ping sent to %s, waiting for reply", actualDstIP)
+	logger.Debug("ICMP Handler: Ping sent to %s, waiting for reply (ident=%d, seq=%d)", actualDstIP, ident, seq)
 
-	// Wait for reply
+	// Wait for reply - loop to filter out non-matching packets (like our own echo request)
 	replyBuf := make([]byte, 1500)
-	n, peer, err := conn.ReadFrom(replyBuf)
-	if err != nil {
-		logger.Info("ICMP Handler: Failed to receive ping reply from %s: %v", actualDstIP, err)
-		return
-	}
+	var echoReply *icmp.Echo
+	
+	for {
+		n, peer, err := conn.ReadFrom(replyBuf)
+		if err != nil {
+			logger.Info("ICMP Handler: Failed to receive ping reply from %s: %v", actualDstIP, err)
+			return
+		}
 
-	logger.Debug("ICMP Handler: Received %d bytes from %s", n, peer.String())
+		logger.Debug("ICMP Handler: Received %d bytes from %s", n, peer.String())
 
-	// Parse the reply
-	replyMsg, err := icmp.ParseMessage(1, replyBuf[:n])
-	if err != nil {
-		logger.Info("ICMP Handler: Failed to parse ICMP reply: %v", err)
-		return
-	}
+		// Parse the reply
+		replyMsg, err := icmp.ParseMessage(1, replyBuf[:n])
+		if err != nil {
+			logger.Debug("ICMP Handler: Failed to parse ICMP message: %v", err)
+			continue
+		}
 
-	// Check if it's an echo reply
-	if replyMsg.Type != ipv4.ICMPTypeEchoReply {
-		logger.Debug("ICMP Handler: Received non-echo-reply type: %v", replyMsg.Type)
-		return
-	}
+		// Check if it's an echo reply (type 0), not an echo request (type 8)
+		if replyMsg.Type != ipv4.ICMPTypeEchoReply {
+			logger.Debug("ICMP Handler: Received non-echo-reply type: %v (expected echo reply), continuing to wait", replyMsg.Type)
+			continue
+		}
 
-	echoReply, ok := replyMsg.Body.(*icmp.Echo)
-	if !ok {
-		logger.Info("ICMP Handler: Invalid echo reply body type")
-		return
+		reply, ok := replyMsg.Body.(*icmp.Echo)
+		if !ok {
+			logger.Debug("ICMP Handler: Invalid echo reply body type, continuing to wait")
+			continue
+		}
+
+		// Verify the ident and sequence match what we sent
+		if reply.ID != int(ident) || reply.Seq != int(seq) {
+			logger.Debug("ICMP Handler: Reply ident/seq mismatch: got ident=%d seq=%d, want ident=%d seq=%d",
+				reply.ID, reply.Seq, ident, seq)
+			continue
+		}
+
+		// Found matching reply
+		echoReply = reply
+		break
 	}
 
 	logger.Info("ICMP Handler: Ping successful to %s, injecting reply (ident=%d, seq=%d)",
