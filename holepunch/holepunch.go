@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 // ExitNode represents a WireGuard exit node for hole punching
 type ExitNode struct {
 	Endpoint  string `json:"endpoint"`
+	RelayPort uint16 `json:"relayPort"`
 	PublicKey string `json:"publicKey"`
 }
 
@@ -202,7 +204,7 @@ func (m *Manager) TriggerHolePunch() error {
 			continue
 		}
 
-		serverAddr := net.JoinHostPort(host, "21820")
+		serverAddr := net.JoinHostPort(host, strconv.Itoa(int(exitNode.RelayPort)))
 		remoteAddr, err := net.ResolveUDPAddr("udp", serverAddr)
 		if err != nil {
 			logger.Error("Failed to resolve UDP address %s: %v", serverAddr, err)
@@ -313,7 +315,7 @@ func (m *Manager) runMultipleExitNodes() {
 				continue
 			}
 
-			serverAddr := net.JoinHostPort(host, "21820")
+			serverAddr := net.JoinHostPort(host, strconv.Itoa(int(exitNode.RelayPort)))
 			remoteAddr, err := net.ResolveUDPAddr("udp", serverAddr)
 			if err != nil {
 				logger.Error("Failed to resolve UDP address %s: %v", serverAddr, err)

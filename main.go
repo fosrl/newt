@@ -37,6 +37,7 @@ import (
 
 type WgData struct {
 	Endpoint           string               `json:"endpoint"`
+	RelayPort          uint16               `json:"relayPort"`
 	PublicKey          string               `json:"publicKey"`
 	ServerIP           string               `json:"serverIP"`
 	TunnelIP           string               `json:"tunnelIP"`
@@ -691,7 +692,12 @@ func runNewtMain(ctx context.Context) {
 			return
 		}
 
-		clientsHandleNewtConnection(wgData.PublicKey, endpoint)
+		relayPort := wgData.RelayPort
+		if relayPort == 0 {
+            relayPort = 21820
+        }
+
+		clientsHandleNewtConnection(wgData.PublicKey, endpoint, relayPort)
 
 		// Configure WireGuard
 		config := fmt.Sprintf(`private_key=%s

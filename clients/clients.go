@@ -268,16 +268,21 @@ func (s *WireGuardService) SetOnNetstackClose(callback func()) {
 }
 
 // StartHolepunch starts hole punching to a specific endpoint
-func (s *WireGuardService) StartHolepunch(publicKey string, endpoint string) {
+func (s *WireGuardService) StartHolepunch(publicKey string, endpoint string, relayPort uint16) {
 	if s.holePunchManager == nil {
 		logger.Warn("Hole punch manager not initialized")
 		return
+	}
+
+	if relayPort == 0 {
+	    relayPort = 21820
 	}
 
 	// Convert websocket.ExitNode to holepunch.ExitNode
 	hpExitNodes := []holepunch.ExitNode{
 		{
 			Endpoint:  endpoint,
+			RelayPort: relayPort,
 			PublicKey: publicKey,
 		},
 	}
