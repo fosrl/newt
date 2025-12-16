@@ -63,7 +63,7 @@ func closeClients() {
 	}
 }
 
-func clientsHandleNewtConnection(publicKey string, endpoint string) {
+func clientsHandleNewtConnection(publicKey string, endpoint string, relayPort uint16) {
 	if !ready {
 		return
 	}
@@ -77,7 +77,7 @@ func clientsHandleNewtConnection(publicKey string, endpoint string) {
 	endpoint = strings.Join(parts[:len(parts)-1], ":")
 
 	if wgService != nil {
-		wgService.StartHolepunch(publicKey, endpoint)
+		wgService.StartHolepunch(publicKey, endpoint, relayPort)
 	}
 }
 
