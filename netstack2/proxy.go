@@ -41,6 +41,7 @@ type PortRange struct {
 type SubnetRule struct {
 	SourcePrefix netip.Prefix // Source IP prefix (who is sending)
 	DestPrefix   netip.Prefix // Destination IP prefix (where it's going)
+	DisableIcmp  bool         // If true, ICMP traffic is blocked for this subnet
 	RewriteTo    string       // Optional rewrite address for DNAT - can be IP/CIDR or domain name
 	PortRanges   []PortRange  // empty slice means all ports allowed
 }
@@ -437,7 +438,7 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 	// Check if the source IP, destination IP, and port match any subnet rule
 	matchedRule := p.subnetLookup.Match(srcAddr, dstAddr, dstPort)
 	if matchedRule != nil {
-		logger.Debug("HandleIncomingPacket: Matched rule for %s -> %s (proto=%d, port=%d)", 
+		logger.Debug("HandleIncomingPacket: Matched rule for %s -> %s (proto=%d, port=%d)",
 			srcAddr, dstAddr, protocol, dstPort)
 		// Check if we need to perform DNAT
 		if matchedRule.RewriteTo != "" {
@@ -529,7 +530,7 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 		return true
 	}
 
-	logger.Debug("HandleIncomingPacket: No matching rule for %s -> %s (proto=%d, port=%d)", 
+	logger.Debug("HandleIncomingPacket: No matching rule for %s -> %s (proto=%d, port=%d)",
 		srcAddr, dstAddr, protocol, dstPort)
 	return false
 }
