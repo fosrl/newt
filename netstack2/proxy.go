@@ -43,6 +43,7 @@ type PortRange struct {
 type SubnetRule struct {
 	SourcePrefix netip.Prefix // Source IP prefix (who is sending)
 	DestPrefix   netip.Prefix // Destination IP prefix (where it's going)
+	DisableIcmp  bool         // If true, ICMP traffic is blocked for this subnet
 	RewriteTo    string       // Optional rewrite address for DNAT - can be IP/CIDR or domain name
 	PortRanges   []PortRange  // empty slice means all ports allowed
 }
@@ -69,7 +70,7 @@ func NewSubnetLookup() *SubnetLookup {
 // AddSubnet adds a subnet rule with source and destination prefixes and optional port restrictions
 // If portRanges is nil or empty, all ports are allowed for this subnet
 // rewriteTo can be either an IP/CIDR (e.g., "192.168.1.1/32") or a domain name (e.g., "example.com")
-func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange) {
+func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
@@ -81,6 +82,7 @@ func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, rewrite
 	sl.rules[key] = &SubnetRule{
 		SourcePrefix: sourcePrefix,
 		DestPrefix:   destPrefix,
+		DisableIcmp:  disableIcmp,
 		RewriteTo:    rewriteTo,
 		PortRanges:   portRanges,
 	}
@@ -121,6 +123,11 @@ func (sl *SubnetLookup) Match(srcIP, dstIP netip.Addr, port uint16, proto tcpip.
 		}
 		if !rule.DestPrefix.Contains(dstIP) {
 			continue
+		}
+
+		if rule.DisableIcmp && (proto == header.ICMPv4ProtocolNumber || proto == header.ICMPv6ProtocolNumber) {
+		    // ICMP is disabled for this subnet
+			return nil
 		}
 
 		// Both IPs match - now check port restrictions
@@ -180,23 +187,27 @@ type ProxyHandler struct {
 	proxyNotifyHandle *channel.NotificationHandle
 	tcpHandler        *TCPHandler
 	udpHandler        *UDPHandler
+	icmpHandler       *ICMPHandler
 	subnetLookup      *SubnetLookup
 	natTable          map[connKey]*natState
 	destRewriteTable  map[destKey]netip.Addr // Maps original dest to rewritten dest for handler lookups
 	natMu             sync.RWMutex
 	enabled           bool
+	icmpReplies       chan []byte          // Channel for ICMP reply packets to be sent back through the tunnel
+	notifiable        channel.Notification // Notification handler for triggering reads
 }
 
 // ProxyHandlerOptions configures the proxy handler
 type ProxyHandlerOptions struct {
-	EnableTCP bool
-	EnableUDP bool
-	MTU       int
+	EnableTCP  bool
+	EnableUDP  bool
+	EnableICMP bool
+	MTU        int
 }
 
 // NewProxyHandler creates a new proxy handler for promiscuous mode
 func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
-	if !options.EnableTCP && !options.EnableUDP {
+	if !options.EnableTCP && !options.EnableUDP && !options.EnableICMP {
 		return nil, nil // No proxy needed
 	}
 
@@ -205,6 +216,7 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 		subnetLookup:     NewSubnetLookup(),
 		natTable:         make(map[connKey]*natState),
 		destRewriteTable: make(map[destKey]netip.Addr),
+		icmpReplies:      make(chan []byte, 256), // Buffer for ICMP reply packets
 		proxyEp:          channel.New(1024, uint32(options.MTU), ""),
 		proxyStack: stack.New(stack.Options{
 			NetworkProtocols: []stack.NetworkProtocolFactory{
@@ -236,6 +248,15 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 		}
 	}
 
+	// Initialize ICMP handler if enabled
+	if options.EnableICMP {
+		handler.icmpHandler = NewICMPHandler(handler.proxyStack, handler)
+		if err := handler.icmpHandler.InstallICMPHandler(); err != nil {
+			return nil, fmt.Errorf("failed to install ICMP handler: %v", err)
+		}
+		logger.Info("ProxyHandler: ICMP handler enabled")
+	}
+
 	// // Example 1: Add a rule with no port restrictions (all ports allowed)
 	// // This accepts all traffic FROM 10.0.0.0/24 TO 10.20.20.0/24
 	// sourceSubnet := netip.MustParsePrefix("10.0.0.0/24")
@@ -260,11 +281,11 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 // destPrefix: The IP prefix of the destination
 // rewriteTo: Optional address to rewrite destination to - can be IP/CIDR or domain name
 // If portRanges is nil or empty, all ports are allowed for this subnet
-func (p *ProxyHandler) AddSubnetRule(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange) {
+func (p *ProxyHandler) AddSubnetRule(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool) {
 	if p == nil || !p.enabled {
 		return
 	}
-	p.subnetLookup.AddSubnet(sourcePrefix, destPrefix, rewriteTo, portRanges)
+	p.subnetLookup.AddSubnet(sourcePrefix, destPrefix, rewriteTo, portRanges, disableIcmp)
 }
 
 // RemoveSubnetRule removes a subnet from the proxy handler
@@ -342,6 +363,9 @@ func (p *ProxyHandler) Initialize(notifiable channel.Notification) error {
 	if p == nil || !p.enabled {
 		return nil
 	}
+
+	// Store notifiable for triggering notifications on ICMP replies
+	p.notifiable = notifiable
 
 	// Add notification handler
 	p.proxyNotifyHandle = p.proxyEp.AddNotify(notifiable)
@@ -421,14 +445,21 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 		}
 		udpHeader := header.UDP(packet[headerLen:])
 		dstPort = udpHeader.DestinationPort()
-	default:
-		// For other protocols (ICMP, etc.), use port 0 (must match rules with no port restrictions)
+	case header.ICMPv4ProtocolNumber:
+		// ICMP doesn't have ports, use port 0 (must match rules with no port restrictions)
 		dstPort = 0
+		logger.Debug("HandleIncomingPacket: ICMP packet from %s to %s", srcAddr, dstAddr)
+	default:
+		// For other protocols, use port 0 (must match rules with no port restrictions)
+		dstPort = 0
+		logger.Debug("HandleIncomingPacket: Unknown protocol %d from %s to %s", protocol, srcAddr, dstAddr)
 	}
 
 	// Check if the source IP, destination IP, port, and protocol match any subnet rule
 	matchedRule := p.subnetLookup.Match(srcAddr, dstAddr, dstPort, protocol)
 	if matchedRule != nil {
+		logger.Debug("HandleIncomingPacket: Matched rule for %s -> %s (proto=%d, port=%d)",
+			srcAddr, dstAddr, protocol, dstPort)
 		// Check if we need to perform DNAT
 		if matchedRule.RewriteTo != "" {
 			// Create connection tracking key using original destination
@@ -515,9 +546,12 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 			Payload: buffer.MakeWithData(packet),
 		})
 		p.proxyEp.InjectInbound(header.IPv4ProtocolNumber, pkb)
+		logger.Debug("HandleIncomingPacket: Injected packet into proxy stack (proto=%d)", protocol)
 		return true
 	}
 
+	logger.Debug("HandleIncomingPacket: No matching rule for %s -> %s (proto=%d, port=%d)",
+		srcAddr, dstAddr, protocol, dstPort)
 	return false
 }
 
@@ -640,6 +674,15 @@ func (p *ProxyHandler) ReadOutgoingPacket() *buffer.View {
 		return nil
 	}
 
+	// First check for ICMP reply packets (non-blocking)
+	select {
+	case icmpReply := <-p.icmpReplies:
+		logger.Debug("ReadOutgoingPacket: Returning ICMP reply packet (%d bytes)", len(icmpReply))
+		return buffer.NewViewWithData(icmpReply)
+	default:
+		// No ICMP reply available, continue to check proxy endpoint
+	}
+
 	pkt := p.proxyEp.Read()
 	if pkt != nil {
 		view := pkt.ToView()
@@ -669,6 +712,11 @@ func (p *ProxyHandler) ReadOutgoingPacket() *buffer.View {
 					srcPort = udpHeader.SourcePort()
 					dstPort = udpHeader.DestinationPort()
 				}
+			case header.ICMPv4ProtocolNumber:
+				// ICMP packets don't need NAT translation in our implementation
+				// since we construct reply packets with the correct addresses
+				logger.Debug("ReadOutgoingPacket: ICMP packet from %s to %s", srcIP, dstIP)
+				return view
 			}
 
 			// Look up NAT state for reverse translation
@@ -702,10 +750,35 @@ func (p *ProxyHandler) ReadOutgoingPacket() *buffer.View {
 	return nil
 }
 
+// QueueICMPReply queues an ICMP reply packet to be sent back through the tunnel
+func (p *ProxyHandler) QueueICMPReply(packet []byte) bool {
+	if p == nil || !p.enabled {
+		return false
+	}
+
+	select {
+	case p.icmpReplies <- packet:
+		logger.Debug("QueueICMPReply: Queued ICMP reply packet (%d bytes)", len(packet))
+		// Trigger notification so WriteNotify picks up the packet
+		if p.notifiable != nil {
+			p.notifiable.WriteNotify()
+		}
+		return true
+	default:
+		logger.Info("QueueICMPReply: ICMP reply channel full, dropping packet")
+		return false
+	}
+}
+
 // Close cleans up the proxy handler resources
 func (p *ProxyHandler) Close() error {
 	if p == nil || !p.enabled {
 		return nil
+	}
+
+	// Close ICMP replies channel
+	if p.icmpReplies != nil {
+		close(p.icmpReplies)
 	}
 
 	if p.proxyStack != nil {
