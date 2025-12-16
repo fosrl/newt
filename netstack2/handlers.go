@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -458,20 +459,66 @@ func (h *ICMPHandler) proxyPing(srcIP, originalDstIP, actualDstIP string, ident,
 	logger.Debug("ICMP Handler: Proxying ping from %s to %s (actual: %s), ident=%d, seq=%d",
 		srcIP, originalDstIP, actualDstIP, ident, seq)
 
-	// Create ICMP connection to the actual destination
+	// Try three methods in order: ip4:icmp -> udp4 -> ping command
+	// Track which method succeeded so we can handle identifier matching correctly
+	method, success := h.tryICMPMethods(actualDstIP, ident, seq, payload)
+
+	if !success {
+		logger.Info("ICMP Handler: All ping methods failed for %s", actualDstIP)
+		return
+	}
+
+	logger.Info("ICMP Handler: Ping successful to %s using %s, injecting reply (ident=%d, seq=%d)",
+		actualDstIP, method, ident, seq)
+
+	// Build the reply packet to inject back into the netstack
+	// The reply should appear to come from the original destination (before rewrite)
+	h.injectICMPReply(srcIP, originalDstIP, ident, seq, payload)
+}
+
+// tryICMPMethods tries all available ICMP methods in order
+func (h *ICMPHandler) tryICMPMethods(actualDstIP string, ident, seq uint16, payload []byte) (string, bool) {
+	if h.tryRawICMP(actualDstIP, ident, seq, payload, false) {
+		return "raw ICMP", true
+	}
+	if h.tryUnprivilegedICMP(actualDstIP, ident, seq, payload) {
+		return "unprivileged ICMP", true
+	}
+	if h.tryPingCommand(actualDstIP, ident, seq, payload) {
+		return "ping command", true
+	}
+	return "", false
+}
+
+// tryRawICMP attempts to ping using raw ICMP sockets (requires CAP_NET_RAW or root)
+func (h *ICMPHandler) tryRawICMP(actualDstIP string, ident, seq uint16, payload []byte, ignoreIdent bool) bool {
 	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
 	if err != nil {
-		logger.Info("ICMP Handler: Failed to create ICMP socket: %v", err)
-		// Try unprivileged ICMP (udp4)
-		conn, err = icmp.ListenPacket("udp4", "0.0.0.0")
-		if err != nil {
-			logger.Info("ICMP Handler: Failed to create unprivileged ICMP socket: %v", err)
-			return
-		}
-		logger.Debug("ICMP Handler: Using unprivileged ICMP socket")
+		logger.Debug("ICMP Handler: Raw ICMP socket not available: %v", err)
+		return false
 	}
 	defer conn.Close()
 
+	logger.Debug("ICMP Handler: Using raw ICMP socket")
+	return h.sendAndReceiveICMP(conn, actualDstIP, ident, seq, payload, false, ignoreIdent)
+}
+
+// tryUnprivilegedICMP attempts to ping using unprivileged ICMP (requires ping_group_range configured)
+func (h *ICMPHandler) tryUnprivilegedICMP(actualDstIP string, ident, seq uint16, payload []byte) bool {
+	conn, err := icmp.ListenPacket("udp4", "0.0.0.0")
+	if err != nil {
+		logger.Debug("ICMP Handler: Unprivileged ICMP socket not available: %v", err)
+		return false
+	}
+	defer conn.Close()
+
+	logger.Debug("ICMP Handler: Using unprivileged ICMP socket")
+	// Unprivileged ICMP doesn't let us control the identifier, so we ignore it in matching
+	return h.sendAndReceiveICMP(conn, actualDstIP, ident, seq, payload, true, true)
+}
+
+// sendAndReceiveICMP sends an ICMP echo request and waits for the reply
+func (h *ICMPHandler) sendAndReceiveICMP(conn *icmp.PacketConn, actualDstIP string, ident, seq uint16, payload []byte, isUnprivileged bool, ignoreIdent bool) bool {
 	// Build the ICMP echo request message
 	echoMsg := &icmp.Message{
 		Type: ipv4.ICMPTypeEcho,
@@ -485,40 +532,45 @@ func (h *ICMPHandler) proxyPing(srcIP, originalDstIP, actualDstIP string, ident,
 
 	msgBytes, err := echoMsg.Marshal(nil)
 	if err != nil {
-		logger.Info("ICMP Handler: Failed to marshal ICMP message: %v", err)
-		return
+		logger.Debug("ICMP Handler: Failed to marshal ICMP message: %v", err)
+		return false
 	}
 
-	// Resolve destination address
-	dst, err := net.ResolveIPAddr("ip4", actualDstIP)
-	if err != nil {
-		logger.Info("ICMP Handler: Failed to resolve destination %s: %v", actualDstIP, err)
-		return
+	// Resolve destination address based on socket type
+	var writeErr error
+	if isUnprivileged {
+		// For unprivileged ICMP, use UDP-style addressing
+		udpAddr := &net.UDPAddr{IP: net.ParseIP(actualDstIP)}
+		logger.Debug("ICMP Handler: Sending ping to %s (unprivileged)", udpAddr.String())
+		conn.SetDeadline(time.Now().Add(icmpTimeout))
+		_, writeErr = conn.WriteTo(msgBytes, udpAddr)
+	} else {
+		// For raw ICMP, use IP addressing
+		dst, err := net.ResolveIPAddr("ip4", actualDstIP)
+		if err != nil {
+			logger.Debug("ICMP Handler: Failed to resolve destination %s: %v", actualDstIP, err)
+			return false
+		}
+		logger.Debug("ICMP Handler: Sending ping to %s (raw)", dst.String())
+		conn.SetDeadline(time.Now().Add(icmpTimeout))
+		_, writeErr = conn.WriteTo(msgBytes, dst)
 	}
 
-	logger.Debug("ICMP Handler: Sending ping to %s", dst.String())
-
-	// Set deadline for the ping
-	conn.SetDeadline(time.Now().Add(icmpTimeout))
-
-	// Send the ping
-	_, err = conn.WriteTo(msgBytes, dst)
-	if err != nil {
-		logger.Info("ICMP Handler: Failed to send ping to %s: %v", actualDstIP, err)
-		return
+	if writeErr != nil {
+		logger.Debug("ICMP Handler: Failed to send ping to %s: %v", actualDstIP, writeErr)
+		return false
 	}
 
 	logger.Debug("ICMP Handler: Ping sent to %s, waiting for reply (ident=%d, seq=%d)", actualDstIP, ident, seq)
 
-	// Wait for reply - loop to filter out non-matching packets (like our own echo request)
+	// Wait for reply - loop to filter out non-matching packets
 	replyBuf := make([]byte, 1500)
-	var echoReply *icmp.Echo
 
 	for {
 		n, peer, err := conn.ReadFrom(replyBuf)
 		if err != nil {
-			logger.Info("ICMP Handler: Failed to receive ping reply from %s: %v", actualDstIP, err)
-			return
+			logger.Debug("ICMP Handler: Failed to receive ping reply from %s: %v", actualDstIP, err)
+			return false
 		}
 
 		logger.Debug("ICMP Handler: Received %d bytes from %s", n, peer.String())
@@ -532,7 +584,7 @@ func (h *ICMPHandler) proxyPing(srcIP, originalDstIP, actualDstIP string, ident,
 
 		// Check if it's an echo reply (type 0), not an echo request (type 8)
 		if replyMsg.Type != ipv4.ICMPTypeEchoReply {
-			logger.Debug("ICMP Handler: Received non-echo-reply type: %v (expected echo reply), continuing to wait", replyMsg.Type)
+			logger.Debug("ICMP Handler: Received non-echo-reply type: %v, continuing to wait", replyMsg.Type)
 			continue
 		}
 
@@ -542,24 +594,45 @@ func (h *ICMPHandler) proxyPing(srcIP, originalDstIP, actualDstIP string, ident,
 			continue
 		}
 
-		// Verify the ident and sequence match what we sent
-		if reply.ID != int(ident) || reply.Seq != int(seq) {
-			logger.Debug("ICMP Handler: Reply ident/seq mismatch: got ident=%d seq=%d, want ident=%d seq=%d",
-				reply.ID, reply.Seq, ident, seq)
+		// Verify the sequence matches what we sent
+		// For unprivileged ICMP, the kernel controls the identifier, so we only check sequence
+		if reply.Seq != int(seq) {
+			logger.Debug("ICMP Handler: Reply seq mismatch: got seq=%d, want seq=%d", reply.Seq, seq)
+			continue
+		}
+		
+		if !ignoreIdent && reply.ID != int(ident) {
+			logger.Debug("ICMP Handler: Reply ident mismatch: got ident=%d, want ident=%d", reply.ID, ident)
 			continue
 		}
 
 		// Found matching reply
-		echoReply = reply
-		break
+		logger.Debug("ICMP Handler: Received valid echo reply")
+		return true
+	}
+}
+
+// tryPingCommand attempts to ping using the system ping command (always works, but less control)
+func (h *ICMPHandler) tryPingCommand(actualDstIP string, ident, seq uint16, payload []byte) bool {
+	logger.Debug("ICMP Handler: Attempting to use system ping command")
+
+	ctx, cancel := context.WithTimeout(context.Background(), icmpTimeout)
+	defer cancel()
+
+	// Send one ping with timeout
+	// -c 1: count = 1 packet
+	// -W 5: timeout = 5 seconds
+	// -q: quiet output (just summary)
+	cmd := exec.CommandContext(ctx, "ping", "-c", "1", "-W", "5", "-q", actualDstIP)
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		logger.Debug("ICMP Handler: System ping command failed: %v, output: %s", err, string(output))
+		return false
 	}
 
-	logger.Info("ICMP Handler: Ping successful to %s, injecting reply (ident=%d, seq=%d)",
-		actualDstIP, echoReply.ID, echoReply.Seq)
-
-	// Build the reply packet to inject back into the netstack
-	// The reply should appear to come from the original destination (before rewrite)
-	h.injectICMPReply(srcIP, originalDstIP, uint16(echoReply.ID), uint16(echoReply.Seq), echoReply.Data)
+	logger.Debug("ICMP Handler: System ping command succeeded")
+	return true
 }
 
 // injectICMPReply creates an ICMP echo reply packet and queues it to be sent back through the tunnel
