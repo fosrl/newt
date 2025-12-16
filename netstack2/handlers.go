@@ -424,7 +424,7 @@ func (h *ICMPHandler) handleICMPPacket(id stack.TransportEndpointID, pkt *stack.
 		return false
 	}
 
-	matchedRule := h.proxyHandler.subnetLookup.Match(srcAddr, dstAddr, 0)
+	matchedRule := h.proxyHandler.subnetLookup.Match(srcAddr, dstAddr, 0, header.ICMPv4ProtocolNumber)
 	if matchedRule == nil {
 		logger.Debug("ICMP Handler: No matching subnet rule for %s -> %s", srcIP, dstIP)
 		return false
@@ -446,7 +446,7 @@ func (h *ICMPHandler) handleICMPPacket(id stack.TransportEndpointID, pkt *stack.
 
 	// Get the full ICMP payload (including the data after the header)
 	icmpPayload := pkt.Data().AsRange().ToSlice()
-	
+
 	// Handle the ping in a goroutine to avoid blocking
 	go h.proxyPing(srcIP, dstIP, actualDstIP, icmpHdr.Ident(), icmpHdr.Sequence(), icmpPayload)
 
@@ -513,7 +513,7 @@ func (h *ICMPHandler) proxyPing(srcIP, originalDstIP, actualDstIP string, ident,
 	// Wait for reply - loop to filter out non-matching packets (like our own echo request)
 	replyBuf := make([]byte, 1500)
 	var echoReply *icmp.Echo
-	
+
 	for {
 		n, peer, err := conn.ReadFrom(replyBuf)
 		if err != nil {

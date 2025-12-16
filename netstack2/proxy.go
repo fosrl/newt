@@ -70,7 +70,7 @@ func NewSubnetLookup() *SubnetLookup {
 // AddSubnet adds a subnet rule with source and destination prefixes and optional port restrictions
 // If portRanges is nil or empty, all ports are allowed for this subnet
 // rewriteTo can be either an IP/CIDR (e.g., "192.168.1.1/32") or a domain name (e.g., "example.com")
-func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange) {
+func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
@@ -82,6 +82,7 @@ func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, rewrite
 	sl.rules[key] = &SubnetRule{
 		SourcePrefix: sourcePrefix,
 		DestPrefix:   destPrefix,
+		DisableIcmp:  disableIcmp,
 		RewriteTo:    rewriteTo,
 		PortRanges:   portRanges,
 	}
@@ -122,6 +123,11 @@ func (sl *SubnetLookup) Match(srcIP, dstIP netip.Addr, port uint16, proto tcpip.
 		}
 		if !rule.DestPrefix.Contains(dstIP) {
 			continue
+		}
+
+		if rule.DisableIcmp && (proto == header.ICMPv4ProtocolNumber || proto == header.ICMPv6ProtocolNumber) {
+		    // ICMP is disabled for this subnet
+			return nil
 		}
 
 		// Both IPs match - now check port restrictions
@@ -187,8 +193,8 @@ type ProxyHandler struct {
 	destRewriteTable  map[destKey]netip.Addr // Maps original dest to rewritten dest for handler lookups
 	natMu             sync.RWMutex
 	enabled           bool
-	icmpReplies       chan []byte            // Channel for ICMP reply packets to be sent back through the tunnel
-	notifiable        channel.Notification   // Notification handler for triggering reads
+	icmpReplies       chan []byte          // Channel for ICMP reply packets to be sent back through the tunnel
+	notifiable        channel.Notification // Notification handler for triggering reads
 }
 
 // ProxyHandlerOptions configures the proxy handler
@@ -275,11 +281,11 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 // destPrefix: The IP prefix of the destination
 // rewriteTo: Optional address to rewrite destination to - can be IP/CIDR or domain name
 // If portRanges is nil or empty, all ports are allowed for this subnet
-func (p *ProxyHandler) AddSubnetRule(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange) {
+func (p *ProxyHandler) AddSubnetRule(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool) {
 	if p == nil || !p.enabled {
 		return
 	}
-	p.subnetLookup.AddSubnet(sourcePrefix, destPrefix, rewriteTo, portRanges)
+	p.subnetLookup.AddSubnet(sourcePrefix, destPrefix, rewriteTo, portRanges, disableIcmp)
 }
 
 // RemoveSubnetRule removes a subnet from the proxy handler

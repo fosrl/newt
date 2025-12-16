@@ -354,10 +354,10 @@ func (net *Net) ListenUDP(laddr *net.UDPAddr) (*gonet.UDPConn, error) {
 // AddProxySubnetRule adds a subnet rule to the proxy handler
 // If portRanges is nil or empty, all ports are allowed for this subnet
 // rewriteTo can be either an IP/CIDR (e.g., "192.168.1.1/32") or a domain name (e.g., "example.com")
-func (net *Net) AddProxySubnetRule(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange) {
+func (net *Net) AddProxySubnetRule(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool) {
 	tun := (*netTun)(net)
 	if tun.proxyHandler != nil {
-		tun.proxyHandler.AddSubnetRule(sourcePrefix, destPrefix, rewriteTo, portRanges)
+		tun.proxyHandler.AddSubnetRule(sourcePrefix, destPrefix, rewriteTo, portRanges, disableIcmp)
 	}
 }
 
