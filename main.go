@@ -119,6 +119,7 @@ var (
 	interfaceName                      string
 	port                               uint16
 	disableClients                     bool
+	trueUserspaceWG                    bool
 	updownScript                       string
 	dockerSocket                       string
 	dockerEnforceNetworkValidation     string
@@ -187,9 +188,6 @@ func runNewtMain(ctx context.Context) {
 	updownScript = os.Getenv("UPDOWN_SCRIPT")
 	interfaceName = os.Getenv("INTERFACE")
 	portStr := os.Getenv("PORT")
-    // --- Patch ----
-    rootlessAndroidWG := os.Getenv("NEWT_ROOTLESS_ANDROID") == "1"
-    // --- Patch ----
 
 	// Metrics/observability env mirrors
 	metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED")
@@ -198,6 +196,10 @@ func runNewtMain(ctx context.Context) {
 	regionEnv := os.Getenv("NEWT_REGION")
 	asyncBytesEnv := os.Getenv("NEWT_METRICS_ASYNC_BYTES")
 
+    // --- Patch ----
+    trueUserspaceWGEnv := os.Getenv("TRUE_USERSPACE_WG")
+    trueUserspaceWG = trueUserspaceWGEnv == "true"
+    // --- Patch ----
 	disableClientsEnv := os.Getenv("DISABLE_CLIENTS")
 	disableClients = disableClientsEnv == "true"
 	useNativeInterfaceEnv := os.Getenv("USE_NATIVE_INTERFACE")
@@ -266,6 +268,9 @@ func runNewtMain(ctx context.Context) {
 	}
 	if disableClientsEnv == "" {
 		flag.BoolVar(&disableClients, "disable-clients", false, "Disable clients on the WireGuard interface")
+	}
+	if trueUserspaceWGEnv == "" {
+		flag.BoolVar(&trueUserspaceWG, "true-userspace-wg", false, "Enable True Userspace Wiregaurd Mode (Rootless Android/Termux etc)")
 	}
 	if enforceHealthcheckCertEnv == "" {
 		flag.BoolVar(&enforceHealthcheckCert, "enforce-hc-cert", false, "Enforce certificate validation for health checks (default: false, accepts any cert)")
@@ -717,7 +722,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
         // --- Patch ----
         // Bring up the device
-        if rootlessAndroidWG {
+        if trueUserspaceWG {
             logger.Warn("Rootless Android WireGuard mode enabled: skipping dev.Up()")
         } else {
             err = dev.Up()
@@ -744,14 +749,14 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
         // --- Patch ----
         if err != nil {
-            if rootlessAndroidWG {
+            if trueUserspaceWG {
                 logger.Debug("Initial ping failed in userspace WG mode (expected): %v", err)
             } else {
                 logger.Warn("Initial reliable ping failed, but continuing: %v", err)
                 regResult = "failure"
             }
         }
-        if rootlessAndroidWG {
+        if trueUserspaceWG {
             logger.Info("Rootless Android WireGuard established (ICMP ping skipped)")
         } else if err == nil {
             logger.Debug("Initial connection test successful")
