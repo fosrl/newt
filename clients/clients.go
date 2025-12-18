@@ -477,6 +477,8 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	// Ensure the WireGuard interface and peers are configured
 	if err := s.ensureWireguardInterface(config); err != nil {
 		logger.Error("Failed to ensure WireGuard interface: %v", err)
+		logger.Error("Clients functionality will be disabled until the interface can be created")
+		return
 	}
 
 	if err := s.ensureWireguardPeers(config.Peers); err != nil {
@@ -651,6 +653,11 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 func (s *WireGuardService) ensureWireguardPeers(peers []Peer) error {
 	// For netstack, we need to manage peers differently
 	// We'll configure peers directly on the device using IPC
+
+	// Check if device is initialized
+	if s.device == nil {
+		return fmt.Errorf("WireGuard device is not initialized")
+	}
 
 	// First, clear all existing peers by getting current config and removing them
 	currentConfig, err := s.device.IpcGet()
