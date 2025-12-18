@@ -187,6 +187,9 @@ func runNewtMain(ctx context.Context) {
 	updownScript = os.Getenv("UPDOWN_SCRIPT")
 	interfaceName = os.Getenv("INTERFACE")
 	portStr := os.Getenv("PORT")
+    // --- Patch ----
+    rootlessAndroidWG := os.Getenv("NEWT_ROOTLESS_ANDROID") == "1"
+    // --- Patch ----
 
 	// Metrics/observability env mirrors
 	metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED")
@@ -712,12 +715,18 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			regResult = "failure"
 		}
 
-		// Bring up the device
-		err = dev.Up()
-		if err != nil {
-			logger.Error("Failed to bring up WireGuard device: %v", err)
-			regResult = "failure"
-		}
+        // --- Patch ----
+        // Bring up the device
+        if rootlessAndroidWG {
+            logger.Warn("Rootless Android WireGuard mode enabled: skipping dev.Up()")
+        } else {
+            err = dev.Up()
+            if err != nil {
+                logger.Error("Failed to bring up WireGuard device: %v", err)
+                regResult = "failure"
+            }
+        }
+        // --- Patch ----
 
 		logger.Debug("WireGuard device created. Lets ping the server now...")
 
@@ -733,12 +742,21 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		if err == nil && wgData.PublicKey != "" {
 			telemetry.ObserveTunnelLatency(ctx, wgData.PublicKey, "wireguard", lat.Seconds())
 		}
-		if err != nil {
-			logger.Warn("Initial reliable ping failed, but continuing: %v", err)
-			regResult = "failure"
-		} else {
-			logger.Debug("Initial connection test successful")
-		}
+        // --- Patch ----
+        if err != nil {
+            if rootlessAndroidWG {
+                logger.Debug("Initial ping failed in userspace WG mode (expected): %v", err)
+            } else {
+                logger.Warn("Initial reliable ping failed, but continuing: %v", err)
+                regResult = "failure"
+            }
+        }
+        if rootlessAndroidWG {
+            logger.Info("Rootless Android WireGuard established (ICMP ping skipped)")
+        } else if err == nil {
+            logger.Debug("Initial connection test successful")
+        }
+        // --- Patch ----
 
 		pingWithRetryStopChan, _ = pingWithRetry(tnet, wgData.ServerIP, pingTimeout)
 
