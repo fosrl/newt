@@ -47,6 +47,8 @@ type Client struct {
 	metricsCtx        context.Context
 	configNeedsSave   bool // Flag to track if config needs to be saved
 	serverVersion     string
+	configVersion     int64      // Latest config version received from server
+	configVersionMux  sync.RWMutex
 }
 
 type ClientOption func(*Client)
@@ -152,6 +154,22 @@ func (c *Client) GetConfig() *Config {
 
 func (c *Client) GetServerVersion() string {
 	return c.serverVersion
+}
+
+// GetConfigVersion returns the latest config version received from server
+func (c *Client) GetConfigVersion() int64 {
+	c.configVersionMux.RLock()
+	defer c.configVersionMux.RUnlock()
+	return c.configVersion
+}
+
+// setConfigVersion updates the config version if the new version is higher
+func (c *Client) setConfigVersion(version int64) {
+	c.configVersionMux.Lock()
+	defer c.configVersionMux.Unlock()
+	if version > c.configVersion {
+		c.configVersion = version
+	}
 }
 
 // Connect establishes the WebSocket connection
@@ -653,12 +671,22 @@ func (c *Client) pingMonitor() {
 			if c.conn == nil {
 				return
 			}
+			
+			// Send application-level ping with config version
+			pingMsg := WSMessage{
+				Type: "ping",
+				Data: map[string]interface{}{
+					"configVersion": c.GetConfigVersion(),
+				},
+			}
+			
 			c.writeMux.Lock()
-			err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(c.pingTimeout))
+			err := c.conn.WriteJSON(pingMsg)
 			if err == nil {
 				telemetry.IncWSMessage(c.metricsContext(), "out", "ping")
 			}
 			c.writeMux.Unlock()
+			
 			if err != nil {
 				// Check if we're shutting down before logging error and reconnecting
 				select {
@@ -735,6 +763,11 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time) {
 					}
 					return // triggers reconnect via defer
 				}
+			}
+
+			// Extract and update config version from message if present
+			if msg.ConfigVersion > 0 {
+				c.setConfigVersion(msg.ConfigVersion)
 			}
 
 			c.handlersMux.RLock()
