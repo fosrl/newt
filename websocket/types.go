@@ -17,6 +17,7 @@ type TokenResponse struct {
 }
 
 type WSMessage struct {
-	Type string      `json:"type"`
-	Data interface{} `json:"data"`
+	Type          string      `json:"type"`
+	Data          interface{} `json:"data"`
+	ConfigVersion int64       `json:"configVersion,omitempty"`
 }
