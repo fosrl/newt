@@ -22,6 +22,7 @@ type ExitNode struct {
 	Endpoint  string `json:"endpoint"`
 	RelayPort uint16 `json:"relayPort"`
 	PublicKey string `json:"publicKey"`
+	SiteIds   []int  `json:"siteIds,omitempty"`
 }
 
 // Manager handles UDP hole punching operations
@@ -140,6 +141,51 @@ func (m *Manager) RemoveExitNode(endpoint string) bool {
 	}
 
 	return true
+}
+
+/*
+RemoveExitNodesByPeer removes the peer ID from the SiteIds list in each exit node.
+If the SiteIds list becomes empty after removal, the exit node is removed entirely.
+Returns the number of exit nodes removed.
+*/
+func (m *Manager) RemoveExitNodesByPeer(peerID int) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	removed := 0
+	for endpoint, node := range m.exitNodes {
+		// Remove peerID from SiteIds if present
+		newSiteIds := make([]int, 0, len(node.SiteIds))
+		for _, id := range node.SiteIds {
+			if id != peerID {
+				newSiteIds = append(newSiteIds, id)
+			}
+		}
+		if len(newSiteIds) != len(node.SiteIds) {
+			node.SiteIds = newSiteIds
+			if len(node.SiteIds) == 0 {
+				delete(m.exitNodes, endpoint)
+				logger.Info("Removed exit node %s as no more site IDs remain after removing peer %d", endpoint, peerID)
+				removed++
+			} else {
+				m.exitNodes[endpoint] = node
+				logger.Info("Removed peer %d from exit node %s site IDs", peerID, endpoint)
+			}
+		}
+	}
+
+	if removed > 0 {
+		// Signal the goroutine to refresh if running
+		if m.running && m.updateChan != nil {
+			select {
+			case m.updateChan <- struct{}{}:
+			default:
+				// Channel full or closed, skip
+			}
+		}
+	}
+
+	return removed
 }
 
 // GetExitNodes returns a copy of the current exit nodes

@@ -20,7 +20,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /newt
 
 FROM alpine:3.23 AS runner
 
-RUN apk --no-cache add ca-certificates tzdata
+RUN apk --no-cache add ca-certificates tzdata iputils
 
 COPY --from=builder /newt /usr/local/bin/
 COPY entrypoint.sh /

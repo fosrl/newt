@@ -40,12 +40,14 @@ type Target struct {
 	SourcePrefix string      `json:"sourcePrefix"`
 	DestPrefix   string      `json:"destPrefix"`
 	RewriteTo    string      `json:"rewriteTo,omitempty"`
+	DisableIcmp  bool        `json:"disableIcmp,omitempty"`
 	PortRange    []PortRange `json:"portRange,omitempty"`
 }
 
 type PortRange struct {
-	Min uint16 `json:"min"`
-	Max uint16 `json:"max"`
+	Min      uint16 `json:"min"`
+	Max      uint16 `json:"max"`
+	Protocol string `json:"protocol"` // "tcp" or "udp"
 }
 
 type Peer struct {
@@ -475,6 +477,8 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	// Ensure the WireGuard interface and peers are configured
 	if err := s.ensureWireguardInterface(config); err != nil {
 		logger.Error("Failed to ensure WireGuard interface: %v", err)
+		logger.Error("Clients functionality will be disabled until the interface can be created")
+		return
 	}
 
 	if err := s.ensureWireguardPeers(config.Peers); err != nil {
@@ -597,8 +601,9 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		s.dns,
 		s.mtu,
 		netstack2.NetTunOptions{
-			EnableTCPProxy: true,
-			EnableUDPProxy: true,
+			EnableTCPProxy:  true,
+			EnableUDPProxy:  true,
+			EnableICMPProxy: true,
 		},
 	)
 	if err != nil {
@@ -648,6 +653,11 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 func (s *WireGuardService) ensureWireguardPeers(peers []Peer) error {
 	// For netstack, we need to manage peers differently
 	// We'll configure peers directly on the device using IPC
+
+	// Check if device is initialized
+	if s.device == nil {
+		return fmt.Errorf("WireGuard device is not initialized")
+	}
 
 	// First, clear all existing peers by getting current config and removing them
 	currentConfig, err := s.device.IpcGet()
@@ -704,12 +714,13 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 		var portRanges []netstack2.PortRange
 		for _, pr := range target.PortRange {
 			portRanges = append(portRanges, netstack2.PortRange{
-				Min: pr.Min,
-				Max: pr.Max,
+				Min:      pr.Min,
+				Max:      pr.Max,
+				Protocol: pr.Protocol,
 			})
 		}
 
-		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges)
+		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
 
 		logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.RewriteTo, target.PortRange)
 	}
@@ -1097,10 +1108,11 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 			portRanges = append(portRanges, netstack2.PortRange{
 				Min: pr.Min,
 				Max: pr.Max,
+				Protocol:    pr.Protocol,
 			})
 		}
 
-		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges)
+		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
 
 		logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.RewriteTo, target.PortRange)
 	}
@@ -1212,12 +1224,13 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 		var portRanges []netstack2.PortRange
 		for _, pr := range target.PortRange {
 			portRanges = append(portRanges, netstack2.PortRange{
-				Min: pr.Min,
-				Max: pr.Max,
+				Min:         pr.Min,
+				Max:         pr.Max,
+				Protocol:    pr.Protocol,
 			})
 		}
 
-		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges)
+		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
 		logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.RewriteTo, target.PortRange)
 	}
 }
