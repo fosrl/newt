@@ -594,7 +594,7 @@ jobs:
         run: |
           set -euo pipefail
           TAG_VAR="${TAG}"
-          make go-build-release tag=$TAG_VAR
+          make -j 10 go-build-release tag=$TAG_VAR
         shell: bash
 
       - name: Create GitHub Release
