@@ -141,7 +141,7 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 	// Add a reference for the hole punch manager (creator already has one reference for WireGuard)
 	sharedBind.AddRef()
 
-	logger.Info("Created shared UDP socket on port %d (refcount: %d)", port, sharedBind.GetRefCount())
+	logger.Debug("Created shared UDP socket on port %d (refcount: %d)", port, sharedBind.GetRefCount())
 
 	// Parse DNS addresses
 	dnsAddrs := []netip.Addr{netip.MustParseAddr(dns)}
@@ -294,7 +294,7 @@ func (s *WireGuardService) StartHolepunch(publicKey string, endpoint string, rel
 		logger.Warn("Failed to start hole punch: %v", err)
 	}
 
-	logger.Info("Starting hole punch to %s with public key: %s", endpoint, publicKey)
+	logger.Debug("Starting hole punch to %s with public key: %s", endpoint, publicKey)
 }
 
 // StartDirectUDPRelay starts a direct UDP relay from the main tunnel netstack to the clients' WireGuard.
@@ -341,7 +341,7 @@ func (s *WireGuardService) StartDirectUDPRelay(tunnelIP string) error {
 	// Set the netstack connection on the SharedBind so responses go back through the tunnel
 	s.sharedBind.SetNetstackConn(listener)
 
-	logger.Info("Started direct UDP relay on %s:%d (bidirectional via SharedBind)", tunnelIP, s.Port)
+	logger.Debug("Started direct UDP relay on %s:%d (bidirectional via SharedBind)", tunnelIP, s.Port)
 
 	// Start the relay goroutine to read from netstack and inject into SharedBind
 	s.directRelayWg.Add(1)
@@ -359,7 +359,7 @@ func (s *WireGuardService) runDirectUDPRelay(listener net.PacketConn) {
 	// Note: Don't close listener here - it's also used by SharedBind for sending responses
 	// It will be closed when the relay is stopped
 
-	logger.Info("Direct UDP relay started (bidirectional through SharedBind)")
+	logger.Debug("Direct UDP relay started (bidirectional through SharedBind)")
 
 	buf := make([]byte, 65535) // Max UDP packet size
 
@@ -445,7 +445,7 @@ func (s *WireGuardService) LoadRemoteConfig() error {
 		"port":      s.Port,
 	}, 2*time.Second)
 
-	logger.Info("Requesting WireGuard configuration from remote server")
+	logger.Debug("Requesting WireGuard configuration from remote server")
 	go s.periodicBandwidthCheck()
 
 	return nil
@@ -455,7 +455,7 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	var config WgConfig
 
 	logger.Debug("Received message: %v", msg)
-	logger.Info("Received WireGuard clients configuration from remote server")
+	logger.Debug("Received WireGuard clients configuration from remote server")
 
 	jsonData, err := json.Marshal(msg.Data)
 	if err != nil {
@@ -488,6 +488,8 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	if err := s.ensureTargets(config.Targets); err != nil {
 		logger.Error("Failed to ensure WireGuard targets: %v", err)
 	}
+
+	logger.Info("Client connectivity setup. Ready to accept connections from clients!")
 }
 
 func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
@@ -635,7 +637,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		return fmt.Errorf("failed to bring up WireGuard device: %v", err)
 	}
 
-	logger.Info("WireGuard netstack device created and configured")
+	logger.Debug("WireGuard netstack device created and configured")
 
 	// Release the mutex before calling the callback
 	s.mu.Unlock()

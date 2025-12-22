@@ -24,7 +24,7 @@ func setupClients(client *websocket.Client) {
 
 	host = strings.TrimSuffix(host, "/")
 
-	logger.Info("Setting up clients with netstack2...")
+	logger.Debug("Setting up clients with netstack2...")
 
 	// if useNativeInterface is true make sure we have permission to use native interface
 	if useNativeInterface {

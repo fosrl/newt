@@ -295,7 +295,7 @@ func (m *Manager) StartMultipleExitNodes(exitNodes []ExitNode) error {
 	m.updateChan = make(chan struct{}, 1)
 	m.mu.Unlock()
 
-	logger.Info("Starting UDP hole punch to %d exit nodes with shared bind", len(exitNodes))
+	logger.Debug("Starting UDP hole punch to %d exit nodes with shared bind", len(exitNodes))
 
 	go m.runMultipleExitNodes()
 
@@ -373,7 +373,7 @@ func (m *Manager) runMultipleExitNodes() {
 				publicKey:    exitNode.PublicKey,
 				endpointName: exitNode.Endpoint,
 			})
-			logger.Info("Resolved exit node: %s -> %s", exitNode.Endpoint, remoteAddr.String())
+			logger.Debug("Resolved exit node: %s -> %s", exitNode.Endpoint, remoteAddr.String())
 		}
 		return resolvedNodes
 	}

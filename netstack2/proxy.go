@@ -254,7 +254,7 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 		if err := handler.icmpHandler.InstallICMPHandler(); err != nil {
 			return nil, fmt.Errorf("failed to install ICMP handler: %v", err)
 		}
-		logger.Info("ProxyHandler: ICMP handler enabled")
+		logger.Debug("ProxyHandler: ICMP handler enabled")
 	}
 
 	// // Example 1: Add a rule with no port restrictions (all ports allowed)
