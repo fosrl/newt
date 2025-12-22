@@ -671,22 +671,24 @@ func (c *Client) pingMonitor() {
 			if c.conn == nil {
 				return
 			}
-			
-			// Send application-level ping with config version
+
+			c.configVersionMux.RLock()
+			configVersion := c.configVersion
+			c.configVersionMux.RUnlock()
+
 			pingMsg := WSMessage{
-				Type: "ping",
-				Data: map[string]interface{}{
-					"configVersion": c.GetConfigVersion(),
-				},
+				Type:          "ping",
+				Data:          map[string]interface{}{},
+				ConfigVersion: configVersion,
 			}
-			
+
 			c.writeMux.Lock()
 			err := c.conn.WriteJSON(pingMsg)
 			if err == nil {
 				telemetry.IncWSMessage(c.metricsContext(), "out", "ping")
 			}
 			c.writeMux.Unlock()
-			
+
 			if err != nil {
 				// Check if we're shutting down before logging error and reconnecting
 				select {
