@@ -101,6 +101,18 @@ func (sl *SubnetLookup) RemoveSubnet(sourcePrefix, destPrefix netip.Prefix) {
 	delete(sl.rules, key)
 }
 
+// GetAllRules returns a copy of all subnet rules
+func (sl *SubnetLookup) GetAllRules() []SubnetRule {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+
+	rules := make([]SubnetRule, 0, len(sl.rules))
+	for _, rule := range sl.rules {
+		rules = append(rules, *rule)
+	}
+	return rules
+}
+
 // Match checks if a source IP, destination IP, port, and protocol match any subnet rule
 // Returns the matched rule if ALL of these conditions are met:
 //   - The source IP is in the rule's source prefix
@@ -294,6 +306,14 @@ func (p *ProxyHandler) RemoveSubnetRule(sourcePrefix, destPrefix netip.Prefix) {
 		return
 	}
 	p.subnetLookup.RemoveSubnet(sourcePrefix, destPrefix)
+}
+
+// GetAllRules returns all subnet rules from the proxy handler
+func (p *ProxyHandler) GetAllRules() []SubnetRule {
+	if p == nil || !p.enabled {
+		return nil
+	}
+	return p.subnetLookup.GetAllRules()
 }
 
 // LookupDestinationRewrite looks up the rewritten destination for a connection

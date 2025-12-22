@@ -172,6 +172,7 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 	wsClient.RegisterHandler("newt/wg/targets/add", service.handleAddTarget)
 	wsClient.RegisterHandler("newt/wg/targets/remove", service.handleRemoveTarget)
 	wsClient.RegisterHandler("newt/wg/targets/update", service.handleUpdateTarget)
+	wsClient.RegisterHandler("newt/wg/sync", service.handleSyncConfig)
 
 	return service, nil
 }
@@ -488,6 +489,183 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	if err := s.ensureTargets(config.Targets); err != nil {
 		logger.Error("Failed to ensure WireGuard targets: %v", err)
 	}
+}
+
+// SyncConfig represents the configuration sent from server for syncing
+type SyncConfig struct {
+	Targets []Target `json:"targets"`
+	Peers   []Peer   `json:"peers"`
+}
+
+func (s *WireGuardService) handleSyncConfig(msg websocket.WSMessage) {
+	var syncConfig SyncConfig
+
+	logger.Debug("Received sync message: %v", msg)
+	logger.Info("Received sync configuration from remote server")
+
+	jsonData, err := json.Marshal(msg.Data)
+	if err != nil {
+		logger.Error("Error marshaling sync data: %v", err)
+		return
+	}
+
+	if err := json.Unmarshal(jsonData, &syncConfig); err != nil {
+		logger.Error("Error unmarshaling sync data: %v", err)
+		return
+	}
+
+	// Sync peers
+	if err := s.syncPeers(syncConfig.Peers); err != nil {
+		logger.Error("Failed to sync peers: %v", err)
+	}
+
+	// Sync targets
+	if err := s.syncTargets(syncConfig.Targets); err != nil {
+		logger.Error("Failed to sync targets: %v", err)
+	}
+}
+
+// syncPeers synchronizes the current peers with the desired state
+// It removes peers not in the desired list and adds missing ones
+func (s *WireGuardService) syncPeers(desiredPeers []Peer) error {
+	if s.device == nil {
+		return fmt.Errorf("WireGuard device is not initialized")
+	}
+
+	// Get current peers from the device
+	currentConfig, err := s.device.IpcGet()
+	if err != nil {
+		return fmt.Errorf("failed to get current device config: %v", err)
+	}
+
+	// Parse current peer public keys
+	lines := strings.Split(currentConfig, "\n")
+	currentPeerKeys := make(map[string]bool)
+	for _, line := range lines {
+		if strings.HasPrefix(line, "public_key=") {
+			pubKey := strings.TrimPrefix(line, "public_key=")
+			currentPeerKeys[pubKey] = true
+		}
+	}
+
+	// Build a map of desired peers by their public key (normalized)
+	desiredPeerMap := make(map[string]Peer)
+	for _, peer := range desiredPeers {
+		// Normalize the public key for comparison
+		pubKey, err := wgtypes.ParseKey(peer.PublicKey)
+		if err != nil {
+			logger.Warn("Invalid public key in desired peers: %s", peer.PublicKey)
+			continue
+		}
+		normalizedKey := util.FixKey(pubKey.String())
+		desiredPeerMap[normalizedKey] = peer
+	}
+
+	// Remove peers that are not in the desired list
+	for currentKey := range currentPeerKeys {
+		if _, exists := desiredPeerMap[currentKey]; !exists {
+			// Parse the key back to get the original format for removal
+			removeConfig := fmt.Sprintf("public_key=%s\nremove=true", currentKey)
+			if err := s.device.IpcSet(removeConfig); err != nil {
+				logger.Warn("Failed to remove peer %s during sync: %v", currentKey, err)
+			} else {
+				logger.Info("Removed peer %s during sync", currentKey)
+			}
+		}
+	}
+
+	// Add peers that are missing
+	for normalizedKey, peer := range desiredPeerMap {
+		if _, exists := currentPeerKeys[normalizedKey]; !exists {
+			if err := s.addPeerToDevice(peer); err != nil {
+				logger.Warn("Failed to add peer %s during sync: %v", peer.PublicKey, err)
+			} else {
+				logger.Info("Added peer %s during sync", peer.PublicKey)
+			}
+		}
+	}
+
+	return nil
+}
+
+// syncTargets synchronizes the current targets with the desired state
+// It removes targets not in the desired list and adds missing ones
+func (s *WireGuardService) syncTargets(desiredTargets []Target) error {
+	if s.tnet == nil {
+		// Native interface mode - proxy features not available, skip silently
+		logger.Debug("Skipping target sync - using native interface (no proxy support)")
+		return nil
+	}
+
+	// Get current rules from the proxy handler
+	currentRules := s.tnet.GetProxySubnetRules()
+
+	// Build a map of current rules by source+dest prefix
+	type ruleKey struct {
+		sourcePrefix string
+		destPrefix   string
+	}
+	currentRuleMap := make(map[ruleKey]bool)
+	for _, rule := range currentRules {
+		key := ruleKey{
+			sourcePrefix: rule.SourcePrefix.String(),
+			destPrefix:   rule.DestPrefix.String(),
+		}
+		currentRuleMap[key] = true
+	}
+
+	// Build a map of desired targets
+	desiredTargetMap := make(map[ruleKey]Target)
+	for _, target := range desiredTargets {
+		key := ruleKey{
+			sourcePrefix: target.SourcePrefix,
+			destPrefix:   target.DestPrefix,
+		}
+		desiredTargetMap[key] = target
+	}
+
+	// Remove targets that are not in the desired list
+	for _, rule := range currentRules {
+		key := ruleKey{
+			sourcePrefix: rule.SourcePrefix.String(),
+			destPrefix:   rule.DestPrefix.String(),
+		}
+		if _, exists := desiredTargetMap[key]; !exists {
+			s.tnet.RemoveProxySubnetRule(rule.SourcePrefix, rule.DestPrefix)
+			logger.Info("Removed target %s -> %s during sync", rule.SourcePrefix.String(), rule.DestPrefix.String())
+		}
+	}
+
+	// Add targets that are missing
+	for key, target := range desiredTargetMap {
+		if _, exists := currentRuleMap[key]; !exists {
+			sourcePrefix, err := netip.ParsePrefix(target.SourcePrefix)
+			if err != nil {
+				logger.Warn("Invalid source prefix %s during sync: %v", target.SourcePrefix, err)
+				continue
+			}
+
+			destPrefix, err := netip.ParsePrefix(target.DestPrefix)
+			if err != nil {
+				logger.Warn("Invalid dest prefix %s during sync: %v", target.DestPrefix, err)
+				continue
+			}
+
+			var portRanges []netstack2.PortRange
+			for _, pr := range target.PortRange {
+				portRanges = append(portRanges, netstack2.PortRange{
+					Min:      pr.Min,
+					Max:      pr.Max,
+					Protocol: pr.Protocol,
+				})
+			}
+
+			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
+			logger.Info("Added target %s -> %s during sync", target.SourcePrefix, target.DestPrefix)
+		}
+	}
+
+	return nil
 }
 
 func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {

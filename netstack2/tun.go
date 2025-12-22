@@ -369,6 +369,15 @@ func (net *Net) RemoveProxySubnetRule(sourcePrefix, destPrefix netip.Prefix) {
 	}
 }
 
+// GetProxySubnetRules returns all subnet rules from the proxy handler
+func (net *Net) GetProxySubnetRules() []SubnetRule {
+	tun := (*netTun)(net)
+	if tun.proxyHandler != nil {
+		return tun.proxyHandler.GetAllRules()
+	}
+	return nil
+}
+
 // GetProxyHandler returns the proxy handler (for advanced use cases)
 // Returns nil if proxy is not enabled
 func (net *Net) GetProxyHandler() *ProxyHandler {
