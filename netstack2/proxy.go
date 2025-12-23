@@ -550,8 +550,8 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 		return true
 	}
 
-	logger.Debug("HandleIncomingPacket: No matching rule for %s -> %s (proto=%d, port=%d)",
-		srcAddr, dstAddr, protocol, dstPort)
+	// logger.Debug("HandleIncomingPacket: No matching rule for %s -> %s (proto=%d, port=%d)",
+		// srcAddr, dstAddr, protocol, dstPort)
 	return false
 }
 
