@@ -372,7 +372,7 @@ func copyPacketData(dst, src net.PacketConn, to net.Addr, timeout time.Duration)
 // InstallICMPHandler installs the ICMP handler on the stack
 func (h *ICMPHandler) InstallICMPHandler() error {
 	h.stack.SetTransportProtocolHandler(header.ICMPv4ProtocolNumber, h.handleICMPPacket)
-	logger.Info("ICMP Handler: Installed ICMP protocol handler")
+	logger.Debug("ICMP Handler: Installed ICMP protocol handler")
 	return nil
 }
 
@@ -600,7 +600,7 @@ func (h *ICMPHandler) sendAndReceiveICMP(conn *icmp.PacketConn, actualDstIP stri
 			logger.Debug("ICMP Handler: Reply seq mismatch: got seq=%d, want seq=%d", reply.Seq, seq)
 			continue
 		}
-		
+
 		if !ignoreIdent && reply.ID != int(ident) {
 			logger.Debug("ICMP Handler: Reply ident mismatch: got ident=%d, want ident=%d", reply.ID, ident)
 			continue

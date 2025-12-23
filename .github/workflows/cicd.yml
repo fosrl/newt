@@ -587,28 +587,28 @@ jobs:
       #     sarif_file: trivy-ghcr.sarif
       #     category: Image Vulnerability Scan
 
-      # - name: Build binaries
-      #   env:
-      #     CGO_ENABLED: "0"
-      #     GOFLAGS: "-trimpath"
-      #   run: |
-      #     set -euo pipefail
-      #     TAG_VAR="${TAG}"
-      #     make go-build-release tag=$TAG_VAR
-      #   shell: bash
+      - name: Build binaries
+        env:
+          CGO_ENABLED: "0"
+          GOFLAGS: "-trimpath"
+        run: |
+          set -euo pipefail
+          TAG_VAR="${TAG}"
+          make -j 10 go-build-release tag=$TAG_VAR
+        shell: bash
 
-      # - name: Create GitHub Release
-      #   uses: softprops/action-gh-release@5be0e66d93ac7ed76da52eca8bb058f665c3a5fe # v2.4.2
-      #   with:
-      #     tag_name: ${{ env.TAG }}
-      #     generate_release_notes: true
-      #     prerelease: ${{ env.IS_RC == 'true' }}
-      #     files: |
-      #       bin/*
-      #     fail_on_unmatched_files: true
-      #     draft: true
-      #     body: |
-      #       ## Container Images
-      #       - GHCR: `${{ env.GHCR_REF }}`
-      #       - Docker Hub: `${{ env.DH_REF || 'N/A' }}`
-      #       **Digest:** `${{ steps.build.outputs.digest }}`
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@5be0e66d93ac7ed76da52eca8bb058f665c3a5fe # v2.4.2
+        with:
+          tag_name: ${{ env.TAG }}
+          generate_release_notes: true
+          prerelease: ${{ env.IS_RC == 'true' }}
+          files: |
+            bin/*
+          fail_on_unmatched_files: true
+          draft: true
+          body: |
+            ## Container Images
+            - GHCR: `${{ env.GHCR_REF }}`
+            - Docker Hub: `${{ env.DH_REF || 'N/A' }}`
+            **Digest:** `${{ steps.build.outputs.digest }}`
