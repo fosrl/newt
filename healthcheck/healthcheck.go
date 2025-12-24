@@ -61,6 +61,7 @@ type Target struct {
 	timer      *time.Timer
 	ctx        context.Context
 	cancel     context.CancelFunc
+	client     *http.Client
 }
 
 // StatusChangeCallback is called when any target's status changes
@@ -185,6 +186,16 @@ func (m *Monitor) addTargetUnsafe(config Config) error {
 		Status: StatusUnknown,
 		ctx:    ctx,
 		cancel: cancel,
+		client: &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					// Configure TLS settings based on certificate enforcement
+					InsecureSkipVerify: !m.enforceCert,
+					// Use SNI TLS header if present
+					ServerName: config.TLSServerName,
+				},
+			},
+		},
 	}
 
 	m.targets[config.ID] = target
@@ -378,17 +389,6 @@ func (m *Monitor) performHealthCheck(target *Target) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(target.Config.Timeout)*time.Second)
 	defer cancel()
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				// Configure TLS settings based on certificate enforcement
-				InsecureSkipVerify: !m.enforceCert,
-				// Use SNI TLS header if present
-				ServerName: target.Config.TLSServerName,
-			},
-		},
-	}
-
 	req, err := http.NewRequestWithContext(ctx, target.Config.Method, url, nil)
 	if err != nil {
 		target.Status = StatusUnhealthy
@@ -408,7 +408,7 @@ func (m *Monitor) performHealthCheck(target *Target) {
 	}
 
 	// Perform request
-	resp, err := client.Do(req)
+	resp, err := target.client.Do(req)
 	if err != nil {
 		target.Status = StatusUnhealthy
 		target.LastError = fmt.Sprintf("request failed: %v", err)
