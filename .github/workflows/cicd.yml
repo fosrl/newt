@@ -11,7 +11,9 @@ permissions:
 on:
   push:
     tags:
-      - "*"
+      - "[0-9]+.[0-9]+.[0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
+
   workflow_dispatch:
     inputs:
       version:
@@ -273,7 +275,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}},value=${{ env.TAG }}
             type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG }},enable=${{ env.PUBLISH_MINOR == 'true' && env.IS_RC != 'true' }}
-            type=raw,value=latest,enable=${{ env.PUBLISH_LATEST == 'true' && env.IS_RC != 'true' }}
+            type=raw,value=latest,enable=${{ env.IS_RC != 'true' }}
           flavor: |
             latest=false
           labels: |
