@@ -119,6 +119,7 @@ var (
 	interfaceName                      string
 	port                               uint16
 	disableClients                     bool
+	trueUserspaceWG                    bool
 	updownScript                       string
 	dockerSocket                       string
 	dockerEnforceNetworkValidation     string
@@ -195,6 +196,10 @@ func runNewtMain(ctx context.Context) {
 	regionEnv := os.Getenv("NEWT_REGION")
 	asyncBytesEnv := os.Getenv("NEWT_METRICS_ASYNC_BYTES")
 
+    // --- Patch ----
+    trueUserspaceWGEnv := os.Getenv("TRUE_USERSPACE_WG")
+    trueUserspaceWG = trueUserspaceWGEnv == "true"
+    // --- Patch ----
 	disableClientsEnv := os.Getenv("DISABLE_CLIENTS")
 	disableClients = disableClientsEnv == "true"
 	useNativeInterfaceEnv := os.Getenv("USE_NATIVE_INTERFACE")
@@ -263,6 +268,9 @@ func runNewtMain(ctx context.Context) {
 	}
 	if disableClientsEnv == "" {
 		flag.BoolVar(&disableClients, "disable-clients", false, "Disable clients on the WireGuard interface")
+	}
+	if trueUserspaceWGEnv == "" {
+		flag.BoolVar(&trueUserspaceWG, "true-userspace-wg", false, "Enable True Userspace Wiregaurd Mode (Rootless Android/Termux etc)")
 	}
 	if enforceHealthcheckCertEnv == "" {
 		flag.BoolVar(&enforceHealthcheckCert, "enforce-hc-cert", false, "Enforce certificate validation for health checks (default: false, accepts any cert)")
@@ -712,12 +720,18 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			regResult = "failure"
 		}
 
-		// Bring up the device
-		err = dev.Up()
-		if err != nil {
-			logger.Error("Failed to bring up WireGuard device: %v", err)
-			regResult = "failure"
-		}
+        // --- Patch ----
+        // Bring up the device
+        if trueUserspaceWG {
+            logger.Warn("Rootless Android WireGuard mode enabled: skipping dev.Up()")
+        } else {
+            err = dev.Up()
+            if err != nil {
+                logger.Error("Failed to bring up WireGuard device: %v", err)
+                regResult = "failure"
+            }
+        }
+        // --- Patch ----
 
 		logger.Debug("WireGuard device created. Lets ping the server now...")
 
@@ -733,12 +747,21 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		if err == nil && wgData.PublicKey != "" {
 			telemetry.ObserveTunnelLatency(ctx, wgData.PublicKey, "wireguard", lat.Seconds())
 		}
-		if err != nil {
-			logger.Warn("Initial reliable ping failed, but continuing: %v", err)
-			regResult = "failure"
-		} else {
-			logger.Debug("Initial connection test successful")
-		}
+        // --- Patch ----
+        if err != nil {
+            if trueUserspaceWG {
+                logger.Debug("Initial ping failed in userspace WG mode (expected): %v", err)
+            } else {
+                logger.Warn("Initial reliable ping failed, but continuing: %v", err)
+                regResult = "failure"
+            }
+        }
+        if trueUserspaceWG {
+            logger.Info("Rootless Android WireGuard established (ICMP ping skipped)")
+        } else if err == nil {
+            logger.Debug("Initial connection test successful")
+        }
+        // --- Patch ----
 
 		pingWithRetryStopChan, _ = pingWithRetry(tnet, wgData.ServerIP, pingTimeout)
 
