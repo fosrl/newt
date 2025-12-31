@@ -126,13 +126,14 @@ func LinuxRemoveRoute(destination string) error {
 
 // addRouteForServerIP adds an OS-specific route for the server IP
 func AddRouteForServerIP(serverIP, interfaceName string) error {
-	if err := AddRouteForNetworkConfig(serverIP); err != nil {
-		return err
-	}
 	if interfaceName == "" {
 		return nil
 	}
-	if runtime.GOOS == "darwin" {
+	// TODO: does this also need to be ios?
+	if runtime.GOOS == "darwin" { // macos requires routes for each peer to be added but this messes with other platforms
+		if err := AddRouteForNetworkConfig(serverIP); err != nil {
+			return err
+		}
 		return DarwinAddRoute(serverIP, "", interfaceName)
 	}
 	// else if runtime.GOOS == "windows" {
@@ -145,13 +146,14 @@ func AddRouteForServerIP(serverIP, interfaceName string) error {
 
 // removeRouteForServerIP removes an OS-specific route for the server IP
 func RemoveRouteForServerIP(serverIP string, interfaceName string) error {
-	if err := RemoveRouteForNetworkConfig(serverIP); err != nil {
-		return err
-	}
 	if interfaceName == "" {
 		return nil
 	}
-	if runtime.GOOS == "darwin" {
+	// TODO: does this also need to be ios?
+	if runtime.GOOS == "darwin" { // macos requires routes for each peer to be added but this messes with other platforms
+		if err := RemoveRouteForNetworkConfig(serverIP); err != nil {
+			return err
+		}
 		return DarwinRemoveRoute(serverIP)
 	}
 	// else if runtime.GOOS == "windows" {
