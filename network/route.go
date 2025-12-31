@@ -217,21 +217,17 @@ func AddRoutes(remoteSubnets []string, interfaceName string) error {
 			continue
 		}
 
-		if runtime.GOOS == "darwin" {
-			if err := DarwinAddRoute(subnet, "", interfaceName); err != nil {
-				logger.Error("Failed to add Darwin route for subnet %s: %v", subnet, err)
-				return err
-			}
-		} else if runtime.GOOS == "windows" {
-			if err := WindowsAddRoute(subnet, "", interfaceName); err != nil {
-				logger.Error("Failed to add Windows route for subnet %s: %v", subnet, err)
-				return err
-			}
-		} else if runtime.GOOS == "linux" {
-			if err := LinuxAddRoute(subnet, "", interfaceName); err != nil {
-				logger.Error("Failed to add Linux route for subnet %s: %v", subnet, err)
-				return err
-			}
+		switch runtime.GOOS {
+		case "darwin":
+			return DarwinAddRoute(subnet, "", interfaceName)
+		case "windows":
+			return WindowsAddRoute(subnet, "", interfaceName)
+		case "linux":
+			return LinuxAddRoute(subnet, "", interfaceName)
+		case "android":
+			return nil
+		case "ios":
+			return nil
 		}
 
 		logger.Info("Added route for remote subnet: %s", subnet)
@@ -258,21 +254,17 @@ func RemoveRoutes(remoteSubnets []string) error {
 		}
 
 		// Remove route based on operating system
-		if runtime.GOOS == "darwin" {
-			if err := DarwinRemoveRoute(subnet); err != nil {
-				logger.Error("Failed to remove Darwin route for subnet %s: %v", subnet, err)
-				return err
-			}
-		} else if runtime.GOOS == "windows" {
-			if err := WindowsRemoveRoute(subnet); err != nil {
-				logger.Error("Failed to remove Windows route for subnet %s: %v", subnet, err)
-				return err
-			}
-		} else if runtime.GOOS == "linux" {
-			if err := LinuxRemoveRoute(subnet); err != nil {
-				logger.Error("Failed to remove Linux route for subnet %s: %v", subnet, err)
-				return err
-			}
+		switch runtime.GOOS {
+		case "darwin":
+			return DarwinRemoveRoute(subnet)
+		case "windows":
+			return WindowsRemoveRoute(subnet)
+		case "linux":
+			return LinuxRemoveRoute(subnet)
+		case "android":
+			return nil
+		case "ios":
+			return nil
 		}
 
 		logger.Info("Removed route for remote subnet: %s", subnet)
