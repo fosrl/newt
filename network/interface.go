@@ -44,9 +44,9 @@ func ConfigureInterface(interfaceName string, tunnelIp string, mtu int) error {
 		return configureDarwin(interfaceName, ip, ipNet)
 	case "windows":
 		return configureWindows(interfaceName, ip, ipNet)
-	default:
-		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
 	}
+
+	return nil
 }
 
 // waitForInterfaceUp polls the network interface until it's up or times out
