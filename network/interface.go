@@ -49,7 +49,7 @@ func ConfigureInterface(interfaceName string, tunnelIp string, mtu int) error {
 	case "ios":
 		return nil
 	}
-	
+
 	return nil
 }
 
