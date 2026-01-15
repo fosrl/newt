@@ -38,21 +38,29 @@ type Manager struct {
 	exitNodes  map[string]ExitNode // key is endpoint
 	updateChan chan struct{}       // signals the goroutine to refresh exit nodes
 
-	sendHolepunchInterval time.Duration
+	sendHolepunchInterval    time.Duration
+	sendHolepunchIntervalMin time.Duration
+	sendHolepunchIntervalMax time.Duration
+	defaultIntervalMin       time.Duration
+	defaultIntervalMax       time.Duration
 }
 
-const sendHolepunchIntervalMax = 60 * time.Second
-const sendHolepunchIntervalMin = 1 * time.Second
+const defaultSendHolepunchIntervalMax = 60 * time.Second
+const defaultSendHolepunchIntervalMin = 1 * time.Second
 
 // NewManager creates a new hole punch manager
 func NewManager(sharedBind *bind.SharedBind, ID string, clientType string, publicKey string) *Manager {
 	return &Manager{
-		sharedBind:            sharedBind,
-		ID:                    ID,
-		clientType:            clientType,
-		publicKey:             publicKey,
-		exitNodes:             make(map[string]ExitNode),
-		sendHolepunchInterval: sendHolepunchIntervalMin,
+		sharedBind:               sharedBind,
+		ID:                       ID,
+		clientType:               clientType,
+		publicKey:                publicKey,
+		exitNodes:                make(map[string]ExitNode),
+		sendHolepunchInterval:    defaultSendHolepunchIntervalMin,
+		sendHolepunchIntervalMin: defaultSendHolepunchIntervalMin,
+		sendHolepunchIntervalMax: defaultSendHolepunchIntervalMax,
+		defaultIntervalMin:       defaultSendHolepunchIntervalMin,
+		defaultIntervalMax:       defaultSendHolepunchIntervalMax,
 	}
 }
 
@@ -200,17 +208,46 @@ func (m *Manager) GetExitNodes() []ExitNode {
 	return nodes
 }
 
-// ResetInterval resets the hole punch interval back to the minimum value,
-// allowing it to climb back up through exponential backoff.
-// This is useful when network conditions change or connectivity is restored.
-func (m *Manager) ResetInterval() {
+// SetServerHolepunchInterval sets custom min and max intervals for hole punching.
+// This is useful for low power mode where longer intervals are desired.
+func (m *Manager) SetServerHolepunchInterval(min, max time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.sendHolepunchInterval != sendHolepunchIntervalMin {
-		m.sendHolepunchInterval = sendHolepunchIntervalMin
-		logger.Info("Reset hole punch interval to minimum (%v)", sendHolepunchIntervalMin)
+	m.sendHolepunchIntervalMin = min
+	m.sendHolepunchIntervalMax = max
+	m.sendHolepunchInterval = min
+
+	logger.Info("Set hole punch intervals: min=%v, max=%v", min, max)
+
+	// Signal the goroutine to apply the new interval if running
+	if m.running && m.updateChan != nil {
+		select {
+		case m.updateChan <- struct{}{}:
+		default:
+			// Channel full or closed, skip
+		}
 	}
+}
+
+// GetInterval returns the current min and max intervals
+func (m *Manager) GetServerHolepunchInterval() (min, max time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sendHolepunchIntervalMin, m.sendHolepunchIntervalMax
+}
+
+// ResetServerHolepunchInterval resets the hole punch interval back to the default values.
+// This restores normal operation after low power mode or other custom settings.
+func (m *Manager) ResetServerHolepunchInterval() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.sendHolepunchIntervalMin = m.defaultIntervalMin
+	m.sendHolepunchIntervalMax = m.defaultIntervalMax
+	m.sendHolepunchInterval = m.defaultIntervalMin
+
+	logger.Info("Reset hole punch intervals to defaults: min=%v, max=%v", m.defaultIntervalMin, m.defaultIntervalMax)
 
 	// Signal the goroutine to apply the new interval if running
 	if m.running && m.updateChan != nil {
@@ -393,7 +430,7 @@ func (m *Manager) runMultipleExitNodes() {
 
 	// Start with minimum interval
 	m.mu.Lock()
-	m.sendHolepunchInterval = sendHolepunchIntervalMin
+	m.sendHolepunchInterval = m.sendHolepunchIntervalMin
 	m.mu.Unlock()
 
 	ticker := time.NewTicker(m.sendHolepunchInterval)
@@ -415,7 +452,7 @@ func (m *Manager) runMultipleExitNodes() {
 			}
 			// Reset interval to minimum on update
 			m.mu.Lock()
-			m.sendHolepunchInterval = sendHolepunchIntervalMin
+			m.sendHolepunchInterval = m.sendHolepunchIntervalMin
 			m.mu.Unlock()
 			ticker.Reset(m.sendHolepunchInterval)
 			// Send immediate hole punch to newly resolved nodes
@@ -435,8 +472,8 @@ func (m *Manager) runMultipleExitNodes() {
 				// Exponential backoff: double the interval up to max
 				m.mu.Lock()
 				newInterval := m.sendHolepunchInterval * 2
-				if newInterval > sendHolepunchIntervalMax {
-					newInterval = sendHolepunchIntervalMax
+				if newInterval > m.sendHolepunchIntervalMax {
+					newInterval = m.sendHolepunchIntervalMax
 				}
 				if newInterval != m.sendHolepunchInterval {
 					m.sendHolepunchInterval = newInterval
