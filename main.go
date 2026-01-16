@@ -506,7 +506,7 @@ func runNewtMain(ctx context.Context) {
 		id,     // CLI arg takes precedence
 		secret, // CLI arg takes precedence
 		endpoint,
-		pingInterval,
+		30, // 30 seconds
 		pingTimeout,
 		opt,
 	)
