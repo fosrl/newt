@@ -506,7 +506,7 @@ func runNewtMain(ctx context.Context) {
 		id,     // CLI arg takes precedence
 		secret, // CLI arg takes precedence
 		endpoint,
-		30, // 30 seconds
+		30*time.Second, // 30 seconds
 		pingTimeout,
 		opt,
 	)
@@ -694,8 +694,8 @@ func runNewtMain(ctx context.Context) {
 
 		relayPort := wgData.RelayPort
 		if relayPort == 0 {
-            relayPort = 21820
-        }
+			relayPort = 21820
+		}
 
 		clientsHandleNewtConnection(wgData.PublicKey, endpoint, relayPort)
 
