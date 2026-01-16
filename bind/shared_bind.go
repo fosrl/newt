@@ -523,7 +523,7 @@ func (b *SharedBind) receiveIPv4Simple(conn *net.UDPConn, bufs [][]byte, sizes [
 func (b *SharedBind) handleMagicPacket(data []byte, addr *net.UDPAddr) bool {
 	// Check if this is a test request packet
 	if len(data) >= MagicTestRequestLen && bytes.HasPrefix(data, MagicTestRequest) {
-		logger.Debug("Received magic test REQUEST from %s, sending response", addr.String())
+		// logger.Debug("Received magic test REQUEST from %s, sending response", addr.String())
 		// Extract the random data portion to echo back
 		echoData := data[len(MagicTestRequest) : len(MagicTestRequest)+MagicPacketDataLen]
 
@@ -546,7 +546,7 @@ func (b *SharedBind) handleMagicPacket(data []byte, addr *net.UDPAddr) bool {
 
 	// Check if this is a test response packet
 	if len(data) >= MagicTestResponseLen && bytes.HasPrefix(data, MagicTestResponse) {
-		logger.Debug("Received magic test RESPONSE from %s", addr.String())
+		// logger.Debug("Received magic test RESPONSE from %s", addr.String())
 		// Extract the echoed data
 		echoData := data[len(MagicTestResponse) : len(MagicTestResponse)+MagicPacketDataLen]
 
