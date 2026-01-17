@@ -1035,21 +1035,22 @@ func (s *WireGuardService) processPeerBandwidth(publicKey string, rxBytes, txByt
 			// Update the last reading
 			s.lastReadings[publicKey] = currentReading
 
-			return &PeerBandwidth{
-				PublicKey: publicKey,
-				BytesIn:   bytesInMB,
-				BytesOut:  bytesOutMB,
+			// Only return bandwidth data if there was an increase
+			if bytesInDiff > 0 || bytesOutDiff > 0 {
+				return &PeerBandwidth{
+					PublicKey: publicKey,
+					BytesIn:   bytesInMB,
+					BytesOut:  bytesOutMB,
+				}
 			}
+			
+			return nil
 		}
 	}
 
-	// For first reading or if readings are too close together, report 0
+	// For first reading or if readings are too close together, don't report
 	s.lastReadings[publicKey] = currentReading
-	return &PeerBandwidth{
-		PublicKey: publicKey,
-		BytesIn:   0,
-		BytesOut:  0,
-	}
+	return nil
 }
 
 func (s *WireGuardService) reportPeerBandwidth() error {
