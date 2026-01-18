@@ -310,6 +310,71 @@ func (b *SharedBind) IsClosed() bool {
 	return b.closed.Load()
 }
 
+// GetPort returns the current UDP port the bind is using.
+// This is useful when rebinding to try to reuse the same port.
+func (b *SharedBind) GetPort() uint16 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.port
+}
+
+// Rebind replaces the underlying UDP connection with a new one.
+// This is necessary when network connectivity changes (e.g., WiFi to cellular
+// transition on macOS/iOS) and the old socket becomes stale.
+//
+// The caller is responsible for creating the new UDP connection and passing it here.
+// After rebind, the caller should trigger a hole punch to re-establish NAT mappings.
+func (b *SharedBind) Rebind(newConn *net.UDPConn) error {
+	if newConn == nil {
+		return fmt.Errorf("newConn cannot be nil")
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.closed.Load() {
+		return fmt.Errorf("bind is closed")
+	}
+
+	// Close the old connection
+	if b.udpConn != nil {
+		logger.Debug("Closing old UDP connection during rebind")
+		b.udpConn.Close()
+	}
+
+	// Set up the new connection
+	b.udpConn = newConn
+
+	// Update packet connections for the new socket
+	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
+		b.ipv4PC = ipv4.NewPacketConn(newConn)
+		b.ipv6PC = ipv6.NewPacketConn(newConn)
+
+		// Re-initialize message buffers for batch operations
+		batchSize := wgConn.IdealBatchSize
+		b.ipv4Msgs = make([]ipv4.Message, batchSize)
+		for i := range b.ipv4Msgs {
+			b.ipv4Msgs[i].OOB = make([]byte, 0)
+		}
+	} else {
+		// For non-Linux platforms, still set up ipv4PC for consistency
+		b.ipv4PC = ipv4.NewPacketConn(newConn)
+		b.ipv6PC = ipv6.NewPacketConn(newConn)
+	}
+
+	// Update the port
+	if addr, ok := newConn.LocalAddr().(*net.UDPAddr); ok {
+		b.port = uint16(addr.Port)
+		logger.Info("Rebound UDP socket to port %d", b.port)
+	}
+
+	// Note: recvFuncs don't need to be recreated because they reference b.udpConn
+	// and b.ipv4PC through the SharedBind struct, which we just updated.
+	// The receive functions will automatically use the new connection on their next read.
+
+	return nil
+}
+
 // SetMagicResponseCallback sets a callback function that will be called when
 // a magic test response packet is received. This is used for holepunch testing.
 // Pass nil to clear the callback.
