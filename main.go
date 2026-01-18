@@ -344,7 +344,7 @@ func runNewtMain(ctx context.Context) {
 
 	// Metrics/observability flags (mirror ENV if unset)
 	if metricsEnabledEnv == "" {
-		flag.BoolVar(&metricsEnabled, "metrics", true, "Enable Prometheus /metrics exporter")
+		flag.BoolVar(&metricsEnabled, "metrics", false, "Enable Prometheus metrics exporter")
 	} else {
 		if v, err := strconv.ParseBool(metricsEnabledEnv); err == nil {
 			metricsEnabled = v
