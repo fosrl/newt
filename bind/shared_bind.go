@@ -318,12 +318,41 @@ func (b *SharedBind) GetPort() uint16 {
 	return b.port
 }
 
+// CloseSocket closes the underlying UDP connection to release the port,
+// but keeps the SharedBind in a state where it can accept a new connection via Rebind.
+// This allows the caller to close the old socket first, then bind a new socket
+// to the same port before calling Rebind.
+//
+// Returns the port that was being used, so the caller can attempt to rebind to it.
+func (b *SharedBind) CloseSocket() (uint16, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.closed.Load() {
+		return 0, fmt.Errorf("bind is closed")
+	}
+
+	port := b.port
+
+	// Close the old connection to release the port
+	if b.udpConn != nil {
+		logger.Debug("Closing UDP connection to release port %d", port)
+		b.udpConn.Close()
+		b.udpConn = nil
+	}
+
+	return port, nil
+}
+
 // Rebind replaces the underlying UDP connection with a new one.
 // This is necessary when network connectivity changes (e.g., WiFi to cellular
 // transition on macOS/iOS) and the old socket becomes stale.
 //
 // The caller is responsible for creating the new UDP connection and passing it here.
 // After rebind, the caller should trigger a hole punch to re-establish NAT mappings.
+//
+// Note: Call CloseSocket() first if you need to rebind to the same port, as the
+// old socket must be closed before a new socket can bind to the same port.
 func (b *SharedBind) Rebind(newConn *net.UDPConn) error {
 	if newConn == nil {
 		return fmt.Errorf("newConn cannot be nil")
@@ -336,7 +365,8 @@ func (b *SharedBind) Rebind(newConn *net.UDPConn) error {
 		return fmt.Errorf("bind is closed")
 	}
 
-	// Close the old connection
+	// Close the old connection if it's still open
+	// (it may have already been closed via CloseSocket)
 	if b.udpConn != nil {
 		logger.Debug("Closing old UDP connection during rebind")
 		b.udpConn.Close()
