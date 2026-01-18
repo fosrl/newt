@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/fosrl/newt/logger"
 	"golang.org/x/net/ipv4"
@@ -656,17 +655,11 @@ func (b *SharedBind) receiveIPv4Batch(pc *ipv4.PacketConn, bufs [][]byte, sizes 
 
 // receiveIPv4Simple uses simple ReadFromUDP for non-Linux platforms
 func (b *SharedBind) receiveIPv4Simple(conn *net.UDPConn, bufs [][]byte, sizes []int, eps []wgConn.Endpoint) (int, error) {
-	// Set a read deadline so we can periodically check for rebind state
-	// This prevents blocking forever on a socket that's about to be closed
-	conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	// No read deadline - we rely on socket close to unblock during rebind.
+	// The caller (makeReceiveSocket) handles rebind state when errors occur.
 	for {
 		n, addr, err := conn.ReadFromUDP(bufs[0])
 		if err != nil {
-			// Check if this is a timeout - if so, just return the error
-			// so the caller can check rebind state and retry
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				return 0, err
-			}
 			return 0, err
 		}
 
