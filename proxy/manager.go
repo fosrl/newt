@@ -529,6 +529,18 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 				return
 			}
 
+			// Set TCP socket options for better performance
+			if tcpConn, ok := accepted.(*net.TCPConn); ok {
+				tcpConn.SetNoDelay(true) // Disable Nagle's algorithm
+				tcpConn.SetKeepAlive(true)
+				tcpConn.SetKeepAlivePeriod(30 * time.Second)
+			}
+			if tcpTarget, ok := target.(*net.TCPConn); ok {
+				tcpTarget.SetNoDelay(true)
+				tcpTarget.SetKeepAlive(true)
+				tcpTarget.SetKeepAlivePeriod(30 * time.Second)
+			}
+
 			entry := pm.getEntry(tunnelID)
 			if entry == nil {
 				entry = &tunnelEntry{}
@@ -536,21 +548,36 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 			var wg sync.WaitGroup
 			wg.Add(2)
 
+			// Client to target (ingress)
 			go func(ent *tunnelEntry) {
 				defer wg.Done()
 				cw := &countingWriter{ctx: context.Background(), w: target, set: ent.attrInTCP, pm: pm, ent: ent, out: false, proto: "tcp"}
-				_, _ = io.Copy(cw, accepted)
-				_ = target.Close()
+				buf := make([]byte, 32*1024) // 32KB buffer for better throughput
+				_, _ = io.CopyBuffer(cw, accepted, buf)
+				// Half-close to signal end of writes
+				if tcpTarget, ok := target.(*net.TCPConn); ok {
+					tcpTarget.CloseWrite()
+				}
 			}(entry)
 
+			// Target to client (egress)
 			go func(ent *tunnelEntry) {
 				defer wg.Done()
 				cw := &countingWriter{ctx: context.Background(), w: accepted, set: ent.attrOutTCP, pm: pm, ent: ent, out: true, proto: "tcp"}
-				_, _ = io.Copy(cw, target)
-				_ = accepted.Close()
+				buf := make([]byte, 32*1024) // 32KB buffer for better throughput
+				_, _ = io.CopyBuffer(cw, target, buf)
+				// Half-close to signal end of writes
+				if tcpConn, ok := accepted.(*net.TCPConn); ok {
+					tcpConn.CloseWrite()
+				}
 			}(entry)
 
 			wg.Wait()
+			
+			// Close connections after both directions complete
+			target.Close()
+			accepted.Close()
+			
 			if tunnelID != "" {
 				state.Global().DecSessions(tunnelID)
 				if e := pm.getEntry(tunnelID); e != nil {
@@ -736,3 +763,4 @@ func (pm *ProxyManager) PrintTargets() {
 		}
 	}
 }
+
