@@ -18,7 +18,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fosrl/newt/auth"
 	"github.com/fosrl/newt/authdaemon"
+	dnsauthority "github.com/fosrl/newt/dns"
 	"github.com/fosrl/newt/docker"
 	"github.com/fosrl/newt/healthcheck"
 	"github.com/fosrl/newt/logger"
@@ -131,6 +133,10 @@ var (
 	authorizedKeysFile                 string
 	preferEndpoint                     string
 	healthMonitor                      *healthcheck.Monitor
+	dnsAuthorityServer                 *dnsauthority.DNSAuthorityServer // DNS Authority server for intelligent routing
+	dnsBindAddr                        string                            // Bind address for DNS Authority (default 0.0.0.0)
+	disableDNSAuthority                bool                              // Disable the DNS Authority server entirely
+	authProxy                          *auth.AuthProxy                   // Auth proxy for SSO protection on direct routes
 	enforceHealthcheckCert             bool
 	authDaemonKey                      string
 	authDaemonPrincipalsFile           string
@@ -222,6 +228,10 @@ func runNewtMain(ctx context.Context) {
 	adminAddrEnv := os.Getenv("NEWT_ADMIN_ADDR")
 	regionEnv := os.Getenv("NEWT_REGION")
 	asyncBytesEnv := os.Getenv("NEWT_METRICS_ASYNC_BYTES")
+
+	dnsBindAddr = os.Getenv("DNS_BIND_ADDR")
+	disableDNSAuthorityEnv := os.Getenv("DISABLE_DNS_AUTHORITY")
+	disableDNSAuthority = disableDNSAuthorityEnv == "true"
 
 	disableClientsEnv := os.Getenv("DISABLE_CLIENTS")
 	disableClients = disableClientsEnv == "true"
@@ -419,6 +429,13 @@ func runNewtMain(ctx context.Context) {
 		if v, err := strconv.ParseBool(authDaemonEnabledEnv); err == nil {
 			authDaemonEnabled = v
 		}
+	}
+
+	if dnsBindAddr == "" {
+		flag.StringVar(&dnsBindAddr, "dns-bind", "", "Bind address for DNS Authority server (default 0.0.0.0, also DNS_BIND_ADDR)")
+	}
+	if disableDNSAuthorityEnv == "" {
+		flag.BoolVar(&disableDNSAuthority, "disable-dns-authority", false, "Disable the DNS Authority server (default false, also DISABLE_DNS_AUTHORITY)")
 	}
 
 	// do a --version check
@@ -1346,6 +1363,242 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		})
 		if err != nil {
 			logger.Error("Failed to send health check status response: %v", err)
+		}
+	})
+
+	// Register handler for DNS Authority configuration
+	dnsStatusAddress := func() string {
+		if dnsBindAddr == "" {
+			return "0.0.0.0:53"
+		}
+		return dnsBindAddr + ":53"
+	}
+
+	client.RegisterHandler("newt/dns/authority/config", func(msg websocket.WSMessage) {
+		logger.Debug("Received DNS authority config message: %+v", msg.Data)
+
+		type DNSAuthorityConfigMessage struct {
+			Action string                              `json:"action"` // "update", "remove", "start", "stop"
+			Zones  []dnsauthority.DNSAuthorityConfig   `json:"zones,omitempty"`
+		}
+
+		var configMsg DNSAuthorityConfigMessage
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling DNS authority config data: %v", err)
+			return
+		}
+
+		if err := json.Unmarshal(jsonData, &configMsg); err != nil {
+			logger.Error("Error unmarshaling DNS authority config data: %v", err)
+			return
+		}
+
+		switch configMsg.Action {
+		case "start":
+			if disableDNSAuthority {
+				logger.Warn("Received request to start DNS authority, but it is disabled via configuration")
+				_ = client.SendMessage("newt/dns/status", map[string]interface{}{
+					"status":  "disabled",
+					"message": "DNS Authority is disabled via --disable-dns-authority",
+				})
+				return
+			}
+			if dnsAuthorityServer == nil {
+				dnsAuthorityServer = dnsauthority.NewDNSAuthorityServer(dnsBindAddr)
+			}
+			if !dnsAuthorityServer.IsRunning() {
+				if err := dnsAuthorityServer.Start(); err != nil {
+					logger.Error("Failed to start DNS authority server: %v", err)
+					_ = client.SendMessage("newt/dns/status", map[string]interface{}{
+						"status": "error",
+						"error":  err.Error(),
+					})
+				} else {
+					logger.Info("DNS Authority server started")
+					// Wait a moment for the server to bind, then self-test
+					go func() {
+						time.Sleep(200 * time.Millisecond)
+						if err := dnsAuthorityServer.SelfTest(); err != nil {
+							logger.Warn("DNS Authority self-test failed: %v", err)
+							_ = client.SendMessage("newt/dns/status", map[string]interface{}{
+								"status":  "warning",
+								"message": "Server bound but self-test failed (firewall or loopback issue?)",
+								"error":   err.Error(),
+								"address": dnsStatusAddress(),
+							})
+						} else {
+							logger.Info("DNS Authority self-test passed")
+							_ = client.SendMessage("newt/dns/status", map[string]interface{}{
+								"status":  "running",
+								"address": dnsStatusAddress(),
+							})
+						}
+					}()
+				}
+			}
+
+		case "stop":
+			if dnsAuthorityServer != nil && dnsAuthorityServer.IsRunning() {
+				if err := dnsAuthorityServer.Stop(); err != nil {
+					logger.Error("Failed to stop DNS authority server: %v", err)
+					_ = client.SendMessage("newt/dns/status", map[string]interface{}{
+						"status": "error",
+						"error":  err.Error(),
+					})
+				} else {
+					logger.Info("DNS Authority server stopped")
+					_ = client.SendMessage("newt/dns/status", map[string]interface{}{
+						"status": "disabled",
+					})
+				}
+			}
+
+		case "update":
+			// Ensure DNS authority server is running
+			if disableDNSAuthority {
+				_ = client.SendMessage("newt/dns/status", map[string]interface{}{
+					"status":  "disabled",
+					"message": "DNS Authority is disabled via --disable-dns-authority",
+				})
+				return
+			}
+			if dnsAuthorityServer == nil {
+				dnsAuthorityServer = dnsauthority.NewDNSAuthorityServer(dnsBindAddr)
+			}
+			if !dnsAuthorityServer.IsRunning() {
+				if err := dnsAuthorityServer.Start(); err != nil {
+					logger.Error("Failed to start DNS authority server: %v", err)
+					_ = client.SendMessage("newt/dns/status", map[string]interface{}{
+						"status": "error",
+						"error":  err.Error(),
+					})
+					return
+				}
+				// Self-test after start
+				go func() {
+					time.Sleep(200 * time.Millisecond)
+					if err := dnsAuthorityServer.SelfTest(); err != nil {
+						logger.Warn("DNS Authority self-test failed: %v", err)
+						_ = client.SendMessage("newt/dns/status", map[string]interface{}{
+							"status":  "warning",
+							"message": "Server bound but self-test failed",
+							"error":   err.Error(),
+							"address": dnsStatusAddress(),
+						})
+					} else {
+						_ = client.SendMessage("newt/dns/status", map[string]interface{}{
+							"status":  "running",
+							"address": dnsStatusAddress(),
+						})
+					}
+				}()
+			}
+			for _, zone := range configMsg.Zones {
+				zoneCopy := zone
+				dnsAuthorityServer.UpdateZone(&zoneCopy)
+			}
+			logger.Info("Updated %d DNS authority zones", len(configMsg.Zones))
+			_ = client.SendMessage("newt/dns/status", map[string]interface{}{
+				"status":  "running",
+				"address": dnsStatusAddress(),
+				"zones":   len(configMsg.Zones),
+			})
+
+		case "remove":
+			if dnsAuthorityServer == nil {
+				return
+			}
+			for _, zone := range configMsg.Zones {
+				dnsAuthorityServer.RemoveZone(zone.Domain)
+			}
+			// If no zones left, stop the server
+			if len(dnsAuthorityServer.GetZones()) == 0 {
+				if err := dnsAuthorityServer.Stop(); err != nil {
+					logger.Error("Failed to stop DNS authority server: %v", err)
+				} else {
+					_ = client.SendMessage("newt/dns/status", map[string]interface{}{
+						"status": "disabled",
+					})
+				}
+			}
+			logger.Info("Removed %d DNS authority zones", len(configMsg.Zones))
+
+		default:
+			logger.Warn("Unknown DNS authority config action: %s", configMsg.Action)
+		}
+	})
+
+	// Register handler for Auth Proxy configuration (SSO protection for direct routes)
+	client.RegisterHandler("newt/auth/proxy/config", func(msg websocket.WSMessage) {
+		logger.Debug("Received auth proxy config message: %+v", msg.Data)
+
+		var configMsg auth.AuthProxyConfig
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling auth proxy config data: %v", err)
+			return
+		}
+
+		if err := json.Unmarshal(jsonData, &configMsg); err != nil {
+			logger.Error("Error unmarshaling auth proxy config data: %v", err)
+			return
+		}
+
+		switch configMsg.Action {
+		case "start":
+			if authProxy == nil {
+				authProxy = auth.NewAuthProxy()
+			}
+			if !authProxy.IsRunning() {
+				if err := authProxy.Start(); err != nil {
+					logger.Error("Failed to start auth proxy: %v", err)
+				} else {
+					logger.Info("Auth Proxy started")
+				}
+			}
+
+		case "stop":
+			if authProxy != nil && authProxy.IsRunning() {
+				if err := authProxy.Stop(); err != nil {
+					logger.Error("Failed to stop auth proxy: %v", err)
+				} else {
+					logger.Info("Auth Proxy stopped")
+				}
+			}
+
+		case "update":
+			// Ensure auth proxy is running
+			if authProxy == nil {
+				authProxy = auth.NewAuthProxy()
+			}
+			if !authProxy.IsRunning() {
+				if err := authProxy.Start(); err != nil {
+					logger.Error("Failed to start auth proxy: %v", err)
+					return
+				}
+			}
+
+			// Update global auth config
+			if err := authProxy.UpdateConfig(configMsg.Auth); err != nil {
+				logger.Error("Failed to update auth config: %v", err)
+			}
+
+			// Update resource configs
+			authProxy.ReplaceResources(configMsg.Resources)
+			logger.Info("Updated auth proxy with %d resources", len(configMsg.Resources))
+
+		case "remove":
+			if authProxy == nil {
+				return
+			}
+			for _, resource := range configMsg.Resources {
+				authProxy.RemoveResource(resource.Domain)
+			}
+			logger.Info("Removed %d auth proxy resources", len(configMsg.Resources))
+
+		default:
+			logger.Warn("Unknown auth proxy config action: %s", configMsg.Action)
 		}
 	})
 
