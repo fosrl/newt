@@ -104,6 +104,48 @@ detect_platform() {
     printf '%s_%s' "$os" "$arch"
 }
 
+# Check for potential system conflicts (Port 53, systemd-resolved, etc.)
+check_conflicts() {
+    local platform="$1"
+
+    # Only check on Linux as that's where systemd-resolved is common
+    if [[ "$platform" == *"linux"* ]]; then
+        print_status "Checking for potential system conflicts..."
+
+        # Check if port 53 is in use
+        if command -v ss >/dev/null 2>&1; then
+            if ss -tuln | grep -q ":53 "; then
+                print_warning "Port 53 is already in use on this system."
+
+                # Check if it's systemd-resolved
+                if ss -tulnp | grep -q "systemd-resolve\|resolved"; then
+                    print_warning "systemd-resolved appears to be occupying port 53."
+                    print_warning "This will prevent Newt's DNS Authority from starting on 0.0.0.0:53."
+                    print_warning "To fix this, you can either:"
+                    print_warning "  1. Disable systemd-resolved: sudo systemctl disable --now systemd-resolved"
+                    print_warning "  2. Bind Newt to a specific IP: newt --dns-bind <IP>"
+                    print_warning "  3. Disable DNS Authority if not needed: newt --disable-dns-authority"
+                else
+                    print_warning "Another process is using port 53. DNS Authority may fail to start."
+                    print_warning "If you don't need this feature, you can disable it with: newt --disable-dns-authority"
+                fi
+            fi
+        fi
+
+        # Check for WireGuard kernel module (optional for Newt but recommended for high performance)
+        if [ -f /proc/modules ] && ! grep -q "^wireguard" /proc/modules; then
+            print_status "WireGuard kernel module not loaded. Newt will use userspace implementation (netstack)."
+            print_status "For better performance, you can load it with: sudo modprobe wireguard"
+        fi
+
+        # Check privileges for port 53
+        if [ "$EUID" -ne 0 ]; then
+            print_warning "Newt is being installed as a non-root user."
+            print_warning "Note: Binding to port 53 (DNS) typically requires root privileges (sudo)."
+        fi
+    fi
+}
+
 # Determine installation directory (default fallback)
 get_install_dir() {
     case "$PLATFORM" in
@@ -286,6 +328,9 @@ main() {
 
     PLATFORM=$(detect_platform)
     print_status "Detected platform: ${PLATFORM}"
+
+    # Check for conflicts
+    check_conflicts "$PLATFORM"
 
     if [ -n "$CUSTOM_PATH" ]; then
         # --path wins; derive INSTALL_DIR from it

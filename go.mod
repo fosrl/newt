@@ -8,7 +8,10 @@ require (
 	github.com/gaissmai/bart v0.26.1
 	github.com/go-crypt/crypt v0.14.15
 	github.com/go-crypt/x v0.4.16
+	github.com/docker/docker v28.5.2+incompatible
 	github.com/gorilla/websocket v1.5.3
+	github.com/golang-jwt/jwt/v5 v5.3.0
+	github.com/miekg/dns v1.1.62
 	github.com/moby/moby/api v1.54.2
 	github.com/moby/moby/client v0.4.1
 	github.com/prometheus/client_golang v1.23.2
