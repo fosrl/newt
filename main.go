@@ -1329,7 +1329,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 		// Define the structure of the incoming message
 		type SSHCertData struct {
-			TraceID   string `json:"traceId"`
+			MessageId   string `json:"messageId"`
 			AgentPort int    `json:"agentPort"`
 			AgentHost string `json:"agentHost"`
 			CACert    string `json:"caCert"`
@@ -1357,9 +1357,9 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		if authDaemonKey == "" {
 			logger.Error("Auth daemon key not configured, cannot process SSH certificate")
 			// Send failure response back to cloud
-			err := client.SendMessage("newt/pam/connection/response", map[string]interface{}{
-				"traceId": certData.TraceID,
-				"success": false,
+			err := client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+				"messageId": certData.MessageId,
+				"complete": true,
 				"error":   "auth daemon key not configured",
 			})
 			if err != nil {
@@ -1383,9 +1383,9 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		if err != nil {
 			logger.Error("Failed to marshal auth daemon request: %v", err)
 			// Send failure response
-			client.SendMessage("newt/pam/ssh-cert-response", map[string]interface{}{
-				"traceId": certData.TraceID,
-				"success": false,
+			client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+				"messageId": certData.MessageId,
+				"complete": true,
 				"error":   fmt.Sprintf("failed to marshal request: %v", err),
 			})
 			return
@@ -1407,9 +1407,9 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		req, err := http.NewRequest("POST", url, bytes.NewBuffer(requestJSON))
 		if err != nil {
 			logger.Error("Failed to create auth daemon request: %v", err)
-			client.SendMessage("newt/pam/connection/response", map[string]interface{}{
-				"traceId": certData.TraceID,
-				"success": false,
+			client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+				"messageId": certData.MessageId,
+				"complete": true,
 				"error":   fmt.Sprintf("failed to create request: %v", err),
 			})
 			return
@@ -1425,9 +1425,9 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			logger.Error("Failed to connect to auth daemon: %v", err)
-			client.SendMessage("newt/pam/connection/response", map[string]interface{}{
-				"traceId": certData.TraceID,
-				"success": false,
+			client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+				"messageId": certData.MessageId,
+				"complete": true,
 				"error":   fmt.Sprintf("failed to connect to auth daemon: %v", err),
 			})
 			return
@@ -1437,9 +1437,9 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		// Check response status
 		if resp.StatusCode != http.StatusOK {
 			logger.Error("Auth daemon returned non-OK status: %d", resp.StatusCode)
-			client.SendMessage("newt/pam/connection/response", map[string]interface{}{
-				"traceId": certData.TraceID,
-				"success": false,
+			client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+				"messageId": certData.MessageId,
+				"complete": true,
 				"error":   fmt.Sprintf("auth daemon returned status %d", resp.StatusCode),
 			})
 			return
@@ -1448,9 +1448,9 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		logger.Info("Successfully registered SSH certificate with auth daemon for user %s", certData.Username)
 
 		// Send success response back to cloud
-		err = client.SendMessage("newt/pam/connection/response", map[string]interface{}{
-			"traceId": certData.TraceID,
-			"success": true,
+		err = client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+			"messageId": certData.MessageId,
+			"complete": true,
 		})
 		if err != nil {
 			logger.Error("Failed to send SSH cert success response: %v", err)
