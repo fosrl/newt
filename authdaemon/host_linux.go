@@ -138,7 +138,7 @@ func ensureUser(username string, meta ConnectionMetadata) error {
 }
 
 func createUser(username string, meta ConnectionMetadata) error {
-	args := []string{}
+	args := []string{"-s", "/bin/bash"}
 	if meta.Homedir {
 		args = append(args, "-m")
 	} else {
