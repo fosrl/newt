@@ -3,8 +3,6 @@ package authdaemon
 import (
 	"encoding/json"
 	"net/http"
-
-	"github.com/fosrl/newt/logger"
 )
 
 // registerRoutes registers all API routes. Add new endpoints here.
@@ -40,40 +38,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
-}
-
-// ProcessConnection runs the same logic as POST /connection: CA cert, sshd config, user create/reconcile, principals.
-// Use this when DisableHTTPS is true (e.g. embedded in Newt) instead of calling the API.
-func (s *Server) ProcessConnection(req ConnectionRequest) {
-	logger.Info("connection: niceId=%q username=%q metadata.sudo=%v metadata.homedir=%v",
-		req.NiceId, req.Username, req.Metadata.Sudo, req.Metadata.Homedir)
-
-	cfg := &s.cfg
-	if cfg.CACertPath != "" {
-		if err := writeCACertIfNotExists(cfg.CACertPath, req.CaCert); err != nil {
-			logger.Warn("auth-daemon: write CA cert: %v", err)
-		}
-		sshdConfig := cfg.SSHDConfigPath
-		if sshdConfig == "" {
-			sshdConfig = "/etc/ssh/sshd_config"
-		}
-		if err := ensureSSHDTrustedUserCAKeys(sshdConfig, cfg.CACertPath); err != nil {
-			logger.Warn("auth-daemon: sshd_config: %v", err)
-		}
-		if cfg.ReloadSSHCommand != "" {
-			if err := reloadSSHD(cfg.ReloadSSHCommand); err != nil {
-				logger.Warn("auth-daemon: reload sshd: %v", err)
-			}
-		}
-	}
-	if err := ensureUser(req.Username, req.Metadata); err != nil {
-		logger.Warn("auth-daemon: ensure user: %v", err)
-	}
-	if cfg.PrincipalsFilePath != "" {
-		if err := writePrincipals(cfg.PrincipalsFilePath, req.Username, req.NiceId); err != nil {
-			logger.Warn("auth-daemon: write principals: %v", err)
-		}
-	}
 }
 
 // handleConnection accepts POST with connection payload and delegates to ProcessConnection.
