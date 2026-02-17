@@ -24,12 +24,11 @@ import (
 type Config struct {
 	// DisableHTTPS: when true, Run() does not start the HTTPS server (for embedded use inside Newt). Call ProcessConnection directly for connection events.
 	DisableHTTPS       bool
-	Port               int    // Listen port for the HTTPS server. Required when DisableHTTPS is false.
-	PresharedKey       string // Required when DisableHTTPS is false; used for HTTP auth (Authorization: Bearer <key> or X-Preshared-Key: <key>).
-	CACertPath         string // Where to write the CA cert (e.g. /etc/ssh/ca.pem).
-	SSHDConfigPath     string // Path to sshd_config (e.g. /etc/ssh/sshd_config). Defaults to /etc/ssh/sshd_config when CACertPath is set.
-	ReloadSSHCommand   string // Command to reload sshd after config change (e.g. "systemctl reload sshd"). Empty = no reload.
-	PrincipalsFilePath string // Path to the principals data file (JSON: username -> array of principals). Empty = do not store principals.
+	Port               int    // Required when DisableHTTPS is false. Listen port for the HTTPS server. No default.
+	PresharedKey       string // Required when DisableHTTPS is false. HTTP auth (Authorization: Bearer <key> or X-Preshared-Key: <key>). No default.
+	CACertPath         string // Required. Where to write the CA cert (e.g. /etc/ssh/ca.pem). No default.
+	Force              bool   // If true, overwrite existing CA cert (and other items) when content differs. Default false.
+	PrincipalsFilePath string // Required. Path to the principals data file (JSON: username -> array of principals). No default.
 }
 
 type Server struct {
@@ -98,18 +97,24 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// NewServer builds a new auth-daemon server from cfg. When DisableHTTPS is false, PresharedKey and Port are required.
+// NewServer builds a new auth-daemon server from cfg. Port, PresharedKey, CACertPath, and PrincipalsFilePath are required (no defaults).
 func NewServer(cfg Config) (*Server, error) {
 	if runtime.GOOS != "linux" {
 		return nil, fmt.Errorf("auth-daemon is only supported on Linux, not %s", runtime.GOOS)
 	}
 	if !cfg.DisableHTTPS {
-		if cfg.PresharedKey == "" {
-			return nil, fmt.Errorf("preshared key is required when HTTPS is enabled")
-		}
 		if cfg.Port <= 0 {
-			return nil, fmt.Errorf("port must be positive when HTTPS is enabled")
+			return nil, fmt.Errorf("port is required and must be positive")
 		}
+		if cfg.PresharedKey == "" {
+			return nil, fmt.Errorf("preshared key is required")
+		}
+	}
+	if cfg.CACertPath == "" {
+		return nil, fmt.Errorf("CACertPath is required")
+	}
+	if cfg.PrincipalsFilePath == "" {
+		return nil, fmt.Errorf("PrincipalsFilePath is required")
 	}
 	s := &Server{cfg: cfg}
 	if !cfg.DisableHTTPS {

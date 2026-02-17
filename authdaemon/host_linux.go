@@ -16,82 +16,37 @@ import (
 	"github.com/fosrl/newt/logger"
 )
 
-// writeCACertIfNotExists writes contents to path only if the file does not exist.
-func writeCACertIfNotExists(path, contents string) error {
-	if _, err := os.Stat(path); err == nil {
-		logger.Debug("auth-daemon: CA cert already exists at %s, skipping write", path)
-		return nil
+// writeCACertIfNotExists writes contents to path. If the file already exists: when force is false, skip; when force is true, overwrite only if content differs.
+func writeCACertIfNotExists(path, contents string, force bool) error {
+	contents = strings.TrimSpace(contents)
+	if contents != "" && !strings.HasSuffix(contents, "\n") {
+		contents += "\n"
+	}
+	existing, err := os.ReadFile(path)
+	if err == nil {
+		existingStr := strings.TrimSpace(string(existing))
+		if existingStr != "" && !strings.HasSuffix(existingStr, "\n") {
+			existingStr += "\n"
+		}
+		if existingStr == contents {
+			logger.Debug("auth-daemon: CA cert unchanged at %s, skipping write", path)
+			return nil
+		}
+		if !force {
+			logger.Debug("auth-daemon: CA cert already exists at %s, skipping write (Force disabled)", path)
+			return nil
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", path, err)
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
-	contents = strings.TrimSpace(contents)
-	if contents != "" && !strings.HasSuffix(contents, "\n") {
-		contents += "\n"
-	}
 	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
 		return fmt.Errorf("write CA cert: %w", err)
 	}
 	logger.Info("auth-daemon: wrote CA cert to %s", path)
-	return nil
-}
-
-// ensureSSHDTrustedUserCAKeys ensures sshd_config contains TrustedUserCAKeys caCertPath.
-func ensureSSHDTrustedUserCAKeys(sshdConfigPath, caCertPath string) error {
-	if sshdConfigPath == "" {
-		sshdConfigPath = "/etc/ssh/sshd_config"
-	}
-	data, err := os.ReadFile(sshdConfigPath)
-	if err != nil {
-		return fmt.Errorf("read sshd_config: %w", err)
-	}
-	directive := "TrustedUserCAKeys " + caCertPath
-	lines := strings.Split(string(data), "\n")
-	found := false
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		// strip inline comment
-		if idx := strings.Index(trimmed, "#"); idx >= 0 {
-			trimmed = strings.TrimSpace(trimmed[:idx])
-		}
-		if trimmed == "" {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "TrustedUserCAKeys") {
-			if strings.TrimSpace(trimmed) == directive {
-				logger.Debug("auth-daemon: sshd_config already has TrustedUserCAKeys %s", caCertPath)
-				return nil
-			}
-			lines[i] = directive
-			found = true
-			break
-		}
-	}
-	if !found {
-		lines = append(lines, directive)
-	}
-	out := strings.Join(lines, "\n")
-	if !strings.HasSuffix(out, "\n") {
-		out += "\n"
-	}
-	if err := os.WriteFile(sshdConfigPath, []byte(out), 0644); err != nil {
-		return fmt.Errorf("write sshd_config: %w", err)
-	}
-	logger.Info("auth-daemon: updated %s with TrustedUserCAKeys %s", sshdConfigPath, caCertPath)
-	return nil
-}
-
-// reloadSSHD runs the given shell command to reload sshd (e.g. "systemctl reload sshd").
-func reloadSSHD(reloadCmd string) error {
-	if reloadCmd == "" {
-		return nil
-	}
-	cmd := exec.Command("sh", "-c", reloadCmd)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("reload sshd %q: %w (output: %s)", reloadCmd, err, string(out))
-	}
-	logger.Info("auth-daemon: reloaded sshd")
 	return nil
 }
 
