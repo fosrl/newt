@@ -405,7 +405,7 @@ func runNewtMain(ctx context.Context) {
 
 	// Auth daemon flags
 	if authDaemonKey == "" {
-		flag.StringVar(&authDaemonKey, "ad-preshared-key", "", "Preshared key for auth daemon authentication (required when --auth-daemon is true)")
+		flag.StringVar(&authDaemonKey, "ad-pre-shared-key", "", "Pre-shared key for auth daemon authentication")
 	}
 	if authDaemonPrincipalsFile == "" {
 		flag.StringVar(&authDaemonPrincipalsFile, "ad-principals-file", "/var/run/auth-daemon/principals", "Path to the principals file for auth daemon")
