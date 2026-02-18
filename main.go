@@ -1579,6 +1579,15 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				}
 			}
 
+			// Update TLS certificates if provided
+			if len(configMsg.TLSCertificates) > 0 {
+				if err := authProxy.UpdateCertificates(configMsg.TLSCertificates); err != nil {
+					logger.Error("Failed to update TLS certificates: %v", err)
+				} else {
+					logger.Info("Updated auth proxy with %d TLS certificate(s)", len(configMsg.TLSCertificates))
+				}
+			}
+
 			// Update global auth config
 			if err := authProxy.UpdateConfig(configMsg.Auth); err != nil {
 				logger.Error("Failed to update auth config: %v", err)
@@ -1587,6 +1596,21 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			// Update resource configs
 			authProxy.ReplaceResources(configMsg.Resources)
 			logger.Info("Updated auth proxy with %d resources", len(configMsg.Resources))
+
+			// Report auth proxy bind status back to Pangolin
+			httpOk, httpsOk, httpSkipped, httpsSkipped := authProxy.BindStatus()
+			statusData := map[string]interface{}{
+				"httpListening":  httpOk,
+				"httpsListening": httpsOk,
+				"httpSkipped":    httpSkipped,
+				"httpsSkipped":   httpsSkipped,
+				"certCount":      len(configMsg.TLSCertificates),
+				"resourceCount":  len(configMsg.Resources),
+			}
+			if httpSkipped || httpsSkipped {
+				statusData["warning"] = "One or more auth proxy ports are already in use by another process (e.g. Traefik). Set NEWT_AUTH_PROXY_BIND / NEWT_AUTH_PROXY_HTTPS_BIND to use alternate ports."
+			}
+			_ = client.SendMessage("newt/auth/proxy/status", statusData)
 
 		case "remove":
 			if authProxy == nil {

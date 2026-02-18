@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -13,8 +14,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"os"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -47,11 +48,21 @@ type ResourceAuthConfig struct {
 	SSL                  bool     `json:"ssl"`                  // Use SSL for backend
 }
 
+// TLSCertificateConfig holds a TLS certificate pushed from Pangolin
+type TLSCertificateConfig struct {
+	Domain    string `json:"domain"`    // Domain this cert covers (may be wildcard like *.example.com)
+	CertPEM   string `json:"certPem"`   // PEM-encoded certificate chain
+	KeyPEM    string `json:"keyPem"`    // PEM-encoded private key
+	ExpiresAt int64  `json:"expiresAt"` // Unix timestamp when cert expires
+	Wildcard  bool   `json:"wildcard"`  // Whether this is a wildcard cert
+}
+
 // AuthProxyConfig is the full config message from Pangolin
 type AuthProxyConfig struct {
-	Action    string               `json:"action"` // "update", "remove", "start", "stop"
-	Auth      AuthConfig           `json:"auth"`
-	Resources []ResourceAuthConfig `json:"resources"`
+	Action          string                  `json:"action"` // "update", "remove", "start", "stop"
+	Auth            AuthConfig              `json:"auth"`
+	Resources       []ResourceAuthConfig    `json:"resources"`
+	TLSCertificates []TLSCertificateConfig  `json:"tlsCertificates,omitempty"`
 }
 
 // AuthProxy handles authentication for direct-routed resources
@@ -66,6 +77,13 @@ type AuthProxy struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	listenAddr      string
+	httpsListenAddr string
+	httpsServer     *http.Server
+	certStore       map[string]*tls.Certificate // domain -> parsed TLS cert (lowercase)
+	certWildcards   map[string]*tls.Certificate // base domain -> wildcard cert (e.g. "example.com" -> *.example.com cert)
+	hasCerts        bool                        // whether any TLS certs have been loaded
+	httpBindFailed  bool                        // true if HTTP port was already in use (e.g. Traefik colocated)
+	httpsBindFailed bool                        // true if HTTPS port was already in use
 }
 
 // NewAuthProxy creates a new auth proxy
@@ -75,16 +93,23 @@ func NewAuthProxy() *AuthProxy {
 	if listenAddr == "" {
 		listenAddr = ":80"
 	}
+	httpsListenAddr := os.Getenv("NEWT_AUTH_PROXY_HTTPS_BIND")
+	if httpsListenAddr == "" {
+		httpsListenAddr = ":443"
+	}
 
 	return &AuthProxy{
-		resources: make(map[string]*ResourceAuthConfig),
-		servers:   make(map[string]*http.Server),
+		resources:       make(map[string]*ResourceAuthConfig),
+		servers:         make(map[string]*http.Server),
+		certStore:       make(map[string]*tls.Certificate),
+		certWildcards:   make(map[string]*tls.Certificate),
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		ctx:        ctx,
-		cancel:     cancel,
-		listenAddr: listenAddr,
+		ctx:             ctx,
+		cancel:          cancel,
+		listenAddr:      listenAddr,
+		httpsListenAddr: httpsListenAddr,
 	}
 }
 
@@ -152,31 +177,147 @@ func (p *AuthProxy) Start() error {
 		return nil
 	}
 
-	listener, err := net.Listen("tcp", p.listenAddr)
-	if err != nil {
-		return fmt.Errorf("auth proxy failed to bind on %s: %w", p.listenAddr, err)
-	}
-	if err := listener.Close(); err != nil {
-		return fmt.Errorf("auth proxy preflight close failed: %w", err)
-	}
-
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 
-	server := &http.Server{
-		Addr:    p.listenAddr,
-		Handler: p,
+	// Try to bind the HTTP port. If another process owns it (e.g. Traefik
+	// colocated on the same machine), log a clear message and skip the HTTP
+	// listener but still mark as running so certs/resources are stored.
+	httpUp := false
+	listener, err := net.Listen("tcp", p.listenAddr)
+	if err != nil {
+		p.httpBindFailed = true
+		logger.Warn("Auth Proxy: HTTP port %s is already in use by another process "+
+			"(likely Traefik/Gerbil on this machine). HTTP listener skipped. "+
+			"Set NEWT_AUTH_PROXY_BIND to use a different port.", p.listenAddr)
+	} else {
+		listener.Close()
+		p.httpBindFailed = false
+
+		// HTTP server: serves requests directly when no TLS certs are available,
+		// otherwise redirects to HTTPS
+		httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p.mu.RLock()
+			hasCerts := p.hasCerts
+			p.mu.RUnlock()
+
+			if hasCerts {
+				// Redirect HTTP → HTTPS
+				host := r.Host
+				if h, _, err := net.SplitHostPort(host); err == nil {
+					host = h
+				}
+				target := "https://" + host + r.RequestURI
+				http.Redirect(w, r, target, http.StatusMovedPermanently)
+				return
+			}
+			// No TLS certs loaded: serve directly on HTTP
+			p.ServeHTTP(w, r)
+		})
+
+		server := &http.Server{
+			Addr:    p.listenAddr,
+			Handler: httpHandler,
+		}
+		p.servers["__default__"] = server
+
+		go func() {
+			if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("Auth Proxy: HTTP server error on %s: %v", p.listenAddr, err)
+			}
+		}()
+		httpUp = true
 	}
-	p.servers["__default__"] = server
+
+	// Start HTTPS server if we have certificates
+	if p.hasCerts {
+		p.startHTTPSServerLocked()
+	}
+
+	p.running = true
+
+	if httpUp {
+		logger.Info("Auth Proxy: Started on %s", p.listenAddr)
+	} else {
+		logger.Info("Auth Proxy: Started (HTTP skipped — port in use; HTTPS will be attempted when certs arrive)")
+	}
+	return nil
+}
+
+// startHTTPSServerLocked starts the HTTPS server. Must be called with p.mu held.
+func (p *AuthProxy) startHTTPSServerLocked() {
+	if p.httpsServer != nil {
+		return // already running
+	}
+	if p.httpsBindFailed {
+		return // previously failed — don't retry until restart
+	}
+
+	// Preflight check — if the HTTPS port is in use, record and skip
+	ln, err := net.Listen("tcp", p.httpsListenAddr)
+	if err != nil {
+		p.httpsBindFailed = true
+		logger.Warn("Auth Proxy: HTTPS port %s is already in use by another process "+
+			"(likely Traefik/Gerbil on this machine). HTTPS listener skipped. "+
+			"Set NEWT_AUTH_PROXY_HTTPS_BIND to use a different port.", p.httpsListenAddr)
+		return
+	}
+	ln.Close()
+
+	tlsConfig := &tls.Config{
+		GetCertificate: p.getCertificate,
+		MinVersion:     tls.VersionTLS12,
+	}
+
+	p.httpsServer = &http.Server{
+		Addr:      p.httpsListenAddr,
+		Handler:   p, // use the same ServeHTTP handler
+		TLSConfig: tlsConfig,
+	}
 
 	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("Auth Proxy: HTTP server error on %s: %v", p.listenAddr, err)
+		// ListenAndServeTLS with empty cert/key files because GetCertificate handles it
+		if err := p.httpsServer.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("Auth Proxy: HTTPS server error on %s: %v", p.httpsListenAddr, err)
 		}
 	}()
 
-	p.running = true
-	logger.Info("Auth Proxy: Started on %s", p.listenAddr)
-	return nil
+	logger.Info("Auth Proxy: HTTPS server started on %s", p.httpsListenAddr)
+}
+
+// stopHTTPSServerLocked stops the HTTPS server. Must be called with p.mu held.
+func (p *AuthProxy) stopHTTPSServerLocked() {
+	if p.httpsServer == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	p.httpsServer.Shutdown(ctx)
+	p.httpsServer = nil
+	logger.Info("Auth Proxy: HTTPS server stopped")
+}
+
+// getCertificate is the tls.Config.GetCertificate callback for SNI-based cert selection
+func (p *AuthProxy) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	serverName := strings.ToLower(hello.ServerName)
+
+	// Try exact domain match first
+	if cert, ok := p.certStore[serverName]; ok {
+		return cert, nil
+	}
+
+	// Try wildcard match: for "sub.example.com", check if we have a wildcard cert for "example.com"
+	parts := strings.SplitN(serverName, ".", 2)
+	if len(parts) == 2 {
+		baseDomain := parts[1]
+		if cert, ok := p.certWildcards[baseDomain]; ok {
+			return cert, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no certificate found for %s", serverName)
 }
 
 // Stop stops the auth proxy
@@ -190,7 +331,10 @@ func (p *AuthProxy) Stop() error {
 
 	p.cancel()
 
-	// Shutdown all servers
+	// Stop HTTPS server
+	p.stopHTTPSServerLocked()
+
+	// Shutdown all HTTP servers
 	for domain, server := range p.servers {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		server.Shutdown(ctx)
@@ -457,6 +601,63 @@ func (p *AuthProxy) proxyToBackend(w http.ResponseWriter, r *http.Request, resou
 	proxy.ServeHTTP(w, r)
 }
 
+// UpdateCertificates updates the TLS certificate store with certificates pushed from Pangolin.
+// If certs are loaded for the first time and the proxy is already running, it starts the HTTPS server.
+func (p *AuthProxy) UpdateCertificates(certs []TLSCertificateConfig) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	newStore := make(map[string]*tls.Certificate)
+	newWildcards := make(map[string]*tls.Certificate)
+	loaded := 0
+
+	for _, certCfg := range certs {
+		tlsCert, err := tls.X509KeyPair([]byte(certCfg.CertPEM), []byte(certCfg.KeyPEM))
+		if err != nil {
+			logger.Error("Auth Proxy: Failed to parse TLS cert for %s: %v", certCfg.Domain, err)
+			continue
+		}
+
+		domain := strings.ToLower(certCfg.Domain)
+
+		if certCfg.Wildcard {
+			// Wildcard cert: domain is stored as the base domain (e.g. "example.com")
+			// and covers *.example.com
+			// Strip leading "*." if present
+			baseDomain := domain
+			if strings.HasPrefix(baseDomain, "*.") {
+				baseDomain = baseDomain[2:]
+			}
+			newWildcards[baseDomain] = &tlsCert
+			// Also store as exact match for the base domain itself
+			newStore[baseDomain] = &tlsCert
+			logger.Info("Auth Proxy: Loaded wildcard TLS cert for *.%s", baseDomain)
+		} else {
+			newStore[domain] = &tlsCert
+			logger.Info("Auth Proxy: Loaded TLS cert for %s", domain)
+		}
+		loaded++
+	}
+
+	p.certStore = newStore
+	p.certWildcards = newWildcards
+	hadCerts := p.hasCerts
+	p.hasCerts = loaded > 0
+
+	// If we just got certs for the first time and the proxy is already running, start HTTPS
+	if p.hasCerts && !hadCerts && p.running {
+		p.startHTTPSServerLocked()
+	}
+
+	// If we lost all certs, stop HTTPS
+	if !p.hasCerts && hadCerts {
+		p.stopHTTPSServerLocked()
+	}
+
+	logger.Info("Auth Proxy: Certificate store updated with %d cert(s)", loaded)
+	return nil
+}
+
 // GetResource returns the auth config for a domain
 func (p *AuthProxy) GetResource(domain string) *ResourceAuthConfig {
 	p.mu.RLock()
@@ -485,6 +686,17 @@ func (p *AuthProxy) IsRunning() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.running
+}
+
+// BindStatus returns whether each listener is active, skipped (port in use), or not started.
+func (p *AuthProxy) BindStatus() (httpOk, httpsOk, httpSkipped, httpsSkipped bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	httpOk = p.running && !p.httpBindFailed && p.servers["__default__"] != nil
+	httpsOk = p.running && !p.httpsBindFailed && p.httpsServer != nil
+	httpSkipped = p.httpBindFailed
+	httpsSkipped = p.httpsBindFailed
+	return
 }
 
 // parseRSAPublicKey parses a PEM-encoded RSA public key
