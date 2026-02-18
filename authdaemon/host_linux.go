@@ -158,8 +158,49 @@ func createUser(username string, meta ConnectionMetadata) error {
 		} else {
 			logger.Info("auth-daemon: added %s to %s", username, group)
 		}
+		if err := configurePasswordlessSudo(username); err != nil {
+			logger.Warn("auth-daemon: configure passwordless sudo for %s: %v", username, err)
+		}
 	}
 	return nil
+}
+
+// configurePasswordlessSudo creates a sudoers.d file to allow passwordless sudo for the user
+func configurePasswordlessSudo(username string) error {
+	sudoersFile := filepath.Join("/etc/sudoers.d", fmt.Sprintf("90-pangolin-%s", username))
+	content := fmt.Sprintf("# Created by newt auth-daemon\n%s ALL=(ALL) NOPASSWD:ALL\n", username)
+	
+	// Write to temp file first
+	tmpFile := sudoersFile + ".tmp"
+	if err := os.WriteFile(tmpFile, []byte(content), 0440); err != nil {
+		return fmt.Errorf("write temp sudoers file: %w", err)
+	}
+	
+	// Validate with visudo
+	cmd := exec.Command("visudo", "-c", "-f", tmpFile)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		os.Remove(tmpFile)
+		return fmt.Errorf("visudo validation failed: %w (output: %s)", err, string(out))
+	}
+	
+	// Move to final location
+	if err := os.Rename(tmpFile, sudoersFile); err != nil {
+		os.Remove(tmpFile)
+		return fmt.Errorf("move sudoers file: %w", err)
+	}
+	
+	logger.Info("auth-daemon: configured passwordless sudo for %s", username)
+	return nil
+}
+
+// removePasswordlessSudo removes the sudoers.d file for the user
+func removePasswordlessSudo(username string) {
+	sudoersFile := filepath.Join("/etc/sudoers.d", fmt.Sprintf("90-newt-%s", username))
+	if err := os.Remove(sudoersFile); err != nil && !os.IsNotExist(err) {
+		logger.Warn("auth-daemon: remove passwordless sudo for %s: %v", username, err)
+	} else if err == nil {
+		logger.Info("auth-daemon: removed passwordless sudo for %s", username)
+	}
 }
 
 func mustAtoi(s string) int {
@@ -188,6 +229,15 @@ func reconcileUser(u *user.User, meta ConnectionMetadata) error {
 		} else {
 			logger.Info("auth-daemon: removed %s from %s", u.Username, group)
 		}
+	}
+	
+	// Configure passwordless sudo
+	if meta.Sudo {
+		if err := configurePasswordlessSudo(u.Username); err != nil {
+			logger.Warn("auth-daemon: configure passwordless sudo for %s: %v", u.Username, err)
+		}
+	} else {
+		removePasswordlessSudo(u.Username)
 	}
 	if meta.Homedir && u.HomeDir != "" {
 		if st, err := os.Stat(u.HomeDir); err != nil || !st.IsDir() {
