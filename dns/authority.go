@@ -31,11 +31,12 @@ func authoritativeBaseDomain(domain string) string {
 
 // DNSAuthorityTarget represents a target IP with health status
 type DNSAuthorityTarget struct {
-	IP       string `json:"ip"`       // Public IP to respond with
-	Priority int    `json:"priority"` // Lower = higher priority for failover
-	Healthy  bool   `json:"healthy"`  // Health status from Pangolin
-	SiteID   int    `json:"siteId"`   // Site ID for reference
-	SiteName string `json:"siteName"` // Human-readable name
+	IP               string `json:"ip"`                         // Public IP to respond with
+	Priority         int    `json:"priority"`                   // Lower = higher priority for failover
+	Healthy          bool   `json:"healthy"`                    // Health status from Pangolin
+	SiteID           int    `json:"siteId"`                     // Site ID for reference
+	SiteName         string `json:"siteName"`                   // Human-readable name
+	BackendLatencyMs int64  `json:"backendLatencyMs,omitempty"` // Existing target healthcheck latency from site to backend
 }
 
 // DNSAuthorityServer serves authoritative DNS responses on port 53
@@ -641,7 +642,7 @@ func (s *DNSAuthorityServer) selectIntelligentTarget(zone *DNSAuthorityConfig, t
 
 	s.mu.RLock()
 	zoneCache := s.latencyCache[zone.Domain]
-	bestLatency := time.Duration(0)
+	bestScore := int64(0)
 	var bestTarget *DNSAuthorityTarget
 	for i := range targets {
 		t := &targets[i]
@@ -650,9 +651,23 @@ func (s *DNSAuthorityServer) selectIntelligentTarget(zone *DNSAuthorityConfig, t
 			refreshNeeded = true
 			continue
 		}
-		if bestTarget == nil || sample.latency < bestLatency || (sample.latency == bestLatency && t.Priority < bestTarget.Priority) {
+		frontendLatencyMs := sample.latency.Milliseconds()
+		if frontendLatencyMs <= 0 {
+			frontendLatencyMs = 1
+		}
+
+		backendLatencyMs := t.BackendLatencyMs
+		if backendLatencyMs <= 0 {
+			backendLatencyMs = frontendLatencyMs
+		}
+
+		// Weight edge reachability higher than backend health latency so DNS answers
+		// prefer the site clients can connect to fastest, while still accounting for
+		// backend responsiveness when edge latencies are close.
+		score := (frontendLatencyMs * 70) + (backendLatencyMs * 30)
+		if bestTarget == nil || score < bestScore || (score == bestScore && t.Priority < bestTarget.Priority) {
 			bestTarget = t
-			bestLatency = sample.latency
+			bestScore = score
 		}
 	}
 	s.mu.RUnlock()

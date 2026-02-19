@@ -62,13 +62,14 @@ type Target struct {
 	Status               Health    `json:"status"`
 	LastCheck            time.Time `json:"lastCheck"`
 	LastError            string    `json:"lastError,omitempty"`
+	LastLatencyMs        int64     `json:"latencyMs,omitempty"`
 	CheckCount           int       `json:"checkCount"`
 	timer                *time.Timer
 	ctx                  context.Context
 	cancel               context.CancelFunc
 	client               *http.Client
-	consecutiveSuccesses int
-	consecutiveFailures  int
+	consecutiveSuccesses  int
+	consecutiveFailures   int
 }
 
 // StatusChangeCallback is called when any target's status changes
@@ -387,6 +388,8 @@ func (m *Monitor) monitorTarget(target *Target) {
 func (m *Monitor) performHealthCheck(target *Target) {
 	target.CheckCount++
 	target.LastCheck = time.Now()
+	target.LastError = ""
+	target.LastLatencyMs = 0
 
 	var passed bool
 	var checkErr string
@@ -489,6 +492,7 @@ func (m *Monitor) performHTTPCheck(target *Target) (bool, string) {
 	}
 
 	// Perform request
+	requestStart := time.Now()
 	resp, err := target.client.Do(req)
 	if err != nil {
 		msg := fmt.Sprintf("request failed: %v", err)
@@ -496,6 +500,7 @@ func (m *Monitor) performHTTPCheck(target *Target) (bool, string) {
 		return false, msg
 	}
 	defer resp.Body.Close()
+	target.LastLatencyMs = time.Since(requestStart).Milliseconds()
 
 	// Check response status
 	if target.Config.Status > 0 {
