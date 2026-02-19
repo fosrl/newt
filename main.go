@@ -1367,6 +1367,18 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 	})
 
 	// Register handler for DNS Authority configuration
+	bindDNSAuthoritySessionAffinity := func() {
+		if authProxy == nil {
+			return
+		}
+		authProxy.SetSessionEstablishedHandler(func(domain string, clientIP string) {
+			if dnsAuthorityServer == nil {
+				return
+			}
+			dnsAuthorityServer.RecordSessionEstablished(domain, clientIP)
+		})
+	}
+
 	dnsStatusAddress := func() string {
 		if dnsBindAddr == "" {
 			return "0.0.0.0:53"
@@ -1406,6 +1418,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			}
 			if dnsAuthorityServer == nil {
 				dnsAuthorityServer = dnsauthority.NewDNSAuthorityServer(dnsBindAddr)
+				bindDNSAuthoritySessionAffinity()
 			}
 			if !dnsAuthorityServer.IsRunning() {
 				if err := dnsAuthorityServer.Start(); err != nil {
@@ -1465,6 +1478,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			}
 			if dnsAuthorityServer == nil {
 				dnsAuthorityServer = dnsauthority.NewDNSAuthorityServer(dnsBindAddr)
+				bindDNSAuthoritySessionAffinity()
 			}
 			justStarted := false
 			if !dnsAuthorityServer.IsRunning() {
@@ -1558,6 +1572,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		case "start":
 			if authProxy == nil {
 				authProxy = auth.NewAuthProxy()
+				bindDNSAuthoritySessionAffinity()
 			}
 			if !authProxy.IsRunning() {
 				if err := authProxy.Start(); err != nil {
@@ -1580,6 +1595,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			// Ensure auth proxy is running
 			if authProxy == nil {
 				authProxy = auth.NewAuthProxy()
+				bindDNSAuthoritySessionAffinity()
 			}
 			if !authProxy.IsRunning() {
 				if err := authProxy.Start(); err != nil {
