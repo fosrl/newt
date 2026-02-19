@@ -1466,6 +1466,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			if dnsAuthorityServer == nil {
 				dnsAuthorityServer = dnsauthority.NewDNSAuthorityServer(dnsBindAddr)
 			}
+			justStarted := false
 			if !dnsAuthorityServer.IsRunning() {
 				if err := dnsAuthorityServer.Start(); err != nil {
 					logger.Error("Failed to start DNS authority server: %v", err)
@@ -1475,7 +1476,16 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 					})
 					return
 				}
-				// Self-test after start
+				justStarted = true
+			}
+			for _, zone := range configMsg.Zones {
+				zoneCopy := zone
+				dnsAuthorityServer.UpdateZone(&zoneCopy)
+			}
+			logger.Info("Updated %d DNS authority zones", len(configMsg.Zones))
+			if justStarted {
+				// Self-test after start; report status once the test completes
+				zoneCount := len(configMsg.Zones)
 				go func() {
 					time.Sleep(200 * time.Millisecond)
 					if err := dnsAuthorityServer.SelfTest(); err != nil {
@@ -1485,25 +1495,24 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 							"message": "Server bound but self-test failed",
 							"error":   err.Error(),
 							"address": dnsStatusAddress(),
+							"zones":   zoneCount,
 						})
 					} else {
+						logger.Info("DNS Authority self-test passed")
 						_ = client.SendMessage("newt/dns/status", map[string]interface{}{
 							"status":  "running",
 							"address": dnsStatusAddress(),
+							"zones":   zoneCount,
 						})
 					}
 				}()
+			} else {
+				_ = client.SendMessage("newt/dns/status", map[string]interface{}{
+					"status":  "running",
+					"address": dnsStatusAddress(),
+					"zones":   len(configMsg.Zones),
+				})
 			}
-			for _, zone := range configMsg.Zones {
-				zoneCopy := zone
-				dnsAuthorityServer.UpdateZone(&zoneCopy)
-			}
-			logger.Info("Updated %d DNS authority zones", len(configMsg.Zones))
-			_ = client.SendMessage("newt/dns/status", map[string]interface{}{
-				"status":  "running",
-				"address": dnsStatusAddress(),
-				"zones":   len(configMsg.Zones),
-			})
 
 		case "remove":
 			if dnsAuthorityServer == nil {

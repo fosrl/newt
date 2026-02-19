@@ -56,6 +56,7 @@ type ResourceAuthConfig struct {
 	EmailWhitelistEnabled bool              `json:"emailWhitelistEnabled"`
 	AllowedEmails         []string          `json:"allowedEmails"`
 	SSL                   bool              `json:"ssl"`                  // Frontend TLS
+	TargetURL             string            `json:"targetUrl,omitempty"`  // backward compat: single target URL from older Pangolin
 	Targets               []TargetConfig    `json:"targets"`
 	StickySession         bool              `json:"stickySession,omitempty"`
 	TLSServerName         string            `json:"tlsServerName,omitempty"`
@@ -890,6 +891,13 @@ func (p *AuthProxy) ReplaceResources(resources []ResourceAuthConfig) {
 	newResources := make(map[string]*ResourceAuthConfig, len(resources))
 	for _, resource := range resources {
 		resourceCopy := resource
+
+		// Backward compat: if targets is empty but targetUrl is set (older Pangolin),
+		// synthesize a single target from the flat targetUrl field
+		if len(resourceCopy.Targets) == 0 && resourceCopy.TargetURL != "" {
+			resourceCopy.Targets = []TargetConfig{{TargetURL: resourceCopy.TargetURL}}
+		}
+
 		domain := strings.ToLower(resourceCopy.Domain)
 		newResources[domain] = &resourceCopy
 	}
