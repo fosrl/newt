@@ -10,14 +10,15 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fosrl/newt/logger"
@@ -36,16 +37,32 @@ type AuthConfig struct {
 	EmailWhitelistEnabled bool    `json:"emailWhitelistEnabled"`
 }
 
+// TargetConfig holds a single backend target
+type TargetConfig struct {
+	TargetURL       string `json:"targetUrl"`
+	Path            string `json:"path,omitempty"`
+	PathMatchType   string `json:"pathMatchType,omitempty"`   // exact, prefix, regex
+	RewritePath     string `json:"rewritePath,omitempty"`
+	RewritePathType string `json:"rewritePathType,omitempty"` // exact, prefix, regex, stripPrefix
+	Priority        int    `json:"priority,omitempty"`
+}
+
 // ResourceAuthConfig holds auth configuration for a specific resource
 type ResourceAuthConfig struct {
-	ResourceID           int      `json:"resourceId"`
-	Domain               string   `json:"domain"`               // Full domain for the resource
-	SSO                  bool     `json:"sso"`                  // SSO enabled
-	BlockAccess          bool     `json:"blockAccess"`          // Block all access
-	EmailWhitelistEnabled bool    `json:"emailWhitelistEnabled"`
-	AllowedEmails        []string `json:"allowedEmails"`
-	TargetURL            string   `json:"targetUrl"`            // Backend target URL
-	SSL                  bool     `json:"ssl"`                  // Use SSL for backend
+	ResourceID            int               `json:"resourceId"`
+	Domain                string            `json:"domain"`               // Full domain for the resource
+	SSO                   bool              `json:"sso"`                  // SSO enabled
+	BlockAccess           bool              `json:"blockAccess"`          // Block all access
+	EmailWhitelistEnabled bool              `json:"emailWhitelistEnabled"`
+	AllowedEmails         []string          `json:"allowedEmails"`
+	SSL                   bool              `json:"ssl"`                  // Frontend TLS
+	Targets               []TargetConfig    `json:"targets"`
+	StickySession         bool              `json:"stickySession,omitempty"`
+	TLSServerName         string            `json:"tlsServerName,omitempty"`
+	SetHostHeader         string            `json:"setHostHeader,omitempty"`
+	Headers               map[string]string `json:"headers,omitempty"`
+	PostAuthPath          string            `json:"postAuthPath,omitempty"`
+	rrIndex               uint64            // internal: atomic round-robin counter
 }
 
 // TLSCertificateConfig holds a TLS certificate pushed from Pangolin
@@ -73,6 +90,11 @@ type AuthProxy struct {
 	servers         map[string]*http.Server        // domain -> server
 	jwtPublicKey    *rsa.PublicKey
 	httpClient      *http.Client
+	proxyTransport  *http.Transport
+	proxyCache      map[string]*httputil.ReverseProxy // target URL -> reverse proxy
+	sessionCacheTTL time.Duration
+	sessionMu       sync.RWMutex
+	sessionCache    map[string]cachedSession
 	running         bool
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -98,14 +120,43 @@ func NewAuthProxy() *AuthProxy {
 		httpsListenAddr = ":443"
 	}
 
+	proxyTransport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          200,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	sessionTransport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	sessionCacheTTL := sessionCacheTTLFromEnv()
+
 	return &AuthProxy{
 		resources:       make(map[string]*ResourceAuthConfig),
 		servers:         make(map[string]*http.Server),
 		certStore:       make(map[string]*tls.Certificate),
 		certWildcards:   make(map[string]*tls.Certificate),
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:   10 * time.Second,
+			Transport: sessionTransport,
 		},
+		proxyTransport:  proxyTransport,
+		proxyCache:      make(map[string]*httputil.ReverseProxy),
+		sessionCacheTTL: sessionCacheTTL,
+		sessionCache:    make(map[string]cachedSession),
 		ctx:             ctx,
 		cancel:          cancel,
 		listenAddr:      listenAddr,
@@ -139,12 +190,15 @@ func (p *AuthProxy) UpdateResource(resource ResourceAuthConfig) error {
 	defer p.mu.Unlock()
 
 	domain := strings.ToLower(resource.Domain)
+	if _, ok := p.resources[domain]; ok {
+		p.proxyCache = make(map[string]*httputil.ReverseProxy)
+	}
 
 	// Store the resource config
 	p.resources[domain] = &resource
 
-	logger.Info("Auth Proxy: Updated resource %s (SSO: %v, BlockAccess: %v)",
-		domain, resource.SSO, resource.BlockAccess)
+	logger.Info("Auth Proxy: Updated resource %s (SSO: %v, BlockAccess: %v, Targets: %d)",
+		domain, resource.SSO, resource.BlockAccess, len(resource.Targets))
 
 	return nil
 }
@@ -155,6 +209,11 @@ func (p *AuthProxy) RemoveResource(domain string) {
 	defer p.mu.Unlock()
 
 	domain = strings.ToLower(domain)
+	if existing, ok := p.resources[domain]; ok {
+		if len(existing.Targets) > 0 {
+			p.proxyCache = make(map[string]*httputil.ReverseProxy)
+		}
+	}
 	delete(p.resources, domain)
 
 	// Stop server if running for this domain
@@ -342,6 +401,14 @@ func (p *AuthProxy) Stop() error {
 		logger.Debug("Auth Proxy: Stopped server for %s", domain)
 	}
 	p.servers = make(map[string]*http.Server)
+	p.proxyCache = make(map[string]*httputil.ReverseProxy)
+	if p.proxyTransport != nil {
+		p.proxyTransport.CloseIdleConnections()
+	}
+
+	p.sessionMu.Lock()
+	p.sessionCache = make(map[string]cachedSession)
+	p.sessionMu.Unlock()
 
 	p.running = false
 	logger.Info("Auth Proxy: Stopped")
@@ -422,6 +489,11 @@ type sessionValidationAPIResponse struct {
 	Message string                `json:"message"`
 }
 
+type cachedSession struct {
+	claims    UserClaims
+	expiresAt time.Time
+}
+
 // validateAuth validates the request authentication
 func (p *AuthProxy) validateAuth(r *http.Request) (*UserClaims, error) {
 	p.mu.RLock()
@@ -478,6 +550,10 @@ func (p *AuthProxy) validateJWT(tokenString string, publicKey *rsa.PublicKey) (*
 
 // validateSession validates a session token against Pangolin's API
 func (p *AuthProxy) validateSession(sessionToken string) (*UserClaims, error) {
+	if claims, ok := p.getCachedSession(sessionToken); ok {
+		return claims, nil
+	}
+
 	p.mu.RLock()
 	config := p.config
 	p.mu.RUnlock()
@@ -503,13 +579,8 @@ func (p *AuthProxy) validateSession(sessionToken string) (*UserClaims, error) {
 		return nil, fmt.Errorf("session invalid: status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
 	var validationResp sessionValidationAPIResponse
-	if err := json.Unmarshal(body, &validationResp); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&validationResp); err != nil {
 		return nil, fmt.Errorf("failed to parse session response: %w", err)
 	}
 
@@ -527,6 +598,8 @@ func (p *AuthProxy) validateSession(sessionToken string) (*UserClaims, error) {
 		OrgID:  validationResp.Data.OrgID,
 	}
 
+	p.cacheSession(sessionToken, &claims, validationResp.Data.ExpiresAt)
+
 	return &claims, nil
 }
 
@@ -536,17 +609,21 @@ func (p *AuthProxy) redirectToLogin(w http.ResponseWriter, r *http.Request, reso
 	config := p.config
 	p.mu.RUnlock()
 
-	// Build the original URL for redirect after login
+	// Build the redirect-after-login URL
 	scheme := "https"
 	if r.TLS == nil {
 		scheme = "http"
 	}
-	originalURL := fmt.Sprintf("%s://%s%s", scheme, r.Host, r.RequestURI)
+	// If postAuthPath is set, redirect to that path after login instead of the original URL
+	redirectTarget := fmt.Sprintf("%s://%s%s", scheme, r.Host, r.RequestURI)
+	if resource.PostAuthPath != "" {
+		redirectTarget = fmt.Sprintf("%s://%s%s", scheme, r.Host, resource.PostAuthPath)
+	}
 
 	// Build login URL with redirect
 	loginURL := fmt.Sprintf("%s/auth/login?redirect=%s&resource=%d",
 		config.PangolinURL,
-		url.QueryEscape(originalURL),
+		url.QueryEscape(redirectTarget),
 		resource.ResourceID,
 	)
 
@@ -572,33 +649,173 @@ func (p *AuthProxy) isEmailAllowed(email string, allowedEmails []string) bool {
 	return false
 }
 
-// proxyToBackend proxies the request to the backend target
+// proxyToBackend selects a backend target, applies path rewriting, and proxies the request
 func (p *AuthProxy) proxyToBackend(w http.ResponseWriter, r *http.Request, resource *ResourceAuthConfig) {
-	targetURL, err := url.Parse(resource.TargetURL)
+	target := p.selectTarget(r, resource)
+	if target == nil {
+		http.Error(w, "No available backend", http.StatusBadGateway)
+		return
+	}
+
+	// Apply path rewriting before proxying
+	applyPathRewrite(r, target)
+
+	proxy, err := p.getOrCreateResourceProxy(resource, target)
 	if err != nil {
+		logger.Error("Auth Proxy: Failed to create proxy for resource %d target %s: %v", resource.ResourceID, target.TargetURL, err)
 		http.Error(w, "Invalid backend configuration", http.StatusInternalServerError)
 		return
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-
-	// Modify the request
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.Host = targetURL.Host
-		req.Header.Set("X-Forwarded-Host", r.Host)
-		req.Header.Set("X-Forwarded-Proto", "https")
-		req.Header.Set("X-Real-IP", r.RemoteAddr)
-	}
-
-	// Handle errors
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		logger.Error("Auth Proxy: Backend error for %s: %v", resource.Domain, err)
-		http.Error(w, "Backend unavailable", http.StatusBadGateway)
+	// Set sticky session cookie if enabled and there are multiple targets
+	if resource.StickySession && len(resource.Targets) > 1 {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "p_sticky",
+			Value:    target.TargetURL,
+			Path:     "/",
+			Secure:   resource.SSL,
+			HttpOnly: true,
+		})
 	}
 
 	proxy.ServeHTTP(w, r)
+}
+
+// selectTarget picks a backend target based on path matching, sticky sessions, and round-robin
+func (p *AuthProxy) selectTarget(r *http.Request, resource *ResourceAuthConfig) *TargetConfig {
+	targets := resource.Targets
+	if len(targets) == 0 {
+		return nil
+	}
+	if len(targets) == 1 {
+		if matchesPath(r.URL.Path, &targets[0]) {
+			return &targets[0]
+		}
+		// Single target with no path constraint always matches
+		if targets[0].Path == "" {
+			return &targets[0]
+		}
+		return nil
+	}
+
+	// Filter targets by path match
+	var matched []*TargetConfig
+	for i := range targets {
+		if matchesPath(r.URL.Path, &targets[i]) {
+			matched = append(matched, &targets[i])
+		}
+	}
+
+	// If no path-specific targets matched, fall back to targets without path constraints
+	if len(matched) == 0 {
+		for i := range targets {
+			if targets[i].Path == "" {
+				matched = append(matched, &targets[i])
+			}
+		}
+	}
+
+	if len(matched) == 0 {
+		return nil
+	}
+	if len(matched) == 1 {
+		return matched[0]
+	}
+
+	// Sticky session: check cookie for target affinity
+	if resource.StickySession {
+		if cookie, err := r.Cookie("p_sticky"); err == nil {
+			for _, t := range matched {
+				if t.TargetURL == cookie.Value {
+					return t
+				}
+			}
+		}
+	}
+
+	// Round-robin across matched targets
+	idx := atomic.AddUint64(&resource.rrIndex, 1) - 1
+	return matched[idx%uint64(len(matched))]
+}
+
+// matchesPath checks if a request path matches a target's path constraints
+func matchesPath(reqPath string, target *TargetConfig) bool {
+	if target.Path == "" {
+		return true
+	}
+
+	path := target.Path
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	switch target.PathMatchType {
+	case "exact":
+		return reqPath == path
+	case "prefix":
+		return strings.HasPrefix(reqPath, path)
+	case "regex":
+		matched, err := regexp.MatchString(target.Path, reqPath)
+		return err == nil && matched
+	default:
+		return true
+	}
+}
+
+// applyPathRewrite modifies the request URL path based on the target's rewrite configuration
+func applyPathRewrite(r *http.Request, target *TargetConfig) {
+	if target.RewritePathType == "" {
+		return
+	}
+
+	switch target.RewritePathType {
+	case "stripPrefix":
+		if target.PathMatchType == "prefix" && target.Path != "" {
+			prefix := target.Path
+			if !strings.HasPrefix(prefix, "/") {
+				prefix = "/" + prefix
+			}
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, prefix)
+			if r.URL.Path == "" {
+				r.URL.Path = "/"
+			}
+			// If rewritePath is set, prepend it (acts as addPrefix after strip)
+			if target.RewritePath != "" {
+				r.URL.Path = target.RewritePath + r.URL.Path
+			}
+		}
+	case "prefix":
+		if target.Path != "" {
+			escaped := regexp.QuoteMeta(target.Path)
+			re, err := regexp.Compile("^" + escaped + "(.*)")
+			if err == nil {
+				r.URL.Path = re.ReplaceAllString(r.URL.Path, target.RewritePath+"$1")
+			}
+		}
+	case "exact":
+		if target.Path != "" {
+			escaped := regexp.QuoteMeta(target.Path)
+			re, err := regexp.Compile("^" + escaped + "$")
+			if err == nil {
+				r.URL.Path = re.ReplaceAllString(r.URL.Path, target.RewritePath)
+			}
+		}
+	case "regex":
+		if target.Path != "" {
+			re, err := regexp.Compile(target.Path)
+			if err == nil {
+				r.URL.Path = re.ReplaceAllString(r.URL.Path, target.RewritePath)
+			}
+		}
+	}
+
+	// Ensure path always starts with /
+	if !strings.HasPrefix(r.URL.Path, "/") {
+		r.URL.Path = "/" + r.URL.Path
+	}
+
+	// Update RawPath as well
+	r.URL.RawPath = r.URL.Path
 }
 
 // UpdateCertificates updates the TLS certificate store with certificates pushed from Pangolin.
@@ -678,6 +895,7 @@ func (p *AuthProxy) ReplaceResources(resources []ResourceAuthConfig) {
 	}
 
 	p.resources = newResources
+	p.proxyCache = make(map[string]*httputil.ReverseProxy)
 	logger.Info("Auth Proxy: Replaced resource set with %d resources", len(resources))
 }
 
@@ -732,4 +950,171 @@ func parseRSAPublicKey(pemStr string) (*rsa.PublicKey, error) {
 	}
 
 	return rsaPub, nil
+}
+
+func (p *AuthProxy) getCachedSession(sessionToken string) (*UserClaims, bool) {
+	if sessionToken == "" || p.sessionCacheTTL <= 0 {
+		return nil, false
+	}
+
+	now := time.Now()
+	p.sessionMu.RLock()
+	entry, exists := p.sessionCache[sessionToken]
+	p.sessionMu.RUnlock()
+
+	if !exists {
+		return nil, false
+	}
+
+	if now.After(entry.expiresAt) {
+		p.sessionMu.Lock()
+		if current, ok := p.sessionCache[sessionToken]; ok && now.After(current.expiresAt) {
+			delete(p.sessionCache, sessionToken)
+		}
+		p.sessionMu.Unlock()
+		return nil, false
+	}
+
+	claimsCopy := entry.claims
+	return &claimsCopy, true
+}
+
+func (p *AuthProxy) cacheSession(sessionToken string, claims *UserClaims, apiExpiresAt string) {
+	if sessionToken == "" || claims == nil || p.sessionCacheTTL <= 0 {
+		return
+	}
+
+	now := time.Now()
+	expiresAt := now.Add(p.sessionCacheTTL)
+	if parsed, ok := parseSessionExpiry(apiExpiresAt); ok && parsed.Before(expiresAt) {
+		expiresAt = parsed
+	}
+
+	if !expiresAt.After(now) {
+		return
+	}
+
+	claimsCopy := *claims
+	p.sessionMu.Lock()
+	p.sessionCache[sessionToken] = cachedSession{claims: claimsCopy, expiresAt: expiresAt}
+	p.sessionMu.Unlock()
+}
+
+// getOrCreateResourceProxy creates or retrieves a cached reverse proxy for a resource+target combination.
+// Each proxy is configured with the resource's TLS settings, host header, and custom headers.
+func (p *AuthProxy) getOrCreateResourceProxy(resource *ResourceAuthConfig, target *TargetConfig) (*httputil.ReverseProxy, error) {
+	cacheKey := fmt.Sprintf("%d:%s", resource.ResourceID, target.TargetURL)
+
+	p.mu.RLock()
+	if proxy, ok := p.proxyCache[cacheKey]; ok {
+		p.mu.RUnlock()
+		return proxy, nil
+	}
+	p.mu.RUnlock()
+
+	targetURL, err := url.Parse(target.TargetURL)
+	if err != nil {
+		return nil, err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if proxy, ok := p.proxyCache[cacheKey]; ok {
+		return proxy, nil
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+
+	// Determine host header: prefer setHostHeader, else use target host
+	hostHeader := targetURL.Host
+	if resource.SetHostHeader != "" {
+		hostHeader = resource.SetHostHeader
+	}
+
+	// Capture custom headers for the Director closure
+	customHeaders := resource.Headers
+
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		originalHost := req.Host
+		req.Host = hostHeader
+		req.Header.Set("X-Forwarded-Host", originalHost)
+
+		// X-Forwarded-Proto based on incoming connection TLS state
+		if req.TLS != nil {
+			req.Header.Set("X-Forwarded-Proto", "https")
+		} else {
+			req.Header.Set("X-Forwarded-Proto", "http")
+		}
+
+		// X-Real-IP from remote address
+		clientIP := req.RemoteAddr
+		if host, _, splitErr := net.SplitHostPort(req.RemoteAddr); splitErr == nil {
+			clientIP = host
+		}
+		req.Header.Set("X-Real-IP", clientIP)
+
+		// Apply custom headers from resource config
+		for name, value := range customHeaders {
+			req.Header.Set(name, value)
+		}
+	}
+
+	// Transport: use per-resource TLS config for HTTPS backends or when tlsServerName is set
+	transport := p.proxyTransport
+	if targetURL.Scheme == "https" || resource.TLSServerName != "" {
+		transport = p.proxyTransport.Clone()
+		transport.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true,
+		}
+		if resource.TLSServerName != "" {
+			transport.TLSClientConfig.ServerName = resource.TLSServerName
+		}
+	}
+	proxy.Transport = transport
+
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, proxyErr error) {
+		domain := r.Header.Get("X-Forwarded-Host")
+		if domain == "" {
+			domain = r.Host
+		}
+		logger.Error("Auth Proxy: Backend error for %s → %s: %v", domain, target.TargetURL, proxyErr)
+		http.Error(w, "Backend unavailable", http.StatusBadGateway)
+	}
+
+	p.proxyCache[cacheKey] = proxy
+	return proxy, nil
+}
+
+func sessionCacheTTLFromEnv() time.Duration {
+	const defaultTTL = 15 * time.Second
+	raw := strings.TrimSpace(os.Getenv("NEWT_AUTH_SESSION_CACHE_TTL"))
+	if raw == "" {
+		return defaultTTL
+	}
+
+	ttl, err := time.ParseDuration(raw)
+	if err != nil || ttl < 0 {
+		logger.Warn("Auth Proxy: Invalid NEWT_AUTH_SESSION_CACHE_TTL=%q, using default %s", raw, defaultTTL)
+		return defaultTTL
+	}
+
+	return ttl
+}
+
+func parseSessionExpiry(value string) (time.Time, bool) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return time.Time{}, false
+	}
+
+	if t, err := time.Parse(time.RFC3339Nano, trimmed); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse(time.RFC3339, trimmed); err == nil {
+		return t, true
+	}
+
+	return time.Time{}, false
 }
