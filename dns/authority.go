@@ -17,7 +17,9 @@ type DNSAuthorityConfig struct {
 	Enabled       bool                   `json:"enabled"`
 	Domain        string                 `json:"domain"`        // e.g., "hub.docker.visnovsky.us"
 	TTL           uint32                 `json:"ttl"`           // TTL for DNS responses
-	RoutingPolicy string                 `json:"routingPolicy"` // "failover", "roundrobin", "priority"
+	RoutingPolicy string                 `json:"routingPolicy"` // "failover", "roundrobin", "priority", "intelligent"
+	StickySession bool                   `json:"stickySession,omitempty"`
+	ServingSiteID int                    `json:"servingSiteId,omitempty"`
 	Targets       []DNSAuthorityTarget   `json:"targets"`
 }
 
@@ -38,15 +40,31 @@ type DNSAuthorityTarget struct {
 
 // DNSAuthorityServer serves authoritative DNS responses on port 53
 type DNSAuthorityServer struct {
-	mu          sync.RWMutex
-	zones       map[string]*DNSAuthorityConfig // domain -> config
-	server      *dns.Server
-	tcpServer   *dns.Server
-	ctx         context.Context
-	cancel      context.CancelFunc
-	running     bool
-	bindAddr    string
-	rrIndex     map[string]int // For round-robin: domain -> current index
+	mu                       sync.RWMutex
+	zones                    map[string]*DNSAuthorityConfig // domain -> config
+	server                   *dns.Server
+	tcpServer                *dns.Server
+	ctx                      context.Context
+	cancel                   context.CancelFunc
+	running                  bool
+	bindAddr                 string
+	rrIndex                  map[string]int // For round-robin: domain -> current index
+	latencyCache             map[string]map[string]latencySample // domain -> target IP -> sample
+	latencyRefreshing        map[string]bool                     // domain -> refresh in progress
+	stickyAffinities         map[string]map[string]stickyAffinity // queried domain -> client IP -> sticky target
+	stickyAffinityTTL        time.Duration
+	intelligentProbeInterval time.Duration
+	intelligentProbeTimeout  time.Duration
+}
+
+type latencySample struct {
+	latency    time.Duration
+	measuredAt time.Time
+}
+
+type stickyAffinity struct {
+	targetIP      string
+	establishedAt time.Time
 }
 
 // NewDNSAuthorityServer creates a new DNS authority server
@@ -58,11 +76,17 @@ func NewDNSAuthorityServer(bindAddr string) *DNSAuthorityServer {
 	}
 
 	return &DNSAuthorityServer{
-		zones:    make(map[string]*DNSAuthorityConfig),
-		ctx:      ctx,
-		cancel:   cancel,
-		bindAddr: bindAddr,
-		rrIndex:  make(map[string]int),
+		zones:                    make(map[string]*DNSAuthorityConfig),
+		ctx:                      ctx,
+		cancel:                   cancel,
+		bindAddr:                 bindAddr,
+		rrIndex:                  make(map[string]int),
+		latencyCache:             make(map[string]map[string]latencySample),
+		latencyRefreshing:        make(map[string]bool),
+		stickyAffinities:         make(map[string]map[string]stickyAffinity),
+		stickyAffinityTTL:        24 * time.Hour,
+		intelligentProbeInterval: 15 * time.Second,
+		intelligentProbeTimeout:  500 * time.Millisecond,
 	}
 }
 
@@ -86,6 +110,9 @@ func (s *DNSAuthorityServer) UpdateZone(config *DNSAuthorityConfig) {
 	}
 
 	s.zones[domain] = config
+	if _, ok := s.latencyCache[domain]; !ok {
+		s.latencyCache[domain] = make(map[string]latencySample)
+	}
 	logger.Info("DNS Authority: Updated zone %s with %d targets (policy: %s)", domain, len(config.Targets), config.RoutingPolicy)
 }
 
@@ -100,6 +127,9 @@ func (s *DNSAuthorityServer) RemoveZone(domain string) {
 
 	delete(s.zones, domain)
 	delete(s.rrIndex, domain)
+	delete(s.latencyCache, domain)
+	delete(s.latencyRefreshing, domain)
+	delete(s.stickyAffinities, normalizeDomainKey(domain))
 	logger.Info("DNS Authority: Removed zone %s", domain)
 }
 
@@ -204,6 +234,8 @@ func (s *DNSAuthorityServer) Start() error {
 	s.running = true
 	s.mu.Unlock()
 
+	s.startIntelligentRefreshLoop()
+
 	logger.Info("DNS Authority: Server started successfully on %s", addr)
 	return nil
 }
@@ -268,7 +300,7 @@ func (s *DNSAuthorityServer) handleDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 
 	switch q.Qtype {
 	case dns.TypeA:
-		s.handleARecord(m, q, zone)
+		s.handleARecord(m, q, zone, clientIPFromRemoteAddr(w.RemoteAddr()))
 	case dns.TypeAAAA:
 		// Return empty response for AAAA (no IPv6 support yet)
 		// This prevents browsers from waiting for AAAA timeout
@@ -303,8 +335,8 @@ func (s *DNSAuthorityServer) findWildcardMatch(name string) *DNSAuthorityConfig 
 }
 
 // handleARecord responds with A records based on health and routing policy
-func (s *DNSAuthorityServer) handleARecord(m *dns.Msg, q dns.Question, zone *DNSAuthorityConfig) {
-	ips := s.selectTargetIPs(zone)
+func (s *DNSAuthorityServer) handleARecord(m *dns.Msg, q dns.Question, zone *DNSAuthorityConfig, clientIP string) {
+	ips := s.selectTargetIPs(zone, q.Name, clientIP)
 
 	for _, ip := range ips {
 		parsedIP := net.ParseIP(ip)
@@ -390,7 +422,7 @@ func (s *DNSAuthorityServer) handleSOARecord(m *dns.Msg, q dns.Question, zone *D
 }
 
 // selectTargetIPs selects IPs based on routing policy and health status
-func (s *DNSAuthorityServer) selectTargetIPs(zone *DNSAuthorityConfig) []string {
+func (s *DNSAuthorityServer) selectTargetIPs(zone *DNSAuthorityConfig, queriedDomain string, clientIP string) []string {
 	var ips []string
 
 	// Get healthy targets
@@ -415,39 +447,334 @@ func (s *DNSAuthorityServer) selectTargetIPs(zone *DNSAuthorityConfig) []string 
 		return ips
 	}
 
+	var stickyTarget *DNSAuthorityTarget
+	if zone.StickySession && clientIP != "" {
+		if target, ok := s.getStickyTarget(queriedDomain, clientIP, targets); ok {
+			stickyTarget = &target
+		}
+	}
+
 	switch zone.RoutingPolicy {
 	case "failover":
-		// Return only the highest priority (lowest number) healthy target
-		bestPriority := targets[0].Priority
-		bestIP := targets[0].IP
-		for _, t := range targets {
-			if t.Priority < bestPriority {
-				bestPriority = t.Priority
-				bestIP = t.IP
-			}
+		if stickyTarget != nil {
+			ips = append(ips, stickyTarget.IP)
+		} else {
+			ips = append(ips, selectLowestPriorityTarget(targets).IP)
 		}
-		ips = append(ips, bestIP)
 
 	case "roundrobin":
-		// Rotate through all healthy targets
-		s.mu.Lock()
-		idx := s.rrIndex[zone.Domain]
-		s.rrIndex[zone.Domain] = (idx + 1) % len(targets)
-		s.mu.Unlock()
-		ips = append(ips, targets[idx%len(targets)].IP)
+		if stickyTarget != nil {
+			ips = append(ips, stickyTarget.IP)
+		} else {
+			// Rotate through all healthy targets
+			s.mu.Lock()
+			idx := s.rrIndex[zone.Domain]
+			s.rrIndex[zone.Domain] = (idx + 1) % len(targets)
+			s.mu.Unlock()
+			ips = append(ips, targets[idx%len(targets)].IP)
+		}
 
 	case "priority":
 		// Return all healthy targets (client can choose)
+		if stickyTarget != nil {
+			ips = append(ips, stickyTarget.IP)
+		}
 		for _, t := range targets {
+			if stickyTarget != nil && t.IP == stickyTarget.IP {
+				continue
+			}
 			ips = append(ips, t.IP)
+		}
+
+	case "intelligent":
+		if stickyTarget != nil {
+			ips = append(ips, stickyTarget.IP)
+		} else {
+			best := s.selectIntelligentTarget(zone, targets)
+			ips = append(ips, best.IP)
 		}
 
 	default:
 		// Default to failover behavior
-		ips = append(ips, targets[0].IP)
+		if stickyTarget != nil {
+			ips = append(ips, stickyTarget.IP)
+		} else {
+			ips = append(ips, selectLowestPriorityTarget(targets).IP)
+		}
 	}
 
 	return ips
+}
+
+// RecordSessionEstablished records that a client has established a session on
+// this Newt for the given domain. Sticky DNS responses will prioritize this
+// site's public IP for subsequent queries from that client.
+func (s *DNSAuthorityServer) RecordSessionEstablished(domain string, clientIP string) {
+	if clientIP == "" || domain == "" {
+		return
+	}
+
+	domainKey := normalizeDomainKey(domain)
+
+	s.mu.RLock()
+	var zone *DNSAuthorityConfig
+	if z, ok := s.zones[domainKey]; ok {
+		zone = z
+	} else {
+		zone = s.findWildcardMatch(domainKey)
+	}
+
+	if zone == nil || !zone.Enabled || !zone.StickySession || zone.ServingSiteID == 0 {
+		s.mu.RUnlock()
+		return
+	}
+
+	targetIP := ""
+	for _, target := range zone.Targets {
+		if target.SiteID == zone.ServingSiteID {
+			targetIP = target.IP
+			break
+		}
+	}
+	s.mu.RUnlock()
+
+	if targetIP == "" {
+		return
+	}
+
+	s.setStickyTarget(domainKey, clientIP, targetIP)
+}
+
+func (s *DNSAuthorityServer) getStickyTarget(queriedDomain string, clientIP string, targets []DNSAuthorityTarget) (DNSAuthorityTarget, bool) {
+	domainKey := normalizeDomainKey(queriedDomain)
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	byClient := s.stickyAffinities[domainKey]
+	if byClient == nil {
+		return DNSAuthorityTarget{}, false
+	}
+
+	affinity, ok := byClient[clientIP]
+	if !ok {
+		return DNSAuthorityTarget{}, false
+	}
+
+	if now.Sub(affinity.establishedAt) > s.stickyAffinityTTL {
+		delete(byClient, clientIP)
+		if len(byClient) == 0 {
+			delete(s.stickyAffinities, domainKey)
+		}
+		return DNSAuthorityTarget{}, false
+	}
+
+	for _, t := range targets {
+		if t.IP == affinity.targetIP {
+			return t, true
+		}
+	}
+
+	delete(byClient, clientIP)
+	if len(byClient) == 0 {
+		delete(s.stickyAffinities, domainKey)
+	}
+
+	return DNSAuthorityTarget{}, false
+}
+
+func (s *DNSAuthorityServer) setStickyTarget(queriedDomain string, clientIP string, targetIP string) {
+	domainKey := normalizeDomainKey(queriedDomain)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	byClient := s.stickyAffinities[domainKey]
+	if byClient == nil {
+		byClient = make(map[string]stickyAffinity)
+		s.stickyAffinities[domainKey] = byClient
+	}
+
+	byClient[clientIP] = stickyAffinity{targetIP: targetIP, establishedAt: time.Now()}
+}
+
+func clientIPFromRemoteAddr(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+
+	if udpAddr, ok := addr.(*net.UDPAddr); ok {
+		return udpAddr.IP.String()
+	}
+	if tcpAddr, ok := addr.(*net.TCPAddr); ok {
+		return tcpAddr.IP.String()
+	}
+
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	return host
+}
+
+func normalizeDomainKey(domain string) string {
+	trimmed := strings.TrimSpace(domain)
+	if trimmed == "" {
+		return ""
+	}
+	return strings.ToLower(dns.Fqdn(trimmed))
+}
+
+func selectLowestPriorityTarget(targets []DNSAuthorityTarget) DNSAuthorityTarget {
+	best := targets[0]
+	for _, t := range targets[1:] {
+		if t.Priority < best.Priority {
+			best = t
+		}
+	}
+	return best
+}
+
+func (s *DNSAuthorityServer) selectIntelligentTarget(zone *DNSAuthorityConfig, targets []DNSAuthorityTarget) DNSAuthorityTarget {
+	now := time.Now()
+	refreshNeeded := false
+
+	s.mu.RLock()
+	zoneCache := s.latencyCache[zone.Domain]
+	bestLatency := time.Duration(0)
+	var bestTarget *DNSAuthorityTarget
+	for i := range targets {
+		t := &targets[i]
+		sample, ok := zoneCache[t.IP]
+		if !ok || now.Sub(sample.measuredAt) > s.intelligentProbeInterval {
+			refreshNeeded = true
+			continue
+		}
+		if bestTarget == nil || sample.latency < bestLatency || (sample.latency == bestLatency && t.Priority < bestTarget.Priority) {
+			bestTarget = t
+			bestLatency = sample.latency
+		}
+	}
+	s.mu.RUnlock()
+
+	if refreshNeeded {
+		s.scheduleLatencyRefresh(zone.Domain, targets)
+	}
+
+	if bestTarget != nil {
+		return *bestTarget
+	}
+
+	// If no fresh latency is available yet, preserve HA semantics via failover.
+	return selectLowestPriorityTarget(targets)
+}
+
+func (s *DNSAuthorityServer) scheduleLatencyRefresh(domain string, targets []DNSAuthorityTarget) {
+	s.mu.Lock()
+	if s.latencyRefreshing[domain] {
+		s.mu.Unlock()
+		return
+	}
+	s.latencyRefreshing[domain] = true
+	timeout := s.intelligentProbeTimeout
+	s.mu.Unlock()
+
+	go func() {
+		results := make(map[string]latencySample)
+		for _, t := range targets {
+			if latency, ok := probeTargetLatency(t.IP, timeout); ok {
+				results[t.IP] = latencySample{latency: latency, measuredAt: time.Now()}
+			}
+		}
+
+		s.mu.Lock()
+		cache := s.latencyCache[domain]
+		if cache == nil {
+			cache = make(map[string]latencySample)
+			s.latencyCache[domain] = cache
+		}
+		for ip, sample := range results {
+			cache[ip] = sample
+		}
+		s.latencyRefreshing[domain] = false
+		s.mu.Unlock()
+	}()
+}
+
+func (s *DNSAuthorityServer) startIntelligentRefreshLoop() {
+	go func() {
+		ticker := time.NewTicker(s.intelligentProbeInterval)
+		defer ticker.Stop()
+
+		// Prime the latency cache shortly after start so intelligent routing
+		// can use measured data without waiting for a query-triggered refresh.
+		s.refreshIntelligentZones()
+
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-ticker.C:
+				s.refreshIntelligentZones()
+			}
+		}
+	}()
+}
+
+type intelligentRefreshJob struct {
+	domain  string
+	targets []DNSAuthorityTarget
+}
+
+func (s *DNSAuthorityServer) refreshIntelligentZones() {
+	jobs := make([]intelligentRefreshJob, 0)
+
+	s.mu.RLock()
+	for domain, zone := range s.zones {
+		if zone == nil || !zone.Enabled || zone.RoutingPolicy != "intelligent" {
+			continue
+		}
+
+		healthyTargets := make([]DNSAuthorityTarget, 0, len(zone.Targets))
+		allTargets := make([]DNSAuthorityTarget, 0, len(zone.Targets))
+		for _, target := range zone.Targets {
+			allTargets = append(allTargets, target)
+			if target.Healthy {
+				healthyTargets = append(healthyTargets, target)
+			}
+		}
+
+		targets := healthyTargets
+		if len(targets) == 0 {
+			targets = allTargets
+		}
+
+		if len(targets) == 0 {
+			continue
+		}
+
+		jobs = append(jobs, intelligentRefreshJob{domain: domain, targets: targets})
+	}
+	s.mu.RUnlock()
+
+	for _, job := range jobs {
+		s.scheduleLatencyRefresh(job.domain, job.targets)
+	}
+}
+
+func probeTargetLatency(ip string, timeout time.Duration) (time.Duration, bool) {
+	ports := []string{"443", "80"}
+	for _, port := range ports {
+		addr := net.JoinHostPort(ip, port)
+		start := time.Now()
+		conn, err := net.DialTimeout("tcp", addr, timeout)
+		if err != nil {
+			continue
+		}
+		_ = conn.Close()
+		return time.Since(start), true
+	}
+	return 0, false
 }
 
 // IsRunning returns whether the server is running
