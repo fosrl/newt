@@ -718,6 +718,7 @@ func runNewtMain(ctx context.Context) {
 				"status":     target.Status.String(),
 				"lastCheck":  target.LastCheck.Format(time.RFC3339),
 				"checkCount": target.CheckCount,
+				"latencyMs":  target.LastLatencyMs,
 				"lastError":  target.LastError,
 				"config":     target.Config,
 			}
@@ -1613,6 +1614,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				"status":     target.Status.String(),
 				"lastCheck":  target.LastCheck.Format(time.RFC3339),
 				"checkCount": target.CheckCount,
+				"latencyMs":  target.LastLatencyMs,
 				"lastError":  target.LastError,
 				"config":     target.Config,
 			}

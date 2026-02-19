@@ -59,6 +59,7 @@ type Target struct {
 	Status     Health    `json:"status"`
 	LastCheck  time.Time `json:"lastCheck"`
 	LastError  string    `json:"lastError,omitempty"`
+	LastLatencyMs int64  `json:"latencyMs,omitempty"`
 	CheckCount int       `json:"checkCount"`
 	timer      *time.Timer
 	ctx        context.Context
@@ -366,6 +367,7 @@ func (m *Monitor) performHealthCheck(target *Target) {
 	target.CheckCount++
 	target.LastCheck = time.Now()
 	target.LastError = ""
+	target.LastLatencyMs = 0
 
 	// Build URL (use net.JoinHostPort to properly handle IPv6 addresses with ports)
 	host := target.Config.Hostname
@@ -411,6 +413,7 @@ func (m *Monitor) performHealthCheck(target *Target) {
 	}
 
 	// Perform request
+	requestStart := time.Now()
 	resp, err := target.client.Do(req)
 	if err != nil {
 		target.Status = StatusUnhealthy
@@ -419,6 +422,7 @@ func (m *Monitor) performHealthCheck(target *Target) {
 		return
 	}
 	defer resp.Body.Close()
+	target.LastLatencyMs = time.Since(requestStart).Milliseconds()
 
 	// Check response status
 	var expectedStatus int
