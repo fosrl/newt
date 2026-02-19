@@ -107,6 +107,7 @@ type AuthProxy struct {
 	hasCerts        bool                        // whether any TLS certs have been loaded
 	httpBindFailed  bool                        // true if HTTP port was already in use (e.g. Traefik colocated)
 	httpsBindFailed bool                        // true if HTTPS port was already in use
+	onSessionEstablished func(domain string, clientIP string)
 }
 
 // NewAuthProxy creates a new auth proxy
@@ -183,6 +184,15 @@ func (p *AuthProxy) UpdateConfig(config AuthConfig) error {
 	}
 
 	return nil
+}
+
+// SetSessionEstablishedHandler sets a callback invoked when a request is
+// served for a resource. This is used by DNS authority sticky affinity to
+// remember which site last served a client session.
+func (p *AuthProxy) SetSessionEstablishedHandler(handler func(domain string, clientIP string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onSessionEstablished = handler
 }
 
 // UpdateResource updates or adds a resource auth configuration
@@ -658,6 +668,15 @@ func (p *AuthProxy) proxyToBackend(w http.ResponseWriter, r *http.Request, resou
 		return
 	}
 
+	if clientIP := clientIPFromRemoteAddr(r.RemoteAddr); clientIP != "" {
+		p.mu.RLock()
+		handler := p.onSessionEstablished
+		p.mu.RUnlock()
+		if handler != nil {
+			handler(resource.Domain, clientIP)
+		}
+	}
+
 	// Apply path rewriting before proxying
 	applyPathRewrite(r, target)
 
@@ -680,6 +699,19 @@ func (p *AuthProxy) proxyToBackend(w http.ResponseWriter, r *http.Request, resou
 	}
 
 	proxy.ServeHTTP(w, r)
+}
+
+func clientIPFromRemoteAddr(remoteAddr string) string {
+	if remoteAddr == "" {
+		return ""
+	}
+
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+
+	return host
 }
 
 // selectTarget picks a backend target based on path matching, sticky sessions, and round-robin
