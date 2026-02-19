@@ -350,10 +350,13 @@ func (m *Monitor) monitorTarget(target *Target) {
 			// Reset timer for next check with current interval
 			target.timer.Reset(interval)
 
-			// Notify callback if status changed
-			if oldStatus != target.Status && m.callback != nil {
-				logger.Info("Target %d status changed: %s -> %s",
-					target.Config.ID, oldStatus.String(), target.Status.String())
+			// Notify callback on every check so downstream systems receive fresh
+			// latency telemetry even when health status is unchanged.
+			if m.callback != nil {
+				if oldStatus != target.Status {
+					logger.Info("Target %d status changed: %s -> %s",
+						target.Config.ID, oldStatus.String(), target.Status.String())
+				}
 				go m.callback(m.GetTargets())
 			}
 		}
