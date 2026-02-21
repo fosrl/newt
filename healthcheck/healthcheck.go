@@ -57,6 +57,7 @@ type Target struct {
 	Status     Health    `json:"status"`
 	LastCheck  time.Time `json:"lastCheck"`
 	LastError  string    `json:"lastError,omitempty"`
+	LastLatencyMs int64  `json:"latencyMs,omitempty"`
 	CheckCount int       `json:"checkCount"`
 	timer      *time.Timer
 	ctx        context.Context
@@ -349,10 +350,13 @@ func (m *Monitor) monitorTarget(target *Target) {
 			// Reset timer for next check with current interval
 			target.timer.Reset(interval)
 
-			// Notify callback if status changed
-			if oldStatus != target.Status && m.callback != nil {
-				logger.Info("Target %d status changed: %s -> %s",
-					target.Config.ID, oldStatus.String(), target.Status.String())
+			// Notify callback on every check so downstream systems receive fresh
+			// latency telemetry even when health status is unchanged.
+			if m.callback != nil {
+				if oldStatus != target.Status {
+					logger.Info("Target %d status changed: %s -> %s",
+						target.Config.ID, oldStatus.String(), target.Status.String())
+				}
 				go m.callback(m.GetTargets())
 			}
 		}
@@ -364,6 +368,7 @@ func (m *Monitor) performHealthCheck(target *Target) {
 	target.CheckCount++
 	target.LastCheck = time.Now()
 	target.LastError = ""
+	target.LastLatencyMs = 0
 
 	// Build URL
 	url := fmt.Sprintf("%s://%s", target.Config.Scheme, target.Config.Hostname)
@@ -408,6 +413,7 @@ func (m *Monitor) performHealthCheck(target *Target) {
 	}
 
 	// Perform request
+	requestStart := time.Now()
 	resp, err := target.client.Do(req)
 	if err != nil {
 		target.Status = StatusUnhealthy
@@ -416,6 +422,7 @@ func (m *Monitor) performHealthCheck(target *Target) {
 		return
 	}
 	defer resp.Body.Close()
+	target.LastLatencyMs = time.Since(requestStart).Milliseconds()
 
 	// Check response status
 	var expectedStatus int
