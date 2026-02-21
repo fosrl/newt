@@ -13,8 +13,10 @@ func (s *Server) registerRoutes() {
 
 // ConnectionMetadata is the metadata object in POST /connection.
 type ConnectionMetadata struct {
-	Sudo    bool `json:"sudo"`
-	Homedir bool `json:"homedir"`
+	SudoMode     string   `json:"sudoMode"`     // "none" | "full" | "commands"
+	SudoCommands []string `json:"sudoCommands"`  // used when sudoMode is "commands"
+	Homedir      bool     `json:"homedir"`
+	Groups       []string `json:"groups"`        // system groups to add the user to
 }
 
 // ConnectionRequest is the JSON body for POST /connection.
