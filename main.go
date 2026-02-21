@@ -1378,15 +1378,18 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 		// Define the structure of the incoming message
 		type SSHCertData struct {
-			MessageId int    `json:"messageId"`
-			AgentPort int    `json:"agentPort"`
-			AgentHost string `json:"agentHost"`
-			CACert    string `json:"caCert"`
-			Username  string `json:"username"`
-			NiceID    string `json:"niceId"`
-			Metadata  struct {
-				Sudo    bool `json:"sudo"`
-				Homedir bool `json:"homedir"`
+			MessageId          int    `json:"messageId"`
+			AgentPort          int    `json:"agentPort"`
+			AgentHost          string `json:"agentHost"`
+			ExternalAuthDaemon bool   `json:"externalAuthDaemon"`
+			CACert             string `json:"caCert"`
+			Username           string `json:"username"`
+			NiceID             string `json:"niceId"`
+			Metadata           struct {
+				SudoMode     string   `json:"sudoMode"`
+				SudoCommands []string `json:"sudoCommands"`
+				Homedir      bool     `json:"homedir"`
+				Groups       []string `json:"groups"`
 			} `json:"metadata"`
 		}
 
@@ -1406,7 +1409,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
 
 		// Check if we're running the auth daemon internally
-		if authDaemonServer != nil {
+		if authDaemonServer != nil && !certData.ExternalAuthDaemon { // if the auth daemon is running internally and the external auth daemon is not enabled
 			// Call ProcessConnection directly when running internally
 			logger.Debug("Calling internal auth daemon ProcessConnection for user %s", certData.Username)
 
@@ -1415,8 +1418,10 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				NiceId:   certData.NiceID,
 				Username: certData.Username,
 				Metadata: authdaemon.ConnectionMetadata{
-					Sudo:    certData.Metadata.Sudo,
-					Homedir: certData.Metadata.Homedir,
+					SudoMode:     certData.Metadata.SudoMode,
+					SudoCommands: certData.Metadata.SudoCommands,
+					Homedir:      certData.Metadata.Homedir,
+					Groups:       certData.Metadata.Groups,
 				},
 			})
 
@@ -1450,8 +1455,10 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				"niceId":   certData.NiceID,
 				"username": certData.Username,
 				"metadata": map[string]interface{}{
-					"sudo":    certData.Metadata.Sudo,
-					"homedir": certData.Metadata.Homedir,
+					"sudoMode":     certData.Metadata.SudoMode,
+					"sudoCommands": certData.Metadata.SudoCommands,
+					"homedir":      certData.Metadata.Homedir,
+					"groups":       certData.Metadata.Groups,
 				},
 			}
 
