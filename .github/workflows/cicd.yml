@@ -11,7 +11,9 @@ permissions:
 on:
   push:
     tags:
-      - "*"
+      - "[0-9]+.[0-9]+.[0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
+
   workflow_dispatch:
     inputs:
       version:
@@ -46,7 +48,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           fetch-depth: 0
 
@@ -90,7 +92,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           fetch-depth: 0
 
@@ -102,7 +104,7 @@ jobs:
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to Docker Hub
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
@@ -232,7 +234,7 @@ jobs:
 
       - name: Cache Go modules
         if: ${{ hashFiles('**/go.sum') != '' }}
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: |
             ~/.cache/go-build
@@ -267,13 +269,13 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ env.IMAGE_LIST }}
           tags: |
             type=semver,pattern={{version}},value=${{ env.TAG }}
             type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG }},enable=${{ env.PUBLISH_MINOR == 'true' && env.IS_RC != 'true' }}
-            type=raw,value=latest,enable=${{ env.PUBLISH_LATEST == 'true' && env.IS_RC != 'true' }}
+            type=raw,value=latest,enable=${{ env.IS_RC != 'true' }}
           flavor: |
             latest=false
           labels: |
@@ -362,7 +364,7 @@ jobs:
 
       - name: Attest build provenance (GHCR)
         id: attest-ghcr
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
         with:
           subject-name: ${{ env.GHCR_IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
@@ -372,7 +374,7 @@ jobs:
       - name: Attest build provenance (Docker Hub)
         continue-on-error: true
         id: attest-dh
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
         with:
           subject-name: index.docker.io/fosrl/${{ github.event.repository.name }}
           subject-digest: ${{ steps.build.outputs.digest }}
@@ -587,28 +589,28 @@ jobs:
       #     sarif_file: trivy-ghcr.sarif
       #     category: Image Vulnerability Scan
 
-      # - name: Build binaries
-      #   env:
-      #     CGO_ENABLED: "0"
-      #     GOFLAGS: "-trimpath"
-      #   run: |
-      #     set -euo pipefail
-      #     TAG_VAR="${TAG}"
-      #     make go-build-release tag=$TAG_VAR
-      #   shell: bash
+      - name: Build binaries
+        env:
+          CGO_ENABLED: "0"
+          GOFLAGS: "-trimpath"
+        run: |
+          set -euo pipefail
+          TAG_VAR="${TAG}"
+          make -j 10 go-build-release tag=$TAG_VAR
+        shell: bash
 
-      # - name: Create GitHub Release
-      #   uses: softprops/action-gh-release@5be0e66d93ac7ed76da52eca8bb058f665c3a5fe # v2.4.2
-      #   with:
-      #     tag_name: ${{ env.TAG }}
-      #     generate_release_notes: true
-      #     prerelease: ${{ env.IS_RC == 'true' }}
-      #     files: |
-      #       bin/*
-      #     fail_on_unmatched_files: true
-      #     draft: true
-      #     body: |
-      #       ## Container Images
-      #       - GHCR: `${{ env.GHCR_REF }}`
-      #       - Docker Hub: `${{ env.DH_REF || 'N/A' }}`
-      #       **Digest:** `${{ steps.build.outputs.digest }}`
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@5be0e66d93ac7ed76da52eca8bb058f665c3a5fe # v2.4.2
+        with:
+          tag_name: ${{ env.TAG }}
+          generate_release_notes: true
+          prerelease: ${{ env.IS_RC == 'true' }}
+          files: |
+            bin/*
+          fail_on_unmatched_files: true
+          draft: true
+          body: |
+            ## Container Images
+            - GHCR: `${{ env.GHCR_REF }}`
+            - Docker Hub: `${{ env.DH_REF || 'N/A' }}`
+            **Digest:** `${{ steps.build.outputs.digest }}`

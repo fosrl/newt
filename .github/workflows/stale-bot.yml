@@ -1,0 +1,37 @@
+name: Mark and Close Stale Issues
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write # only for delete-branch option
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@997185467fa4f803885201cee163a9f38240193d # v10.1.1
+        with:
+          days-before-stale: 14
+          days-before-close: 14
+          stale-issue-message: 'This issue has been automatically marked as stale due to 14 days of inactivity. It will be closed in 14 days if no further activity occurs.'
+          close-issue-message: 'This issue has been automatically closed due to inactivity. If you believe this is still relevant, please open a new issue with up-to-date information.'
+          stale-issue-label: 'stale'
+          
+          exempt-issue-labels: 'needs investigating, networking, new feature, reverse proxy, bug, api, authentication, documentation, enhancement, help wanted, good first issue, question'
+          
+          exempt-all-issue-assignees: true
+          
+          only-labels: ''
+          exempt-pr-labels: ''
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+          
+          operations-per-run: 100
+          remove-stale-when-updated: true
+          delete-branch: false
+          enable-statistics: true

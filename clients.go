@@ -24,7 +24,7 @@ func setupClients(client *websocket.Client) {
 
 	host = strings.TrimSuffix(host, "/")
 
-	logger.Info("Setting up clients with netstack2...")
+	logger.Debug("Setting up clients with netstack2...")
 
 	// if useNativeInterface is true make sure we have permission to use native interface
 	if useNativeInterface {
@@ -63,7 +63,7 @@ func closeClients() {
 	}
 }
 
-func clientsHandleNewtConnection(publicKey string, endpoint string) {
+func clientsHandleNewtConnection(publicKey string, endpoint string, relayPort uint16) {
 	if !ready {
 		return
 	}
@@ -77,7 +77,7 @@ func clientsHandleNewtConnection(publicKey string, endpoint string) {
 	endpoint = strings.Join(parts[:len(parts)-1], ":")
 
 	if wgService != nil {
-		wgService.StartHolepunch(publicKey, endpoint)
+		wgService.StartHolepunch(publicKey, endpoint, relayPort)
 	}
 }
 

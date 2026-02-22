@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -11,12 +13,12 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/fosrl/newt/authdaemon"
 	"github.com/fosrl/newt/docker"
 	"github.com/fosrl/newt/healthcheck"
 	"github.com/fosrl/newt/logger"
@@ -37,6 +39,7 @@ import (
 
 type WgData struct {
 	Endpoint           string               `json:"endpoint"`
+	RelayPort          uint16               `json:"relayPort"`
 	PublicKey          string               `json:"publicKey"`
 	ServerIP           string               `json:"serverIP"`
 	TunnelIP           string               `json:"tunnelIP"`
@@ -55,10 +58,6 @@ type TargetData struct {
 
 type ExitNodeData struct {
 	ExitNodes []ExitNode `json:"exitNodes"`
-}
-
-type SSHPublicKeyData struct {
-	PublicKey string `json:"publicKey"`
 }
 
 // ExitNode represents an exit node with an ID, endpoint, and weight.
@@ -133,6 +132,10 @@ var (
 	preferEndpoint                     string
 	healthMonitor                      *healthcheck.Monitor
 	enforceHealthcheckCert             bool
+	authDaemonKey                      string
+	authDaemonPrincipalsFile           string
+	authDaemonCACertPath               string
+	authDaemonEnabled                  bool
 	// Build/version (can be overridden via -ldflags "-X main.newtVersion=...")
 	newtVersion = "version_replaceme"
 
@@ -155,6 +158,28 @@ var (
 )
 
 func main() {
+	// Check for subcommands first (only principals exits early)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "auth-daemon":
+			// Run principals subcommand only if the next argument is "principals"
+			if len(os.Args) > 2 && os.Args[2] == "principals" {
+				runPrincipalsCmd(os.Args[3:])
+				return
+			}
+
+			// auth-daemon subcommand without "principals" - show help
+			fmt.Println("Error: auth-daemon subcommand requires 'principals' argument")
+			fmt.Println()
+			fmt.Println("Usage:")
+			fmt.Println("  newt auth-daemon principals [options]")
+			fmt.Println()
+
+			// If not "principals", exit the switch to continue with normal execution
+			return
+		}
+	}
+
 	// Check if we're running as a Windows service
 	if isWindowsService() {
 		runService("NewtWireguardService", false, os.Args[1:])
@@ -186,6 +211,10 @@ func runNewtMain(ctx context.Context) {
 	updownScript = os.Getenv("UPDOWN_SCRIPT")
 	interfaceName = os.Getenv("INTERFACE")
 	portStr := os.Getenv("PORT")
+	authDaemonKey = os.Getenv("AD_KEY")
+	authDaemonPrincipalsFile = os.Getenv("AD_PRINCIPALS_FILE")
+	authDaemonCACertPath = os.Getenv("AD_CA_CERT_PATH")
+	authDaemonEnabledEnv := os.Getenv("AUTH_DAEMON_ENABLED")
 
 	// Metrics/observability env mirrors
 	metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED")
@@ -278,10 +307,6 @@ func runNewtMain(ctx context.Context) {
 	// load the prefer endpoint just as a flag
 	flag.StringVar(&preferEndpoint, "prefer-endpoint", "", "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
 
-	// if authorizedKeysFile == "" {
-	// 	flag.StringVar(&authorizedKeysFile, "authorized-keys-file", "~/.ssh/authorized_keys", "Path to authorized keys file (if unset, no keys will be authorized)")
-	// }
-
 	// Add new mTLS flags
 	if tlsClientCert == "" {
 		flag.StringVar(&tlsClientCert, "tls-client-cert-file", "", "Path to client certificate file (PEM/DER format)")
@@ -343,7 +368,7 @@ func runNewtMain(ctx context.Context) {
 
 	// Metrics/observability flags (mirror ENV if unset)
 	if metricsEnabledEnv == "" {
-		flag.BoolVar(&metricsEnabled, "metrics", true, "Enable Prometheus /metrics exporter")
+		flag.BoolVar(&metricsEnabled, "metrics", false, "Enable Prometheus metrics exporter")
 	} else {
 		if v, err := strconv.ParseBool(metricsEnabledEnv); err == nil {
 			metricsEnabled = v
@@ -378,6 +403,24 @@ func runNewtMain(ctx context.Context) {
 		region = regionEnv
 	}
 
+	// Auth daemon flags
+	if authDaemonKey == "" {
+		flag.StringVar(&authDaemonKey, "ad-pre-shared-key", "", "Pre-shared key for auth daemon authentication")
+	}
+	if authDaemonPrincipalsFile == "" {
+		flag.StringVar(&authDaemonPrincipalsFile, "ad-principals-file", "/var/run/auth-daemon/principals", "Path to the principals file for auth daemon")
+	}
+	if authDaemonCACertPath == "" {
+		flag.StringVar(&authDaemonCACertPath, "ad-ca-cert-path", "/etc/ssh/ca.pem", "Path to the CA certificate file for auth daemon")
+	}
+	if authDaemonEnabledEnv == "" {
+		flag.BoolVar(&authDaemonEnabled, "auth-daemon", false, "Enable auth daemon mode (runs alongside normal newt operation)")
+	} else {
+		if v, err := strconv.ParseBool(authDaemonEnabledEnv); err == nil {
+			authDaemonEnabled = v
+		}
+	}
+
 	// do a --version check
 	version := flag.Bool("version", false, "Print the version")
 
@@ -388,8 +431,22 @@ func runNewtMain(ctx context.Context) {
 		tlsClientCAs = append(tlsClientCAs, tlsClientCAsFlag...)
 	}
 
+	if *version {
+		fmt.Println("Newt version " + newtVersion)
+		os.Exit(0)
+	} else {
+		logger.Info("Newt version %s", newtVersion)
+	}
+
 	logger.Init(nil)
 	loggerLevel := util.ParseLogLevel(logLevel)
+
+	// Start auth daemon if enabled
+	if authDaemonEnabled {
+		if err := startAuthDaemon(ctx); err != nil {
+			logger.Fatal("Failed to start auth daemon: %v", err)
+		}
+	}
 	logger.GetLogger().SetLevel(loggerLevel)
 
 	// Initialize telemetry after flags are parsed (so flags override env)
@@ -412,7 +469,7 @@ func runNewtMain(ctx context.Context) {
 	}
 	if tel != nil {
 		// Admin HTTP server (exposes /metrics when Prometheus exporter is enabled)
-		logger.Info("Starting metrics server on %s", tcfg.AdminAddr)
+		logger.Debug("Starting metrics server on %s", tcfg.AdminAddr)
 		mux := http.NewServeMux()
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
 		if tel.PrometheusHandler != nil {
@@ -437,13 +494,6 @@ func runNewtMain(ctx context.Context) {
 			_ = admin.Shutdown(ctx)
 		}()
 		defer func() { _ = tel.Shutdown(context.Background()) }()
-	}
-
-	if *version {
-		fmt.Println("Newt version " + newtVersion)
-		os.Exit(0)
-	} else {
-		logger.Info("Newt version %s", newtVersion)
 	}
 
 	if err := updates.CheckForUpdate("fosrl", "newt", newtVersion); err != nil {
@@ -691,7 +741,12 @@ func runNewtMain(ctx context.Context) {
 			return
 		}
 
-		clientsHandleNewtConnection(wgData.PublicKey, endpoint)
+		relayPort := wgData.RelayPort
+		if relayPort == 0 {
+			relayPort = 21820
+		}
+
+		clientsHandleNewtConnection(wgData.PublicKey, endpoint, relayPort)
 
 		// Configure WireGuard
 		config := fmt.Sprintf(`private_key=%s
@@ -1162,94 +1217,6 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
 	})
 
-	// EXPERIMENTAL: WHAT SHOULD WE DO ABOUT SECURITY?
-	client.RegisterHandler("newt/send/ssh/publicKey", func(msg websocket.WSMessage) {
-		logger.Debug("Received SSH public key request")
-
-		var sshPublicKeyData SSHPublicKeyData
-
-		jsonData, err := json.Marshal(msg.Data)
-		if err != nil {
-			logger.Info(fmtErrMarshaling, err)
-			return
-		}
-		if err := json.Unmarshal(jsonData, &sshPublicKeyData); err != nil {
-			logger.Info("Error unmarshaling SSH public key data: %v", err)
-			return
-		}
-
-		sshPublicKey := sshPublicKeyData.PublicKey
-
-		if authorizedKeysFile == "" {
-			logger.Debug("No authorized keys file set, skipping public key response")
-			return
-		}
-
-		// Expand tilde to home directory if present
-		expandedPath := authorizedKeysFile
-		if strings.HasPrefix(authorizedKeysFile, "~/") {
-			homeDir, err := os.UserHomeDir()
-			if err != nil {
-				logger.Error("Failed to get user home directory: %v", err)
-				return
-			}
-			expandedPath = filepath.Join(homeDir, authorizedKeysFile[2:])
-		}
-
-		// if it is set but the file does not exist, create it
-		if _, err := os.Stat(expandedPath); os.IsNotExist(err) {
-			logger.Debug("Authorized keys file does not exist, creating it: %s", expandedPath)
-			if err := os.MkdirAll(filepath.Dir(expandedPath), 0755); err != nil {
-				logger.Error("Failed to create directory for authorized keys file: %v", err)
-				return
-			}
-			if _, err := os.Create(expandedPath); err != nil {
-				logger.Error("Failed to create authorized keys file: %v", err)
-				return
-			}
-		}
-
-		// Check if the public key already exists in the file
-		fileContent, err := os.ReadFile(expandedPath)
-		if err != nil {
-			logger.Error("Failed to read authorized keys file: %v", err)
-			return
-		}
-
-		// Check if the key already exists (trim whitespace for comparison)
-		existingKeys := strings.Split(string(fileContent), "\n")
-		keyAlreadyExists := false
-		trimmedNewKey := strings.TrimSpace(sshPublicKey)
-
-		for _, existingKey := range existingKeys {
-			if strings.TrimSpace(existingKey) == trimmedNewKey && trimmedNewKey != "" {
-				keyAlreadyExists = true
-				break
-			}
-		}
-
-		if keyAlreadyExists {
-			logger.Info("SSH public key already exists in authorized keys file, skipping")
-			return
-		}
-
-		// append the public key to the authorized keys file
-		logger.Debug("Appending public key to authorized keys file: %s", sshPublicKey)
-		file, err := os.OpenFile(expandedPath, os.O_APPEND|os.O_WRONLY, 0644)
-		if err != nil {
-			logger.Error("Failed to open authorized keys file: %v", err)
-			return
-		}
-		defer file.Close()
-
-		if _, err := file.WriteString(sshPublicKey + "\n"); err != nil {
-			logger.Error("Failed to write public key to authorized keys file: %v", err)
-			return
-		}
-
-		logger.Info("SSH public key appended to authorized keys file")
-	})
-
 	// Register handler for adding health check targets
 	client.RegisterHandler("newt/healthcheck/add", func(msg websocket.WSMessage) {
 		logger.Debug("Received health check add request: %+v", msg)
@@ -1402,6 +1369,168 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			logger.Debug("Blueprint applied successfully!")
 		} else {
 			logger.Warn("Blueprint application failed: %s", blueprintResult.Message)
+		}
+	})
+
+	// Register handler for SSH certificate issued events
+	client.RegisterHandler("newt/pam/connection", func(msg websocket.WSMessage) {
+		logger.Debug("Received SSH certificate issued message")
+
+		// Define the structure of the incoming message
+		type SSHCertData struct {
+			MessageId int    `json:"messageId"`
+			AgentPort int    `json:"agentPort"`
+			AgentHost string `json:"agentHost"`
+			CACert    string `json:"caCert"`
+			Username  string `json:"username"`
+			NiceID    string `json:"niceId"`
+			Metadata  struct {
+				Sudo    bool `json:"sudo"`
+				Homedir bool `json:"homedir"`
+			} `json:"metadata"`
+		}
+
+		var certData SSHCertData
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling SSH cert data: %v", err)
+			return
+		}
+
+		// print the received data for debugging
+		logger.Debug("Received SSH cert data: %s", string(jsonData))
+
+		if err := json.Unmarshal(jsonData, &certData); err != nil {
+			logger.Error("Error unmarshaling SSH cert data: %v", err)
+			return
+		}
+
+		// Check if we're running the auth daemon internally
+		if authDaemonServer != nil {
+			// Call ProcessConnection directly when running internally
+			logger.Debug("Calling internal auth daemon ProcessConnection for user %s", certData.Username)
+
+			authDaemonServer.ProcessConnection(authdaemon.ConnectionRequest{
+				CaCert:   certData.CACert,
+				NiceId:   certData.NiceID,
+				Username: certData.Username,
+				Metadata: authdaemon.ConnectionMetadata{
+					Sudo:    certData.Metadata.Sudo,
+					Homedir: certData.Metadata.Homedir,
+				},
+			})
+
+			// Send success response back to cloud
+			err = client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+				"messageId": certData.MessageId,
+				"complete":  true,
+			})
+
+			logger.Info("Successfully processed connection via internal auth daemon for user %s", certData.Username)
+		} else {
+			// External auth daemon mode - make HTTP request
+			// Check if auth daemon key is configured
+			if authDaemonKey == "" {
+				logger.Error("Auth daemon key not configured, cannot communicate with daemon")
+				// Send failure response back to cloud
+				err := client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+					"messageId": certData.MessageId,
+					"complete":  true,
+					"error":     "auth daemon key not configured",
+				})
+				if err != nil {
+					logger.Error("Failed to send SSH cert failure response: %v", err)
+				}
+				return
+			}
+
+			// Prepare the request body for the auth daemon
+			requestBody := map[string]interface{}{
+				"caCert":   certData.CACert,
+				"niceId":   certData.NiceID,
+				"username": certData.Username,
+				"metadata": map[string]interface{}{
+					"sudo":    certData.Metadata.Sudo,
+					"homedir": certData.Metadata.Homedir,
+				},
+			}
+
+			requestJSON, err := json.Marshal(requestBody)
+			if err != nil {
+				logger.Error("Failed to marshal auth daemon request: %v", err)
+				// Send failure response
+				client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+					"messageId": certData.MessageId,
+					"complete":  true,
+					"error":     fmt.Sprintf("failed to marshal request: %v", err),
+				})
+				return
+			}
+
+			// Create HTTPS client that skips certificate verification
+			// (auth daemon uses self-signed cert)
+			httpClient := &http.Client{
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{
+						InsecureSkipVerify: true,
+					},
+				},
+				Timeout: 10 * time.Second,
+			}
+
+			// Make the request to the auth daemon
+			url := fmt.Sprintf("https://%s:%d/connection", certData.AgentHost, certData.AgentPort)
+			req, err := http.NewRequest("POST", url, bytes.NewBuffer(requestJSON))
+			if err != nil {
+				logger.Error("Failed to create auth daemon request: %v", err)
+				client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+					"messageId": certData.MessageId,
+					"complete":  true,
+					"error":     fmt.Sprintf("failed to create request: %v", err),
+				})
+				return
+			}
+
+			// Set headers
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+authDaemonKey)
+
+			logger.Debug("Sending SSH cert to auth daemon at %s", url)
+
+			// Send the request
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				logger.Error("Failed to connect to auth daemon: %v", err)
+				client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+					"messageId": certData.MessageId,
+					"complete":  true,
+					"error":     fmt.Sprintf("failed to connect to auth daemon: %v", err),
+				})
+				return
+			}
+			defer resp.Body.Close()
+
+			// Check response status
+			if resp.StatusCode != http.StatusOK {
+				logger.Error("Auth daemon returned non-OK status: %d", resp.StatusCode)
+				client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+					"messageId": certData.MessageId,
+					"complete":  true,
+					"error":     fmt.Sprintf("auth daemon returned status %d", resp.StatusCode),
+				})
+				return
+			}
+
+			logger.Info("Successfully registered SSH certificate with external auth daemon for user %s", certData.Username)
+		}
+
+		// Send success response back to cloud
+		err = client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+			"messageId": certData.MessageId,
+			"complete":  true,
+		})
+		if err != nil {
+			logger.Error("Failed to send SSH cert success response: %v", err)
 		}
 	})
 

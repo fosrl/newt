@@ -6,3 +6,5 @@ nohup.out
 certs/
 newt_arm64
 key
+/.direnv/
+/result*

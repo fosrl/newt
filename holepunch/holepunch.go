@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -19,7 +20,9 @@ import (
 // ExitNode represents a WireGuard exit node for hole punching
 type ExitNode struct {
 	Endpoint  string `json:"endpoint"`
+	RelayPort uint16 `json:"relayPort"`
 	PublicKey string `json:"publicKey"`
+	SiteIds   []int  `json:"siteIds,omitempty"`
 }
 
 // Manager handles UDP hole punching operations
@@ -35,21 +38,29 @@ type Manager struct {
 	exitNodes  map[string]ExitNode // key is endpoint
 	updateChan chan struct{}       // signals the goroutine to refresh exit nodes
 
-	sendHolepunchInterval time.Duration
+	sendHolepunchInterval    time.Duration
+	sendHolepunchIntervalMin time.Duration
+	sendHolepunchIntervalMax time.Duration
+	defaultIntervalMin       time.Duration
+	defaultIntervalMax       time.Duration
 }
 
-const sendHolepunchIntervalMax = 60 * time.Second
-const sendHolepunchIntervalMin = 1 * time.Second
+const defaultSendHolepunchIntervalMax = 60 * time.Second
+const defaultSendHolepunchIntervalMin = 1 * time.Second
 
 // NewManager creates a new hole punch manager
 func NewManager(sharedBind *bind.SharedBind, ID string, clientType string, publicKey string) *Manager {
 	return &Manager{
-		sharedBind:            sharedBind,
-		ID:                    ID,
-		clientType:            clientType,
-		publicKey:             publicKey,
-		exitNodes:             make(map[string]ExitNode),
-		sendHolepunchInterval: sendHolepunchIntervalMin,
+		sharedBind:               sharedBind,
+		ID:                       ID,
+		clientType:               clientType,
+		publicKey:                publicKey,
+		exitNodes:                make(map[string]ExitNode),
+		sendHolepunchInterval:    defaultSendHolepunchIntervalMin,
+		sendHolepunchIntervalMin: defaultSendHolepunchIntervalMin,
+		sendHolepunchIntervalMax: defaultSendHolepunchIntervalMax,
+		defaultIntervalMin:       defaultSendHolepunchIntervalMin,
+		defaultIntervalMax:       defaultSendHolepunchIntervalMax,
 	}
 }
 
@@ -140,6 +151,51 @@ func (m *Manager) RemoveExitNode(endpoint string) bool {
 	return true
 }
 
+/*
+RemoveExitNodesByPeer removes the peer ID from the SiteIds list in each exit node.
+If the SiteIds list becomes empty after removal, the exit node is removed entirely.
+Returns the number of exit nodes removed.
+*/
+func (m *Manager) RemoveExitNodesByPeer(peerID int) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	removed := 0
+	for endpoint, node := range m.exitNodes {
+		// Remove peerID from SiteIds if present
+		newSiteIds := make([]int, 0, len(node.SiteIds))
+		for _, id := range node.SiteIds {
+			if id != peerID {
+				newSiteIds = append(newSiteIds, id)
+			}
+		}
+		if len(newSiteIds) != len(node.SiteIds) {
+			node.SiteIds = newSiteIds
+			if len(node.SiteIds) == 0 {
+				delete(m.exitNodes, endpoint)
+				logger.Info("Removed exit node %s as no more site IDs remain after removing peer %d", endpoint, peerID)
+				removed++
+			} else {
+				m.exitNodes[endpoint] = node
+				logger.Info("Removed peer %d from exit node %s site IDs", peerID, endpoint)
+			}
+		}
+	}
+
+	if removed > 0 {
+		// Signal the goroutine to refresh if running
+		if m.running && m.updateChan != nil {
+			select {
+			case m.updateChan <- struct{}{}:
+			default:
+				// Channel full or closed, skip
+			}
+		}
+	}
+
+	return removed
+}
+
 // GetExitNodes returns a copy of the current exit nodes
 func (m *Manager) GetExitNodes() []ExitNode {
 	m.mu.Lock()
@@ -152,17 +208,46 @@ func (m *Manager) GetExitNodes() []ExitNode {
 	return nodes
 }
 
-// ResetInterval resets the hole punch interval back to the minimum value,
-// allowing it to climb back up through exponential backoff.
-// This is useful when network conditions change or connectivity is restored.
-func (m *Manager) ResetInterval() {
+// SetServerHolepunchInterval sets custom min and max intervals for hole punching.
+// This is useful for low power mode where longer intervals are desired.
+func (m *Manager) SetServerHolepunchInterval(min, max time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.sendHolepunchInterval != sendHolepunchIntervalMin {
-		m.sendHolepunchInterval = sendHolepunchIntervalMin
-		logger.Info("Reset hole punch interval to minimum (%v)", sendHolepunchIntervalMin)
+	m.sendHolepunchIntervalMin = min
+	m.sendHolepunchIntervalMax = max
+	m.sendHolepunchInterval = min
+
+	logger.Info("Set hole punch intervals: min=%v, max=%v", min, max)
+
+	// Signal the goroutine to apply the new interval if running
+	if m.running && m.updateChan != nil {
+		select {
+		case m.updateChan <- struct{}{}:
+		default:
+			// Channel full or closed, skip
+		}
 	}
+}
+
+// GetInterval returns the current min and max intervals
+func (m *Manager) GetServerHolepunchInterval() (min, max time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sendHolepunchIntervalMin, m.sendHolepunchIntervalMax
+}
+
+// ResetServerHolepunchInterval resets the hole punch interval back to the default values.
+// This restores normal operation after low power mode or other custom settings.
+func (m *Manager) ResetServerHolepunchInterval() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.sendHolepunchIntervalMin = m.defaultIntervalMin
+	m.sendHolepunchIntervalMax = m.defaultIntervalMax
+	m.sendHolepunchInterval = m.defaultIntervalMin
+
+	logger.Info("Reset hole punch intervals to defaults: min=%v, max=%v", m.defaultIntervalMin, m.defaultIntervalMax)
 
 	// Signal the goroutine to apply the new interval if running
 	if m.running && m.updateChan != nil {
@@ -202,7 +287,7 @@ func (m *Manager) TriggerHolePunch() error {
 			continue
 		}
 
-		serverAddr := net.JoinHostPort(host, "21820")
+		serverAddr := net.JoinHostPort(host, strconv.Itoa(int(exitNode.RelayPort)))
 		remoteAddr, err := net.ResolveUDPAddr("udp", serverAddr)
 		if err != nil {
 			logger.Error("Failed to resolve UDP address %s: %v", serverAddr, err)
@@ -247,7 +332,7 @@ func (m *Manager) StartMultipleExitNodes(exitNodes []ExitNode) error {
 	m.updateChan = make(chan struct{}, 1)
 	m.mu.Unlock()
 
-	logger.Info("Starting UDP hole punch to %d exit nodes with shared bind", len(exitNodes))
+	logger.Debug("Starting UDP hole punch to %d exit nodes with shared bind", len(exitNodes))
 
 	go m.runMultipleExitNodes()
 
@@ -313,7 +398,7 @@ func (m *Manager) runMultipleExitNodes() {
 				continue
 			}
 
-			serverAddr := net.JoinHostPort(host, "21820")
+			serverAddr := net.JoinHostPort(host, strconv.Itoa(int(exitNode.RelayPort)))
 			remoteAddr, err := net.ResolveUDPAddr("udp", serverAddr)
 			if err != nil {
 				logger.Error("Failed to resolve UDP address %s: %v", serverAddr, err)
@@ -325,7 +410,7 @@ func (m *Manager) runMultipleExitNodes() {
 				publicKey:    exitNode.PublicKey,
 				endpointName: exitNode.Endpoint,
 			})
-			logger.Info("Resolved exit node: %s -> %s", exitNode.Endpoint, remoteAddr.String())
+			logger.Debug("Resolved exit node: %s -> %s", exitNode.Endpoint, remoteAddr.String())
 		}
 		return resolvedNodes
 	}
@@ -345,7 +430,7 @@ func (m *Manager) runMultipleExitNodes() {
 
 	// Start with minimum interval
 	m.mu.Lock()
-	m.sendHolepunchInterval = sendHolepunchIntervalMin
+	m.sendHolepunchInterval = m.sendHolepunchIntervalMin
 	m.mu.Unlock()
 
 	ticker := time.NewTicker(m.sendHolepunchInterval)
@@ -367,7 +452,7 @@ func (m *Manager) runMultipleExitNodes() {
 			}
 			// Reset interval to minimum on update
 			m.mu.Lock()
-			m.sendHolepunchInterval = sendHolepunchIntervalMin
+			m.sendHolepunchInterval = m.sendHolepunchIntervalMin
 			m.mu.Unlock()
 			ticker.Reset(m.sendHolepunchInterval)
 			// Send immediate hole punch to newly resolved nodes
@@ -387,8 +472,8 @@ func (m *Manager) runMultipleExitNodes() {
 				// Exponential backoff: double the interval up to max
 				m.mu.Lock()
 				newInterval := m.sendHolepunchInterval * 2
-				if newInterval > sendHolepunchIntervalMax {
-					newInterval = sendHolepunchIntervalMax
+				if newInterval > m.sendHolepunchIntervalMax {
+					newInterval = m.sendHolepunchIntervalMax
 				}
 				if newInterval != m.sendHolepunchInterval {
 					m.sendHolepunchInterval = newInterval
