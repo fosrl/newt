@@ -1,0 +1,201 @@
+name: Publish APT repo to S3/CloudFront
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v1.9.0). Leave empty to use latest release."
+        required: false
+        type: string
+      backfill_all:
+        description: "Build/publish repo for ALL releases (can take a while)."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish-apt:
+    runs-on: ubuntu-latest
+
+    env:
+      PKG_NAME: newt
+      SUITE: stable
+      COMPONENT: main
+      REPO_BASE_URL: "https://repo.dev.fosrl.io/apt"
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Install tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils gnupg curl jq gh
+
+          # nfpm
+          curl -fsSL https://github.com/goreleaser/nfpm/releases/latest/download/nfpm_Linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin nfpm
+
+      - name: Determine tags to process
+        id: tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          BACKFILL: ${{ inputs.backfill_all }}
+        run: |
+          set -euo pipefail
+
+          if [ "${BACKFILL}" = "true" ]; then
+            echo "Backfill mode: collecting all release tags..."
+            TAGS="$(gh release list -R "${REPO}" --limit 200 --json tagName --jq '.[].tagName')"
+          else
+            if [ -n "${INPUT_TAG}" ]; then
+              TAGS="${INPUT_TAG}"
+            elif [ -n "${EVENT_TAG}" ]; then
+              TAGS="${EVENT_TAG}"
+            else
+              echo "No tag provided; using latest release tag..."
+              TAGS="$(gh release view -R "${REPO}" --json tagName --jq '.tagName')"
+            fi
+          fi
+
+          # Multi-line output for next steps
+          {
+            echo "tags<<EOF"
+            echo "${TAGS}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Import GPG key (APT signing)
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          echo "${APT_GPG_PRIVATE_KEY}" | gpg --batch --import
+          gpg --list-secret-keys --keyid-format=long
+
+      - name: Pull existing repo from S3 (incremental)
+        run: |
+          set -euo pipefail
+          mkdir -p repo/apt
+          BUCKET="${{ vars.S3_BUCKET }}"
+          PREFIX="${{ vars.S3_PREFIX }}"
+          aws s3 sync "s3://${BUCKET}/${PREFIX}apt/" repo/apt/ || true
+
+      - name: Build packages and update repo (for selected tags)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAGS: ${{ steps.tags.outputs.tags }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+
+          KEYID="$(gpg --list-secret-keys --with-colons | awk -F: '$1=="sec"{print $5; exit}')"
+          test -n "${KEYID}"
+
+          mkdir -p assets build
+
+          # Iterate over tags safely (no bash <<< with GH expressions)
+          printf '%s\n' "${TAGS}" | while IFS= read -r TAG; do
+            [ -z "${TAG}" ] && continue
+            echo "=== Processing tag: ${TAG} ==="
+
+            rm -rf assets build
+            mkdir -p assets build
+
+            gh release download "${TAG}" -R "${REPO}" -p "newt_linux_amd64" -D assets
+            gh release download "${TAG}" -R "${REPO}" -p "newt_linux_arm64" -D assets
+
+            VERSION="${TAG#v}"
+
+            for arch in amd64 arm64; do
+              bin="assets/newt_linux_${arch}"
+              test -f "${bin}"
+              install -Dm755 "${bin}" "build/newt"
+
+              cat > nfpm.yaml <<'EOF'
+name: newt
+arch: ARCH_PLACEHOLDER
+platform: linux
+version: VERSION_PLACEHOLDER
+section: net
+priority: optional
+maintainer: fosrl
+description: Newt - userspace tunnel client and TCP/UDP proxy
+contents:
+  - src: build/newt
+    dst: /usr/bin/newt
+EOF
+
+              # Replace placeholders (avoid YAML/heredoc expression issues)
+              sed -i "s/ARCH_PLACEHOLDER/${arch}/" nfpm.yaml
+              sed -i "s/VERSION_PLACEHOLDER/${VERSION}/" nfpm.yaml
+
+              nfpm package -p deb -f nfpm.yaml -t "build/${PKG_NAME}_${VERSION}_${arch}.deb"
+            done
+
+            mkdir -p "repo/apt/pool/${COMPONENT}/${PKG_NAME:0:1}/${PKG_NAME}/"
+            cp -v build/*.deb "repo/apt/pool/${COMPONENT}/${PKG_NAME:0:1}/${PKG_NAME}/"
+          done
+
+          cd repo/apt
+
+          for arch in amd64 arm64; do
+            mkdir -p "dists/${SUITE}/${COMPONENT}/binary-${arch}"
+            dpkg-scanpackages -a "${arch}" pool > "dists/${SUITE}/${COMPONENT}/binary-${arch}/Packages"
+            gzip -fk "dists/${SUITE}/${COMPONENT}/binary-${arch}/Packages"
+          done
+
+          cat > apt-ftparchive.conf <<EOF
+APT::FTPArchive::Release::Origin "fosrl";
+APT::FTPArchive::Release::Label "newt";
+APT::FTPArchive::Release::Suite "${SUITE}";
+APT::FTPArchive::Release::Codename "${SUITE}";
+APT::FTPArchive::Release::Architectures "amd64 arm64";
+APT::FTPArchive::Release::Components "${COMPONENT}";
+APT::FTPArchive::Release::Description "Newt APT repository";
+EOF
+
+          apt-ftparchive -c apt-ftparchive.conf release "dists/${SUITE}" > "dists/${SUITE}/Release"
+
+          cd "dists/${SUITE}"
+
+          gpg --batch --yes --pinentry-mode loopback \
+              ${APT_GPG_PASSPHRASE:+--passphrase "${APT_GPG_PASSPHRASE}"} \
+              --local-user "${KEYID}" \
+              --clearsign -o InRelease Release
+
+          gpg --batch --yes --pinentry-mode loopback \
+              ${APT_GPG_PASSPHRASE:+--passphrase "${APT_GPG_PASSPHRASE}"} \
+              --local-user "${KEYID}" \
+              -abs -o Release.gpg Release
+
+          cd ../../..
+          gpg --batch --yes --armor --export "${KEYID}" > public.key
+
+      - name: Upload repo to S3
+        run: |
+          set -euo pipefail
+          BUCKET="${{ vars.S3_BUCKET }}"
+          PREFIX="${{ vars.S3_PREFIX }}"
+          aws s3 sync repo/apt "s3://${BUCKET}/${PREFIX}apt/" --delete
+
+      - name: CloudFront invalidation (metadata only)
+        run: |
+          set -euo pipefail
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}" \
+            --paths "/${{ vars.S3_PREFIX }}apt/dists/*" "/${{ vars.S3_PREFIX }}apt/public.key"
