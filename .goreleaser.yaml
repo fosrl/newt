@@ -22,21 +22,12 @@ builds:
     ldflags:
       - -s -w -X main.newtVersion={{ .Tag }}
 
-archives:
-  - id: binaries
-    builds:
-      - newt
-    format: binary
-    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
-
 checksum:
   name_template: "checksums.txt"
 
 nfpms:
   - id: packages
     package_name: newt
-    builds:
-      - newt
     vendor: fosrl
     maintainer: fosrl <repo@fosrl.io>
     description: Newt - userspace tunnel client and TCP/UDP proxy
