@@ -3,10 +3,14 @@ name: Publish APT repo to S3/CloudFront
 on:
   release:
     types: [published]
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to publish (e.g. v1.9.0). Leave empty to use latest release."
+        description: "Tag to publish (e.g. 1.9.0). Leave empty to use latest release."
         required: false
         type: string
       backfill_all:
@@ -21,7 +25,7 @@ permissions:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       PKG_NAME: newt
       SUITE: stable
@@ -36,6 +40,7 @@ jobs:
       INPUT_TAG: ${{ inputs.tag }}
       BACKFILL_ALL: ${{ inputs.backfill_all }}
       EVENT_TAG: ${{ github.event.release.tag_name }}
+      PUSH_TAG: ${{ github.ref_name }}
       GH_REPO: ${{ github.repository }}
 
     steps:
@@ -51,12 +56,9 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils gnupg curl jq gh
 
-      - name: Install nfpm
-        run: curl -fsSL https://github.com/goreleaser/nfpm/releases/latest/download/nfpm_Linux_x86_64.tar.gz | sudo tar -xz -C /usr/local/bin nfpm
-
       - name: Publish APT repo
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
           APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
         run: ./scripts/publish-apt.sh

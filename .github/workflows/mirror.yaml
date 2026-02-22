@@ -1,20 +1,28 @@
 name: Mirror & Sign (Docker Hub to GHCR)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      source_image:
+        description: "Source image (e.g., docker.io/owner/newt)"
+        required: true
+        type: string
+      dest_image:
+        description: "Destination image (e.g., ghcr.io/owner/newt)"
+        required: true
+        type: string
 
 permissions:
   contents: read
   packages: write
   id-token: write   # for keyless OIDC
 
-env:
-  SOURCE_IMAGE: docker.io/fosrl/newt
-  DEST_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
-
 jobs:
   mirror-and-dual-sign:
-    runs-on: amd64-runner
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE_IMAGE: ${{ inputs.source_image }}
+      DEST_IMAGE: ${{ inputs.dest_image }}
     steps:
       - name: Install skopeo + jq
         run: |
