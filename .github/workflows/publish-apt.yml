@@ -94,7 +94,7 @@ jobs:
           PREFIX="${{ vars.S3_PREFIX }}"
           aws s3 sync "s3://${BUCKET}/${PREFIX}apt/" repo/apt/ || true
 
-      - name: Build packages and update repo (for selected tags)
+            - name: Build packages and update repo (for selected tags)
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -108,7 +108,6 @@ jobs:
 
           mkdir -p assets build
 
-          # Iterate over tags safely (no bash <<< with GH expressions)
           printf '%s\n' "${TAGS}" | while IFS= read -r TAG; do
             [ -z "${TAG}" ] && continue
             echo "=== Processing tag: ${TAG} ==="
@@ -126,37 +125,29 @@ jobs:
               test -f "${bin}"
               install -Dm755 "${bin}" "build/newt"
 
-              cat > nfpm.yaml <<'EOF'
-name: newt
-arch: ARCH_PLACEHOLDER
-platform: linux
-version: VERSION_PLACEHOLDER
-section: net
-priority: optional
-maintainer: fosrl
-description: Newt - userspace tunnel client and TCP/UDP proxy
-contents:
-  - src: build/newt
-    dst: /usr/bin/newt
-EOF
+              python3 - <<PY
+import yaml
+cfg = {
+  "name": "newt",
+  "arch": "${arch}",
+  "platform": "linux",
+  "version": "${VERSION}",
+  "section": "net",
+  "priority": "optional",
+  "maintainer": "fosrl",
+  "description": "Newt - userspace tunnel client and TCP/UDP proxy",
+  "contents": [
+    {"src": "build/newt", "dst": "/usr/bin/newt"}
+  ]
+}
+print(yaml.safe_dump(cfg, sort_keys=False))
+PY > nfpm.yaml
 
-              # Replace placeholders (avoid YAML/heredoc expression issues)
-              sed -i "s/ARCH_PLACEHOLDER/${arch}/" nfpm.yaml
-              sed -i "s/VERSION_PLACEHOLDER/${VERSION}/" nfpm.yaml
-
-              nfpm package -p deb -f nfpm.yaml -t "build/${PKG_NAME}_${VERSION}_${arch}.deb"
+              nfpm package -p deb -f nfpm.yaml -t "build/newt_${VERSION}_${arch}.deb"
             done
 
-            mkdir -p "repo/apt/pool/${COMPONENT}/${PKG_NAME:0:1}/${PKG_NAME}/"
-            cp -v build/*.deb "repo/apt/pool/${COMPONENT}/${PKG_NAME:0:1}/${PKG_NAME}/"
-          done
-
-          cd repo/apt
-
-          for arch in amd64 arm64; do
-            mkdir -p "dists/${SUITE}/${COMPONENT}/binary-${arch}"
-            dpkg-scanpackages -a "${arch}" pool > "dists/${SUITE}/${COMPONENT}/binary-${arch}/Packages"
-            gzip -fk "dists/${SUITE}/${COMPONENT}/binary-${arch}/Packages"
+            mkdir -p "repo/apt/pool/main/n/newt/"
+            cp -v build/*.deb "repo/apt/pool/main/n/newt/"
           done
 
           cat > apt-ftparchive.conf <<EOF
