@@ -122,16 +122,6 @@ jobs:
           echo "Tag ${TAG} not visible after waiting"; exit 1
         shell: bash
 
-      - name: Update version in main.go
-        run: |
-            TAG=${{ env.TAG }}
-            if [ -f main.go ]; then
-            sed -i 's/version_replaceme/'"$TAG"'/' main.go
-            echo "Updated main.go with version $TAG"
-            else
-            echo "main.go not found"
-            fi
-
       - name: Ensure repository is at the tagged commit (dispatch only)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
@@ -203,10 +193,36 @@ jobs:
       #    make -j 10 go-build-release tag=$TAG_VAR
       #  shell: bash
 
+      - name: Ensure clean git state for GoReleaser
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Checking git status before GoReleaser..."
+          git status --porcelain || true
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Repository contains local changes. Listing files and diff:"
+            git status --porcelain
+            git --no-pager diff --name-status || true
+            echo "Resetting tracked files to HEAD to ensure a clean release state"
+            git restore --source=HEAD --worktree --staged -- .
+            echo "After reset git status:"
+            git status --porcelain || true
+          else
+            echo "Repository clean."
+          fi
+
+      - name: Run GoReleaser config check
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: 2.14.0
+          args: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Run GoReleaser (binaries + deb/rpm/apk)
         uses: goreleaser/goreleaser-action@v6
         with:
-          version: latest
+          version: 2.14.0
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
