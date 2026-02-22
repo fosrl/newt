@@ -1,0 +1,31 @@
+project_name: newt
+
+builds:
+  - id: newt
+    main: ./cmd/newt
+    binary: newt
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+nfpms:
+  - id: packages
+    package_name: newt
+    builds:
+      - newt
+    vendor: fosrl
+    maintainer: fosrl <repo@fosrl.io>
+    description: Newt - userspace tunnel client and TCP/UDP proxy
+    license: AGPL-3.0
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/newt/LICENSE
