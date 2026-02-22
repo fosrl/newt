@@ -8,7 +8,8 @@ release:
 
 builds:
   - id: newt
-    main: ./main.go
+    # build the package directory (include all .go files) instead of a single file
+    main: .
     binary: newt
     env:
       - CGO_ENABLED=0
