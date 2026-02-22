@@ -38,7 +38,6 @@ type Server struct {
 	isRunning    bool
 	runningLock  sync.Mutex
 	newtID       string
-	outputPrefix string
 	useNetstack  bool
 	tnet         interface{} // Will be *netstack2.Net when using netstack
 }
@@ -50,7 +49,6 @@ func NewServer(serverAddr string, serverPort uint16, newtID string) *Server {
 		serverPort:   serverPort + 1, // use the next port for the server
 		shutdownCh:   make(chan struct{}),
 		newtID:       newtID,
-		outputPrefix: "[WGTester] ",
 		useNetstack:  false,
 		tnet:         nil,
 	}
@@ -63,7 +61,6 @@ func NewServerWithNetstack(serverAddr string, serverPort uint16, newtID string, 
 		serverPort:   serverPort + 1, // use the next port for the server
 		shutdownCh:   make(chan struct{}),
 		newtID:       newtID,
-		outputPrefix: "[WGTester] ",
 		useNetstack:  true,
 		tnet:         tnet,
 	}
@@ -109,7 +106,7 @@ func (s *Server) Start() error {
 	s.isRunning = true
 	go s.handleConnections()
 
-	logger.Info("%sServer started on %s:%d", s.outputPrefix, s.serverAddr, s.serverPort)
+	logger.Debug("WGTester Server started on %s:%d", s.serverAddr, s.serverPort)
 	return nil
 }
 
@@ -127,7 +124,7 @@ func (s *Server) Stop() {
 		s.conn.Close()
 	}
 	s.isRunning = false
-	logger.Info("%sServer stopped", s.outputPrefix)
+	logger.Info("WGTester Server stopped")
 }
 
 // RestartWithNetstack stops the current server and restarts it with netstack
@@ -162,7 +159,7 @@ func (s *Server) handleConnections() {
 			// Set read deadline to avoid blocking forever
 			err := s.conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 			if err != nil {
-				logger.Error("%sError setting read deadline: %v", s.outputPrefix, err)
+				logger.Error("Error setting read deadline: %v", err)
 				continue
 			}
 
@@ -192,7 +189,7 @@ func (s *Server) handleConnections() {
 					if err == io.EOF {
 						return
 					}
-					logger.Error("%sError reading from UDP: %v", s.outputPrefix, err)
+					logger.Error("Error reading from UDP: %v", err)
 				}
 				continue
 			}
@@ -224,7 +221,7 @@ func (s *Server) handleConnections() {
 			copy(responsePacket[5:13], buffer[5:13])
 
 			// Log response being sent for debugging
-			// logger.Debug("%sSending response to %s", s.outputPrefix, addr.String())
+			// logger.Debug("Sending response to %s", addr.String())
 
 			// Send the response packet - handle both regular UDP and netstack UDP
 			if s.useNetstack {
@@ -238,9 +235,9 @@ func (s *Server) handleConnections() {
 			}
 
 			if err != nil {
-				logger.Error("%sError sending response: %v", s.outputPrefix, err)
+				logger.Error("Error sending response: %v", err)
 			} else {
-				// logger.Debug("%sResponse sent successfully", s.outputPrefix)
+				// logger.Debug("Response sent successfully")
 			}
 		}
 	}

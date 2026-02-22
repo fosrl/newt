@@ -126,13 +126,14 @@ func LinuxRemoveRoute(destination string) error {
 
 // addRouteForServerIP adds an OS-specific route for the server IP
 func AddRouteForServerIP(serverIP, interfaceName string) error {
-	if err := AddRouteForNetworkConfig(serverIP); err != nil {
-		return err
-	}
 	if interfaceName == "" {
 		return nil
 	}
-	if runtime.GOOS == "darwin" {
+	// TODO: does this also need to be ios?
+	if runtime.GOOS == "darwin" { // macos requires routes for each peer to be added but this messes with other platforms
+		if err := AddRouteForNetworkConfig(serverIP); err != nil {
+			return err
+		}
 		return DarwinAddRoute(serverIP, "", interfaceName)
 	}
 	// else if runtime.GOOS == "windows" {
@@ -145,13 +146,14 @@ func AddRouteForServerIP(serverIP, interfaceName string) error {
 
 // removeRouteForServerIP removes an OS-specific route for the server IP
 func RemoveRouteForServerIP(serverIP string, interfaceName string) error {
-	if err := RemoveRouteForNetworkConfig(serverIP); err != nil {
-		return err
-	}
 	if interfaceName == "" {
 		return nil
 	}
-	if runtime.GOOS == "darwin" {
+	// TODO: does this also need to be ios?
+	if runtime.GOOS == "darwin" { // macos requires routes for each peer to be added but this messes with other platforms
+		if err := RemoveRouteForNetworkConfig(serverIP); err != nil {
+			return err
+		}
 		return DarwinRemoveRoute(serverIP)
 	}
 	// else if runtime.GOOS == "windows" {
@@ -217,21 +219,22 @@ func AddRoutes(remoteSubnets []string, interfaceName string) error {
 			continue
 		}
 
-		if runtime.GOOS == "darwin" {
+		switch runtime.GOOS {
+		case "darwin":
 			if err := DarwinAddRoute(subnet, "", interfaceName); err != nil {
 				logger.Error("Failed to add Darwin route for subnet %s: %v", subnet, err)
-				return err
 			}
-		} else if runtime.GOOS == "windows" {
+		case "windows":
 			if err := WindowsAddRoute(subnet, "", interfaceName); err != nil {
 				logger.Error("Failed to add Windows route for subnet %s: %v", subnet, err)
-				return err
 			}
-		} else if runtime.GOOS == "linux" {
+		case "linux":
 			if err := LinuxAddRoute(subnet, "", interfaceName); err != nil {
 				logger.Error("Failed to add Linux route for subnet %s: %v", subnet, err)
-				return err
 			}
+		case "android", "ios":
+			// Routes handled by the OS/VPN service
+			continue
 		}
 
 		logger.Info("Added route for remote subnet: %s", subnet)
@@ -258,21 +261,22 @@ func RemoveRoutes(remoteSubnets []string) error {
 		}
 
 		// Remove route based on operating system
-		if runtime.GOOS == "darwin" {
+		switch runtime.GOOS {
+		case "darwin":
 			if err := DarwinRemoveRoute(subnet); err != nil {
 				logger.Error("Failed to remove Darwin route for subnet %s: %v", subnet, err)
-				return err
 			}
-		} else if runtime.GOOS == "windows" {
+		case "windows":
 			if err := WindowsRemoveRoute(subnet); err != nil {
 				logger.Error("Failed to remove Windows route for subnet %s: %v", subnet, err)
-				return err
 			}
-		} else if runtime.GOOS == "linux" {
+		case "linux":
 			if err := LinuxRemoveRoute(subnet); err != nil {
 				logger.Error("Failed to remove Linux route for subnet %s: %v", subnet, err)
-				return err
 			}
+		case "android", "ios":
+			// Routes handled by the OS/VPN service
+			continue
 		}
 
 		logger.Info("Removed route for remote subnet: %s", subnet)

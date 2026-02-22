@@ -1,0 +1,23 @@
+name: Build Nix package
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - go.mod
+      - go.sum
+
+jobs:
+  nix-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build flake package
+        run: |
+          nix build .#pangolin-newt -L

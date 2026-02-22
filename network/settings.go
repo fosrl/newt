@@ -115,7 +115,7 @@ func RemoveIPv4IncludedRoute(route IPv4Route) {
 		if r == route {
 			networkSettings.IPv4IncludedRoutes = append(routes[:i], routes[i+1:]...)
 			logger.Info("Removed IPv4 included route: %+v", route)
-			return
+			break
 		}
 	}
 	incrementor++

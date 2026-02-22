@@ -119,7 +119,7 @@ func CheckForUpdate(owner, repo, currentVersion string) error {
 
 	// Check if update is available
 	if currentVer.isNewer(latestVer) {
-		printUpdateBanner(currentVer.String(), latestVer.String(), release.HTMLURL)
+		printUpdateBanner(currentVer.String(), latestVer.String(), "curl -fsSL https://static.pangolin.net/get-newt.sh | bash")
 	}
 
 	return nil
@@ -145,7 +145,7 @@ func printUpdateBanner(currentVersion, latestVersion, releaseURL string) {
 		"║  A newer version is available! Please update to get the" + padRight("", contentWidth-56) + "║",
 		"║  latest features, bug fixes, and security improvements." + padRight("", contentWidth-56) + "║",
 		emptyLine,
-		"║  Release URL: " + padRight(releaseURL, contentWidth-15) + "║",
+		"║  Update: " + padRight(releaseURL, contentWidth-10) + "║",
 		emptyLine,
 		borderBot,
 	}

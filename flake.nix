@@ -25,7 +25,7 @@
           inherit (pkgs) lib;
 
           # Update version when releasing
-          version = "1.7.0";
+          version = "1.8.0";
         in
         {
           default = self.packages.${system}.pangolin-newt;
@@ -35,15 +35,27 @@
             inherit version;
             src = pkgs.nix-gitignore.gitignoreSource [ ] ./.;
 
-            vendorHash = "sha256-5Xr6mwPtsqEliKeKv2rhhp6JC7u3coP4nnhIxGMqccU=";
+            vendorHash = "sha256-Sib6AUCpMgxlMpTc2Esvs+UU0yduVOxWUgT44FHAI+k=";
+
+            nativeInstallCheckInputs = [ pkgs.versionCheckHook ];
 
             env = {
               CGO_ENABLED = 0;
             };
 
             ldflags = [
+              "-s"
+              "-w"
               "-X main.newtVersion=${version}"
             ];
+
+            # Tests are broken due to a lack of Internet.
+            # Disable running `go test`, and instead do
+            # a simple version check instead.
+            doCheck = false;
+            doInstallCheck = true;
+
+            versionCheckProgramArg = [ "-version" ];
 
             meta = {
               description = "A tunneling client for Pangolin";
@@ -52,6 +64,7 @@
               maintainers = [
                 lib.maintainers.water-sucks
               ];
+              mainProgram = "newt";
             };
           };
         }

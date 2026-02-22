@@ -10,12 +10,18 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
+	"os/exec"
 	"sync"
 	"time"
 
 	"github.com/fosrl/newt/logger"
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
@@ -58,6 +64,9 @@ const (
 
 	// Buffer size for copying data
 	bufferSize = 32 * 1024
+
+	// icmpTimeout is the default timeout for ICMP ping requests.
+	icmpTimeout = 5 * time.Second
 )
 
 // TCPHandler handles TCP connections from netstack
@@ -72,6 +81,12 @@ type UDPHandler struct {
 	proxyHandler *ProxyHandler
 }
 
+// ICMPHandler handles ICMP packets from netstack
+type ICMPHandler struct {
+	stack        *stack.Stack
+	proxyHandler *ProxyHandler
+}
+
 // NewTCPHandler creates a new TCP handler
 func NewTCPHandler(s *stack.Stack, ph *ProxyHandler) *TCPHandler {
 	return &TCPHandler{stack: s, proxyHandler: ph}
@@ -80,6 +95,11 @@ func NewTCPHandler(s *stack.Stack, ph *ProxyHandler) *TCPHandler {
 // NewUDPHandler creates a new UDP handler
 func NewUDPHandler(s *stack.Stack, ph *ProxyHandler) *UDPHandler {
 	return &UDPHandler{stack: s, proxyHandler: ph}
+}
+
+// NewICMPHandler creates a new ICMP handler
+func NewICMPHandler(s *stack.Stack, ph *ProxyHandler) *ICMPHandler {
+	return &ICMPHandler{stack: s, proxyHandler: ph}
 }
 
 // InstallTCPHandler installs the TCP forwarder on the stack
@@ -346,5 +366,336 @@ func copyPacketData(dst, src net.PacketConn, to net.Addr, timeout time.Duration)
 		logger.Info("UDP copyPacketData: Wrote %d bytes to %v", written, writeAddr)
 
 		dst.SetReadDeadline(time.Now().Add(timeout))
+	}
+}
+
+// InstallICMPHandler installs the ICMP handler on the stack
+func (h *ICMPHandler) InstallICMPHandler() error {
+	h.stack.SetTransportProtocolHandler(header.ICMPv4ProtocolNumber, h.handleICMPPacket)
+	logger.Debug("ICMP Handler: Installed ICMP protocol handler")
+	return nil
+}
+
+// handleICMPPacket handles incoming ICMP packets
+func (h *ICMPHandler) handleICMPPacket(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
+	logger.Debug("ICMP Handler: Received ICMP packet from %s to %s", id.RemoteAddress, id.LocalAddress)
+
+	// Get the ICMP header from the packet
+	icmpData := pkt.TransportHeader().Slice()
+	if len(icmpData) < header.ICMPv4MinimumSize {
+		logger.Debug("ICMP Handler: Packet too small for ICMP header: %d bytes", len(icmpData))
+		return false
+	}
+
+	icmpHdr := header.ICMPv4(icmpData)
+	icmpType := icmpHdr.Type()
+	icmpCode := icmpHdr.Code()
+
+	logger.Debug("ICMP Handler: Type=%d, Code=%d, Ident=%d, Seq=%d",
+		icmpType, icmpCode, icmpHdr.Ident(), icmpHdr.Sequence())
+
+	// Only handle Echo Request (ping)
+	if icmpType != header.ICMPv4Echo {
+		logger.Debug("ICMP Handler: Ignoring non-echo ICMP type: %d", icmpType)
+		return false
+	}
+
+	// Extract source and destination addresses
+	srcIP := id.RemoteAddress.String()
+	dstIP := id.LocalAddress.String()
+
+	logger.Info("ICMP Handler: Echo Request from %s to %s (ident=%d, seq=%d)",
+		srcIP, dstIP, icmpHdr.Ident(), icmpHdr.Sequence())
+
+	// Convert to netip.Addr for subnet matching
+	srcAddr, err := netip.ParseAddr(srcIP)
+	if err != nil {
+		logger.Debug("ICMP Handler: Failed to parse source IP %s: %v", srcIP, err)
+		return false
+	}
+	dstAddr, err := netip.ParseAddr(dstIP)
+	if err != nil {
+		logger.Debug("ICMP Handler: Failed to parse dest IP %s: %v", dstIP, err)
+		return false
+	}
+
+	// Check subnet rules (use port 0 for ICMP since it doesn't have ports)
+	if h.proxyHandler == nil {
+		logger.Debug("ICMP Handler: No proxy handler configured")
+		return false
+	}
+
+	matchedRule := h.proxyHandler.subnetLookup.Match(srcAddr, dstAddr, 0, header.ICMPv4ProtocolNumber)
+	if matchedRule == nil {
+		logger.Debug("ICMP Handler: No matching subnet rule for %s -> %s", srcIP, dstIP)
+		return false
+	}
+
+	logger.Info("ICMP Handler: Matched subnet rule for %s -> %s", srcIP, dstIP)
+
+	// Determine actual destination (with possible rewrite)
+	actualDstIP := dstIP
+	if matchedRule.RewriteTo != "" {
+		resolvedAddr, err := h.proxyHandler.resolveRewriteAddress(matchedRule.RewriteTo)
+		if err != nil {
+			logger.Info("ICMP Handler: Failed to resolve rewrite address %s: %v", matchedRule.RewriteTo, err)
+		} else {
+			actualDstIP = resolvedAddr.String()
+			logger.Info("ICMP Handler: Using rewritten destination %s (original: %s)", actualDstIP, dstIP)
+		}
+	}
+
+	// Get the full ICMP payload (including the data after the header)
+	icmpPayload := pkt.Data().AsRange().ToSlice()
+
+	// Handle the ping in a goroutine to avoid blocking
+	go h.proxyPing(srcIP, dstIP, actualDstIP, icmpHdr.Ident(), icmpHdr.Sequence(), icmpPayload)
+
+	return true
+}
+
+// proxyPing sends a ping to the actual destination and injects the reply back
+func (h *ICMPHandler) proxyPing(srcIP, originalDstIP, actualDstIP string, ident, seq uint16, payload []byte) {
+	logger.Debug("ICMP Handler: Proxying ping from %s to %s (actual: %s), ident=%d, seq=%d",
+		srcIP, originalDstIP, actualDstIP, ident, seq)
+
+	// Try three methods in order: ip4:icmp -> udp4 -> ping command
+	// Track which method succeeded so we can handle identifier matching correctly
+	method, success := h.tryICMPMethods(actualDstIP, ident, seq, payload)
+
+	if !success {
+		logger.Info("ICMP Handler: All ping methods failed for %s", actualDstIP)
+		return
+	}
+
+	logger.Info("ICMP Handler: Ping successful to %s using %s, injecting reply (ident=%d, seq=%d)",
+		actualDstIP, method, ident, seq)
+
+	// Build the reply packet to inject back into the netstack
+	// The reply should appear to come from the original destination (before rewrite)
+	h.injectICMPReply(srcIP, originalDstIP, ident, seq, payload)
+}
+
+// tryICMPMethods tries all available ICMP methods in order
+func (h *ICMPHandler) tryICMPMethods(actualDstIP string, ident, seq uint16, payload []byte) (string, bool) {
+	if h.tryRawICMP(actualDstIP, ident, seq, payload, false) {
+		return "raw ICMP", true
+	}
+	if h.tryUnprivilegedICMP(actualDstIP, ident, seq, payload) {
+		return "unprivileged ICMP", true
+	}
+	if h.tryPingCommand(actualDstIP, ident, seq, payload) {
+		return "ping command", true
+	}
+	return "", false
+}
+
+// tryRawICMP attempts to ping using raw ICMP sockets (requires CAP_NET_RAW or root)
+func (h *ICMPHandler) tryRawICMP(actualDstIP string, ident, seq uint16, payload []byte, ignoreIdent bool) bool {
+	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+	if err != nil {
+		logger.Debug("ICMP Handler: Raw ICMP socket not available: %v", err)
+		return false
+	}
+	defer conn.Close()
+
+	logger.Debug("ICMP Handler: Using raw ICMP socket")
+	return h.sendAndReceiveICMP(conn, actualDstIP, ident, seq, payload, false, ignoreIdent)
+}
+
+// tryUnprivilegedICMP attempts to ping using unprivileged ICMP (requires ping_group_range configured)
+func (h *ICMPHandler) tryUnprivilegedICMP(actualDstIP string, ident, seq uint16, payload []byte) bool {
+	conn, err := icmp.ListenPacket("udp4", "0.0.0.0")
+	if err != nil {
+		logger.Debug("ICMP Handler: Unprivileged ICMP socket not available: %v", err)
+		return false
+	}
+	defer conn.Close()
+
+	logger.Debug("ICMP Handler: Using unprivileged ICMP socket")
+	// Unprivileged ICMP doesn't let us control the identifier, so we ignore it in matching
+	return h.sendAndReceiveICMP(conn, actualDstIP, ident, seq, payload, true, true)
+}
+
+// sendAndReceiveICMP sends an ICMP echo request and waits for the reply
+func (h *ICMPHandler) sendAndReceiveICMP(conn *icmp.PacketConn, actualDstIP string, ident, seq uint16, payload []byte, isUnprivileged bool, ignoreIdent bool) bool {
+	// Build the ICMP echo request message
+	echoMsg := &icmp.Message{
+		Type: ipv4.ICMPTypeEcho,
+		Code: 0,
+		Body: &icmp.Echo{
+			ID:   int(ident),
+			Seq:  int(seq),
+			Data: payload,
+		},
+	}
+
+	msgBytes, err := echoMsg.Marshal(nil)
+	if err != nil {
+		logger.Debug("ICMP Handler: Failed to marshal ICMP message: %v", err)
+		return false
+	}
+
+	// Resolve destination address based on socket type
+	var writeErr error
+	if isUnprivileged {
+		// For unprivileged ICMP, use UDP-style addressing
+		udpAddr := &net.UDPAddr{IP: net.ParseIP(actualDstIP)}
+		logger.Debug("ICMP Handler: Sending ping to %s (unprivileged)", udpAddr.String())
+		conn.SetDeadline(time.Now().Add(icmpTimeout))
+		_, writeErr = conn.WriteTo(msgBytes, udpAddr)
+	} else {
+		// For raw ICMP, use IP addressing
+		dst, err := net.ResolveIPAddr("ip4", actualDstIP)
+		if err != nil {
+			logger.Debug("ICMP Handler: Failed to resolve destination %s: %v", actualDstIP, err)
+			return false
+		}
+		logger.Debug("ICMP Handler: Sending ping to %s (raw)", dst.String())
+		conn.SetDeadline(time.Now().Add(icmpTimeout))
+		_, writeErr = conn.WriteTo(msgBytes, dst)
+	}
+
+	if writeErr != nil {
+		logger.Debug("ICMP Handler: Failed to send ping to %s: %v", actualDstIP, writeErr)
+		return false
+	}
+
+	logger.Debug("ICMP Handler: Ping sent to %s, waiting for reply (ident=%d, seq=%d)", actualDstIP, ident, seq)
+
+	// Wait for reply - loop to filter out non-matching packets
+	replyBuf := make([]byte, 1500)
+
+	for {
+		n, peer, err := conn.ReadFrom(replyBuf)
+		if err != nil {
+			logger.Debug("ICMP Handler: Failed to receive ping reply from %s: %v", actualDstIP, err)
+			return false
+		}
+
+		logger.Debug("ICMP Handler: Received %d bytes from %s", n, peer.String())
+
+		// Parse the reply
+		replyMsg, err := icmp.ParseMessage(1, replyBuf[:n])
+		if err != nil {
+			logger.Debug("ICMP Handler: Failed to parse ICMP message: %v", err)
+			continue
+		}
+
+		// Check if it's an echo reply (type 0), not an echo request (type 8)
+		if replyMsg.Type != ipv4.ICMPTypeEchoReply {
+			logger.Debug("ICMP Handler: Received non-echo-reply type: %v, continuing to wait", replyMsg.Type)
+			continue
+		}
+
+		reply, ok := replyMsg.Body.(*icmp.Echo)
+		if !ok {
+			logger.Debug("ICMP Handler: Invalid echo reply body type, continuing to wait")
+			continue
+		}
+
+		// Verify the sequence matches what we sent
+		// For unprivileged ICMP, the kernel controls the identifier, so we only check sequence
+		if reply.Seq != int(seq) {
+			logger.Debug("ICMP Handler: Reply seq mismatch: got seq=%d, want seq=%d", reply.Seq, seq)
+			continue
+		}
+
+		if !ignoreIdent && reply.ID != int(ident) {
+			logger.Debug("ICMP Handler: Reply ident mismatch: got ident=%d, want ident=%d", reply.ID, ident)
+			continue
+		}
+
+		// Found matching reply
+		logger.Debug("ICMP Handler: Received valid echo reply")
+		return true
+	}
+}
+
+// tryPingCommand attempts to ping using the system ping command (always works, but less control)
+func (h *ICMPHandler) tryPingCommand(actualDstIP string, ident, seq uint16, payload []byte) bool {
+	logger.Debug("ICMP Handler: Attempting to use system ping command")
+
+	ctx, cancel := context.WithTimeout(context.Background(), icmpTimeout)
+	defer cancel()
+
+	// Send one ping with timeout
+	// -c 1: count = 1 packet
+	// -W 5: timeout = 5 seconds
+	// -q: quiet output (just summary)
+	cmd := exec.CommandContext(ctx, "ping", "-c", "1", "-W", "5", "-q", actualDstIP)
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		logger.Debug("ICMP Handler: System ping command failed: %v, output: %s", err, string(output))
+		return false
+	}
+
+	logger.Debug("ICMP Handler: System ping command succeeded")
+	return true
+}
+
+// injectICMPReply creates an ICMP echo reply packet and queues it to be sent back through the tunnel
+func (h *ICMPHandler) injectICMPReply(dstIP, srcIP string, ident, seq uint16, payload []byte) {
+	logger.Debug("ICMP Handler: Creating reply from %s to %s (ident=%d, seq=%d)",
+		srcIP, dstIP, ident, seq)
+
+	// Parse addresses
+	srcAddr, err := netip.ParseAddr(srcIP)
+	if err != nil {
+		logger.Info("ICMP Handler: Failed to parse source IP for reply: %v", err)
+		return
+	}
+	dstAddr, err := netip.ParseAddr(dstIP)
+	if err != nil {
+		logger.Info("ICMP Handler: Failed to parse dest IP for reply: %v", err)
+		return
+	}
+
+	// Calculate total packet size
+	ipHeaderLen := header.IPv4MinimumSize
+	icmpHeaderLen := header.ICMPv4MinimumSize
+	totalLen := ipHeaderLen + icmpHeaderLen + len(payload)
+
+	// Create the packet buffer
+	pkt := make([]byte, totalLen)
+
+	// Build IPv4 header
+	ipHdr := header.IPv4(pkt[:ipHeaderLen])
+	ipHdr.Encode(&header.IPv4Fields{
+		TotalLength: uint16(totalLen),
+		TTL:         64,
+		Protocol:    uint8(header.ICMPv4ProtocolNumber),
+		SrcAddr:     tcpip.AddrFrom4(srcAddr.As4()),
+		DstAddr:     tcpip.AddrFrom4(dstAddr.As4()),
+	})
+	ipHdr.SetChecksum(^ipHdr.CalculateChecksum())
+
+	// Build ICMP header
+	icmpHdr := header.ICMPv4(pkt[ipHeaderLen : ipHeaderLen+icmpHeaderLen])
+	icmpHdr.SetType(header.ICMPv4EchoReply)
+	icmpHdr.SetCode(0)
+	icmpHdr.SetIdent(ident)
+	icmpHdr.SetSequence(seq)
+
+	// Copy payload
+	copy(pkt[ipHeaderLen+icmpHeaderLen:], payload)
+
+	// Calculate ICMP checksum (covers ICMP header + payload)
+	icmpHdr.SetChecksum(0)
+	icmpData := pkt[ipHeaderLen:]
+	icmpHdr.SetChecksum(^checksum.Checksum(icmpData, 0))
+
+	logger.Debug("ICMP Handler: Built reply packet, total length=%d", totalLen)
+
+	// Queue the packet to be sent back through the tunnel
+	if h.proxyHandler != nil {
+		if h.proxyHandler.QueueICMPReply(pkt) {
+			logger.Info("ICMP Handler: Queued echo reply packet for transmission")
+		} else {
+			logger.Info("ICMP Handler: Failed to queue echo reply packet")
+		}
+	} else {
+		logger.Info("ICMP Handler: Cannot queue reply - proxy handler not available")
 	}
 }

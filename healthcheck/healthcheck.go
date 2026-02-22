@@ -58,9 +58,10 @@ type Target struct {
 	LastCheck  time.Time `json:"lastCheck"`
 	LastError  string    `json:"lastError,omitempty"`
 	CheckCount int       `json:"checkCount"`
-	ticker     *time.Ticker
+	timer      *time.Timer
 	ctx        context.Context
 	cancel     context.CancelFunc
+	client     *http.Client
 }
 
 // StatusChangeCallback is called when any target's status changes
@@ -185,6 +186,16 @@ func (m *Monitor) addTargetUnsafe(config Config) error {
 		Status: StatusUnknown,
 		ctx:    ctx,
 		cancel: cancel,
+		client: &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					// Configure TLS settings based on certificate enforcement
+					InsecureSkipVerify: !m.enforceCert,
+					// Use SNI TLS header if present
+					ServerName: config.TLSServerName,
+				},
+			},
+		},
 	}
 
 	m.targets[config.ID] = target
@@ -304,26 +315,26 @@ func (m *Monitor) monitorTarget(target *Target) {
 		go m.callback(m.GetTargets())
 	}
 
-	// Set up ticker based on current status
+	// Set up timer based on current status
 	interval := time.Duration(target.Config.Interval) * time.Second
 	if target.Status == StatusUnhealthy {
 		interval = time.Duration(target.Config.UnhealthyInterval) * time.Second
 	}
 
 	logger.Debug("Target %d: initial check interval set to %v", target.Config.ID, interval)
-	target.ticker = time.NewTicker(interval)
-	defer target.ticker.Stop()
+	target.timer = time.NewTimer(interval)
+	defer target.timer.Stop()
 
 	for {
 		select {
 		case <-target.ctx.Done():
 			logger.Info("Stopping health check monitoring for target %d", target.Config.ID)
 			return
-		case <-target.ticker.C:
+		case <-target.timer.C:
 			oldStatus := target.Status
 			m.performHealthCheck(target)
 
-			// Update ticker interval if status changed
+			// Update timer interval if status changed
 			newInterval := time.Duration(target.Config.Interval) * time.Second
 			if target.Status == StatusUnhealthy {
 				newInterval = time.Duration(target.Config.UnhealthyInterval) * time.Second
@@ -332,10 +343,11 @@ func (m *Monitor) monitorTarget(target *Target) {
 			if newInterval != interval {
 				logger.Debug("Target %d: updating check interval from %v to %v due to status change",
 					target.Config.ID, interval, newInterval)
-				target.ticker.Stop()
-				target.ticker = time.NewTicker(newInterval)
 				interval = newInterval
 			}
+
+			// Reset timer for next check with current interval
+			target.timer.Reset(interval)
 
 			// Notify callback if status changed
 			if oldStatus != target.Status && m.callback != nil {
@@ -377,17 +389,6 @@ func (m *Monitor) performHealthCheck(target *Target) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(target.Config.Timeout)*time.Second)
 	defer cancel()
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				// Configure TLS settings based on certificate enforcement
-				InsecureSkipVerify: !m.enforceCert,
-				// Use SNI TLS header if present
-				ServerName: target.Config.TLSServerName,
-			},
-		},
-	}
-
 	req, err := http.NewRequestWithContext(ctx, target.Config.Method, url, nil)
 	if err != nil {
 		target.Status = StatusUnhealthy
@@ -407,7 +408,7 @@ func (m *Monitor) performHealthCheck(target *Target) {
 	}
 
 	// Perform request
-	resp, err := client.Do(req)
+	resp, err := target.client.Do(req)
 	if err != nil {
 		target.Status = StatusUnhealthy
 		target.LastError = fmt.Sprintf("request failed: %v", err)
