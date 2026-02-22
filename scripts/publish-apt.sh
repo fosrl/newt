@@ -19,6 +19,23 @@ fi
 WORKDIR="$(pwd)"
 mkdir -p repo/apt assets build
 
+download_asset() {
+  local tag="$1"
+  local pattern="$2"
+  local attempts=12
+
+  for attempt in $(seq 1 "${attempts}"); do
+    if gh release download "${tag}" -R "${GH_REPO}" -p "${pattern}" -D assets; then
+      return 0
+    fi
+    echo "Asset ${pattern} not available yet (attempt ${attempt}/${attempts}); retrying..."
+    sleep 5
+  done
+
+  echo "ERROR: Failed to download asset ${pattern} for ${tag} after ${attempts} attempts"
+  return 1
+}
+
 echo "${APT_GPG_PRIVATE_KEY}" | gpg --batch --import >/dev/null 2>&1 || true
 
 KEYID="$(gpg --list-secret-keys --with-colons | awk -F: '$1=="sec"{print $5; exit}')"
@@ -37,6 +54,8 @@ else
     TAGS="${INPUT_TAG}"
   elif [[ -n "${EVENT_TAG:-}" ]]; then
     TAGS="${EVENT_TAG}"
+  elif [[ -n "${PUSH_TAG:-}" ]]; then
+    TAGS="${PUSH_TAG}"
   else
     echo "No tag provided; using latest release tag..."
     TAGS="$(gh release view -R "${GH_REPO}" --json tagName --jq '.tagName')"
@@ -58,32 +77,23 @@ while IFS= read -r TAG; do
   rm -rf assets build
   mkdir -p assets build
 
-  gh release download "${TAG}" -R "${GH_REPO}" -p "newt_linux_amd64" -D assets
-  gh release download "${TAG}" -R "${GH_REPO}" -p "newt_linux_arm64" -D assets
+  deb_amd64="${PKG_NAME}_${TAG}_amd64.deb"
+  deb_arm64="${PKG_NAME}_${TAG}_arm64.deb"
 
-  VERSION="${TAG#v}"
+  download_asset "${TAG}" "${deb_amd64}"
+  download_asset "${TAG}" "${deb_arm64}"
 
-  for arch in amd64 arm64; do
-    bin="assets/newt_linux_${arch}"
-    if [[ ! -f "${bin}" ]]; then
-      echo "ERROR: Missing release asset: ${bin}"
-      exit 1
-    fi
-
-    install -Dm755 "${bin}" "build/newt"
-
-    # Create nfpm config from template file (no heredoc here)
-    sed \
-      -e "s/__PKG_NAME__/${PKG_NAME}/g" \
-      -e "s/__ARCH__/${arch}/g" \
-      -e "s/__VERSION__/${VERSION}/g" \
-      scripts/nfpm.yaml.tmpl > nfpm.yaml
-
-    nfpm package -p deb -f nfpm.yaml -t "build/${PKG_NAME}_${VERSION}_${arch}.deb"
-  done
+  if [[ ! -f "assets/${deb_amd64}" ]]; then
+    echo "ERROR: Missing release asset: ${deb_amd64}"
+    exit 1
+  fi
+  if [[ ! -f "assets/${deb_arm64}" ]]; then
+    echo "ERROR: Missing release asset: ${deb_arm64}"
+    exit 1
+  fi
 
   mkdir -p "repo/apt/pool/${COMPONENT}/${PKG_NAME:0:1}/${PKG_NAME}/"
-  cp -v build/*.deb "repo/apt/pool/${COMPONENT}/${PKG_NAME:0:1}/${PKG_NAME}/"
+  cp -v assets/*.deb "repo/apt/pool/${COMPONENT}/${PKG_NAME:0:1}/${PKG_NAME}/"
 
 done <<< "${TAGS}"
 
@@ -124,7 +134,7 @@ gpg --batch --yes --pinentry-mode loopback \
 
 # Export public key into apt repo root
 cd ../../..
-gpg --batch --yes --armor --export "${KEYID}" > public.key
+gpg --batch --yes --armor --export "${KEYID}" > "${WORKDIR}/repo/apt/public.key"
 
 # Upload to S3
 echo "Uploading to S3..."

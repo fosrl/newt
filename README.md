@@ -1,15 +1,24 @@
 # Newt
+
 [![PkgGoDev](https://pkg.go.dev/badge/github.com/fosrl/newt)](https://pkg.go.dev/github.com/fosrl/newt)
 [![GitHub License](https://img.shields.io/github/license/fosrl/newt)](https://github.com/fosrl/newt/blob/main/LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/fosrl/newt)](https://goreportcard.com/report/github.com/fosrl/newt)
 
 Newt is a fully user space [WireGuard](https://www.wireguard.com/) tunnel client and TCP/UDP proxy, designed to securely expose private resources controlled by Pangolin. By using Newt, you don't need to manage complex WireGuard tunnels and NATing.
 
-### Installation and Documentation
+## Installation and Documentation
 
 Newt is used with Pangolin and Gerbil as part of the larger system. See documentation below:
 
--   [Full Documentation](https://docs.pangolin.net/manage/sites/understanding-sites)
+- [Full Documentation](https://docs.pangolin.net/manage/sites/understanding-sites)
+
+### Install via APT (Debian/Ubuntu)
+
+```bash
+curl -fsSL https://repo.dev.fosrl.io/apt/public.key | sudo gpg --dearmor -o /usr/share/keyrings/newt-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/newt-archive-keyring.gpg] https://repo.dev.fosrl.io/apt stable main" | sudo tee /etc/apt/sources.list.d/newt.list
+sudo apt update && sudo apt install newt
+```
 
 ## Key Functions
 
