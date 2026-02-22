@@ -1,16 +1,45 @@
 project_name: newt
 
+release:
+  # du nutzt Tags wie 1.2.3 und 1.2.3-rc.1 (ohne v)
+  draft: true
+  prerelease: auto
+  name_template: "{{ .Tag }}"
+  mode: replace
+
 builds:
   - id: newt
-    main: ./cmd/newt
+    main: ./main.go   # <- falls du cmd/newt hast: ./cmd/newt
     binary: newt
+    env:
+      - CGO_ENABLED=0
     goos:
       - linux
+      - darwin
+      - windows
+      - freebsd
     goarch:
       - amd64
       - arm64
+    goarm:
+      - "6"
+      - "7"
+    flags:
+      - -trimpath
     ldflags:
-      - -s -w -X main.version={{ .Version }}
+      - -s -w -X main.version={{ .Tag }}
+
+archives:
+  # Wichtig: format "binary" -> keine tar.gz, sondern raw binary wie bei dir aktuell
+  - id: raw
+    builds:
+      - newt
+    format: binary
+    name_template: >-
+      {{ .ProjectName }}_{{ .Os }}_{{ if eq .Arch "amd64" }}amd64{{ else if eq .Arch "arm64" }}arm64{{ else if eq .Arch "386" }}386{{ else }}{{ .Arch }}{{ end }}{{ if .Arm }}v{{ .Arm }}{{ end }}{{ if .Mips }}_{{ .Mips }}{{ end }}{{ if .Amd64 }}_{{ .Amd64 }}{{ end }}{{ if .Riscv64 }}_{{ .Riscv64 }}{{ end }}{{ if .Os | eq "windows" }}.exe{{ end }}
+
+checksum:
+  name_template: "checksums.txt"
 
 nfpms:
   - id: packages
@@ -26,6 +55,8 @@ nfpms:
       - rpm
       - apk
     bindir: /usr/bin
+    # sorgt dafür, dass die Paketnamen gut pattern-matchbar sind
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
     contents:
       - src: LICENSE
         dst: /usr/share/doc/newt/LICENSE
