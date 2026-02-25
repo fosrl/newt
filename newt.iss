@@ -32,7 +32,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 ; Uncomment the following line to run in non administrative install mode (install for current user only).
 ;PrivilegesRequired=lowest
-OutputBaseFilename=mysetup
+OutputBaseFilename=newt_windows_installer
 SolidCompression=yes
 WizardStyle=modern
 ; Add this to ensure PATH changes are applied and the system is prompted for a restart if needed
