@@ -116,6 +116,7 @@ var (
 	logLevel                           string
 	interfaceName                      string
 	port                               uint16
+	portStr                            string
 	disableClients                     bool
 	updownScript                       string
 	dockerSocket                       string
@@ -210,7 +211,7 @@ func runNewtMain(ctx context.Context) {
 	logLevel = os.Getenv("LOG_LEVEL")
 	updownScript = os.Getenv("UPDOWN_SCRIPT")
 	interfaceName = os.Getenv("INTERFACE")
-	portStr := os.Getenv("PORT")
+	portStr = os.Getenv("PORT")
 	authDaemonKey = os.Getenv("AD_KEY")
 	authDaemonPrincipalsFile = os.Getenv("AD_PRINCIPALS_FILE")
 	authDaemonCACertPath = os.Getenv("AD_CA_CERT_PATH")
