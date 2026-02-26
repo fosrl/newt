@@ -27,8 +27,9 @@ type Config struct {
 	Port               int    // Required when DisableHTTPS is false. Listen port for the HTTPS server. No default.
 	PresharedKey       string // Required when DisableHTTPS is false. HTTP auth (Authorization: Bearer <key> or X-Preshared-Key: <key>). No default.
 	CACertPath         string // Required. Where to write the CA cert (e.g. /etc/ssh/ca.pem). No default.
-	Force              bool   // If true, overwrite existing CA cert (and other items) when content differs. Default false.
-	PrincipalsFilePath string // Required. Path to the principals data file (JSON: username -> array of principals). No default.
+	Force                   bool   // If true, overwrite existing CA cert (and other items) when content differs. Default false.
+	PrincipalsFilePath      string // Required. Path to the principals data file (JSON: username -> array of principals). No default.
+	GenerateRandomPassword  bool   // If true, set a random password on users when they are provisioned (for SSH PermitEmptyPasswords no).
 }
 
 type Server struct {

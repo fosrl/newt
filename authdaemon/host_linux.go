@@ -4,6 +4,8 @@ package authdaemon
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -122,6 +124,22 @@ func sudoGroup() string {
 	return "sudo"
 }
 
+// setRandomPassword generates a random password and sets it for username via chpasswd.
+// Used when GenerateRandomPassword is true so SSH with PermitEmptyPasswords no can accept the user.
+func setRandomPassword(username string) error {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Errorf("generate password: %w", err)
+	}
+	password := hex.EncodeToString(b)
+	cmd := exec.Command("chpasswd")
+	cmd.Stdin = strings.NewReader(username + ":" + password)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("chpasswd: %w (output: %s)", err, string(out))
+	}
+	return nil
+}
+
 const skelDir = "/etc/skel"
 
 // copySkelInto copies files from srcDir (e.g. /etc/skel) into dstDir (e.g. user's home).
@@ -172,7 +190,7 @@ func copySkelInto(srcDir, dstDir string, uid, gid int) {
 }
 
 // ensureUser creates the system user if missing, or reconciles sudo and homedir to match meta.
-func ensureUser(username string, meta ConnectionMetadata) error {
+func ensureUser(username string, meta ConnectionMetadata, generateRandomPassword bool) error {
 	if username == "" {
 		return nil
 	}
@@ -181,7 +199,7 @@ func ensureUser(username string, meta ConnectionMetadata) error {
 		if _, ok := err.(user.UnknownUserError); !ok {
 			return fmt.Errorf("lookup user %s: %w", username, err)
 		}
-		return createUser(username, meta)
+		return createUser(username, meta, generateRandomPassword)
 	}
 	return reconcileUser(u, meta)
 }
@@ -223,7 +241,7 @@ func setUserGroups(username string, groups []string) {
 	}
 }
 
-func createUser(username string, meta ConnectionMetadata) error {
+func createUser(username string, meta ConnectionMetadata, generateRandomPassword bool) error {
 	args := []string{"-s", "/bin/bash"}
 	if meta.Homedir {
 		args = append(args, "-m")
@@ -236,6 +254,13 @@ func createUser(username string, meta ConnectionMetadata) error {
 		return fmt.Errorf("useradd %s: %w (output: %s)", username, err, string(out))
 	}
 	logger.Info("auth-daemon: created user %s (homedir=%v)", username, meta.Homedir)
+	if generateRandomPassword {
+		if err := setRandomPassword(username); err != nil {
+			logger.Warn("auth-daemon: set random password for %s: %v", username, err)
+		} else {
+			logger.Info("auth-daemon: set random password for %s (PermitEmptyPasswords no)", username)
+		}
+	}
 	if meta.Homedir {
 		if u, err := user.Lookup(username); err == nil && u.HomeDir != "" {
 			uid, gid := mustAtoi(u.Uid), mustAtoi(u.Gid)

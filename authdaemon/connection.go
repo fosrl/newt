@@ -16,7 +16,7 @@ func (s *Server) ProcessConnection(req ConnectionRequest) {
 			logger.Warn("auth-daemon: write CA cert: %v", err)
 		}
 	}
-	if err := ensureUser(req.Username, req.Metadata); err != nil {
+	if err := ensureUser(req.Username, req.Metadata, s.cfg.GenerateRandomPassword); err != nil {
 		logger.Warn("auth-daemon: ensure user: %v", err)
 	}
 	if cfg.PrincipalsFilePath != "" {

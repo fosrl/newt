@@ -12,7 +12,7 @@ func writeCACertIfNotExists(path, contents string, force bool) error {
 }
 
 // ensureUser returns an error on non-Linux.
-func ensureUser(username string, meta ConnectionMetadata) error {
+func ensureUser(username string, meta ConnectionMetadata, generateRandomPassword bool) error {
 	return errLinuxOnly
 }
 
