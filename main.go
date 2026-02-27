@@ -137,6 +137,7 @@ var (
 	authDaemonPrincipalsFile           string
 	authDaemonCACertPath               string
 	authDaemonEnabled                  bool
+	authDaemonGenerateRandomPassword   bool
 	// Build/version (can be overridden via -ldflags "-X main.newtVersion=...")
 	newtVersion = "version_replaceme"
 
@@ -216,6 +217,7 @@ func runNewtMain(ctx context.Context) {
 	authDaemonPrincipalsFile = os.Getenv("AD_PRINCIPALS_FILE")
 	authDaemonCACertPath = os.Getenv("AD_CA_CERT_PATH")
 	authDaemonEnabledEnv := os.Getenv("AUTH_DAEMON_ENABLED")
+	authDaemonGenerateRandomPasswordEnv := os.Getenv("AD_GENERATE_RANDOM_PASSWORD")
 
 	// Metrics/observability env mirrors
 	metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED")
@@ -419,6 +421,13 @@ func runNewtMain(ctx context.Context) {
 	} else {
 		if v, err := strconv.ParseBool(authDaemonEnabledEnv); err == nil {
 			authDaemonEnabled = v
+		}
+	}
+	if authDaemonGenerateRandomPasswordEnv == "" {
+		flag.BoolVar(&authDaemonGenerateRandomPassword, "ad-generate-random-password", false, "Generate a random password for authenticated users")
+	} else {
+		if v, err := strconv.ParseBool(authDaemonGenerateRandomPasswordEnv); err == nil {
+			authDaemonGenerateRandomPassword = v
 		}
 	}
 

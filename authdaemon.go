@@ -46,11 +46,12 @@ func startAuthDaemon(ctx context.Context) error {
 
 	// Create auth daemon server
 	cfg := authdaemon.Config{
-		DisableHTTPS:       true, // We run without HTTP server in newt
-		PresharedKey:       "this-key-is-not-used",   // Not used in embedded mode, but set to non-empty to satisfy validation
-		PrincipalsFilePath: principalsFile,
-		CACertPath:         caCertPath,
-		Force:              true,
+		DisableHTTPS:           true,                   // We run without HTTP server in newt
+		PresharedKey:           "this-key-is-not-used", // Not used in embedded mode, but set to non-empty to satisfy validation
+		PrincipalsFilePath:     principalsFile,
+		CACertPath:             caCertPath,
+		Force:                  true,
+		GenerateRandomPassword: authDaemonGenerateRandomPassword,
 	}
 
 	srv, err := authdaemon.NewServer(cfg)
@@ -71,8 +72,6 @@ func startAuthDaemon(ctx context.Context) error {
 
 	return nil
 }
-
-
 
 // runPrincipalsCmd executes the principals subcommand logic
 func runPrincipalsCmd(args []string) {
