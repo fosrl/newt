@@ -1,4 +1,5 @@
-FROM golang:1.25-alpine AS builder
+# FROM golang:1.25-alpine AS builder
+FROM public.ecr.aws/docker/library/golang:1.25-alpine AS builder
 
 # Install git and ca-certificates
 RUN apk --no-cache add ca-certificates git tzdata
@@ -18,7 +19,7 @@ COPY . .
 # Build the application
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /newt
 
-FROM alpine:3.23 AS runner
+FROM public.ecr.aws/docker/library/alpine:3.23 AS runner
 
 RUN apk --no-cache add ca-certificates tzdata iputils
 
