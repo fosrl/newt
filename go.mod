@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/docker/docker v28.5.2+incompatible
+	github.com/gaissmai/bart v0.26.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/prometheus/client_golang v1.23.2
 	github.com/vishvananda/netlink v1.3.1
