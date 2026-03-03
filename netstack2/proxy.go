@@ -48,115 +48,6 @@ type SubnetRule struct {
 	PortRanges   []PortRange  // empty slice means all ports allowed
 }
 
-// ruleKey is used as a map key for fast O(1) lookups
-type ruleKey struct {
-	sourcePrefix string
-	destPrefix   string
-}
-
-// SubnetLookup provides fast IP subnet and port matching with O(1) lookup performance
-type SubnetLookup struct {
-	mu    sync.RWMutex
-	rules map[ruleKey]*SubnetRule // Map for O(1) lookups by prefix combination
-}
-
-// NewSubnetLookup creates a new subnet lookup table
-func NewSubnetLookup() *SubnetLookup {
-	return &SubnetLookup{
-		rules: make(map[ruleKey]*SubnetRule),
-	}
-}
-
-// AddSubnet adds a subnet rule with source and destination prefixes and optional port restrictions
-// If portRanges is nil or empty, all ports are allowed for this subnet
-// rewriteTo can be either an IP/CIDR (e.g., "192.168.1.1/32") or a domain name (e.g., "example.com")
-func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool) {
-	sl.mu.Lock()
-	defer sl.mu.Unlock()
-
-	key := ruleKey{
-		sourcePrefix: sourcePrefix.String(),
-		destPrefix:   destPrefix.String(),
-	}
-
-	sl.rules[key] = &SubnetRule{
-		SourcePrefix: sourcePrefix,
-		DestPrefix:   destPrefix,
-		DisableIcmp:  disableIcmp,
-		RewriteTo:    rewriteTo,
-		PortRanges:   portRanges,
-	}
-}
-
-// RemoveSubnet removes a subnet rule from the lookup table
-func (sl *SubnetLookup) RemoveSubnet(sourcePrefix, destPrefix netip.Prefix) {
-	sl.mu.Lock()
-	defer sl.mu.Unlock()
-
-	key := ruleKey{
-		sourcePrefix: sourcePrefix.String(),
-		destPrefix:   destPrefix.String(),
-	}
-
-	delete(sl.rules, key)
-}
-
-// Match checks if a source IP, destination IP, port, and protocol match any subnet rule
-// Returns the matched rule if ALL of these conditions are met:
-//   - The source IP is in the rule's source prefix
-//   - The destination IP is in the rule's destination prefix
-//   - The port is in an allowed range (or no port restrictions exist)
-//   - The protocol matches (or the port range allows both protocols)
-//
-// proto should be header.TCPProtocolNumber or header.UDPProtocolNumber
-// Returns nil if no rule matches
-func (sl *SubnetLookup) Match(srcIP, dstIP netip.Addr, port uint16, proto tcpip.TransportProtocolNumber) *SubnetRule {
-	sl.mu.RLock()
-	defer sl.mu.RUnlock()
-
-	// Iterate through all rules to find matching source and destination prefixes
-	// This is O(n) but necessary since we need to check prefix containment, not exact match
-	for _, rule := range sl.rules {
-		// Check if source and destination IPs match their respective prefixes
-		if !rule.SourcePrefix.Contains(srcIP) {
-			continue
-		}
-		if !rule.DestPrefix.Contains(dstIP) {
-			continue
-		}
-
-		if rule.DisableIcmp && (proto == header.ICMPv4ProtocolNumber || proto == header.ICMPv6ProtocolNumber) {
-		    // ICMP is disabled for this subnet
-			return nil
-		}
-
-		// Both IPs match - now check port restrictions
-		// If no port ranges specified, all ports are allowed
-		if len(rule.PortRanges) == 0 {
-			return rule
-		}
-
-		// Check if port and protocol are in any of the allowed ranges
-		for _, pr := range rule.PortRanges {
-			if port >= pr.Min && port <= pr.Max {
-				// Check protocol compatibility
-				if pr.Protocol == "" {
-					// Empty protocol means allow both TCP and UDP
-					return rule
-				}
-				// Check if the packet protocol matches the port range protocol
-				if (pr.Protocol == "tcp" && proto == header.TCPProtocolNumber) ||
-					(pr.Protocol == "udp" && proto == header.UDPProtocolNumber) {
-					return rule
-				}
-				// Port matches but protocol doesn't - continue checking other ranges
-			}
-		}
-	}
-
-	return nil
-}
-
 // connKey uniquely identifies a connection for NAT tracking
 type connKey struct {
 	srcIP   string
@@ -164,6 +55,17 @@ type connKey struct {
 	dstIP   string
 	dstPort uint16
 	proto   uint8
+}
+
+// reverseConnKey uniquely identifies a connection for reverse NAT lookup (reply direction)
+// Key structure: (rewrittenTo, originalSrcIP, originalSrcPort, originalDstPort, proto)
+// This allows O(1) lookup of NAT entries for reply packets
+type reverseConnKey struct {
+	rewrittenTo     string // The address we rewrote to (becomes src in replies)
+	originalSrcIP   string // Original source IP (becomes dst in replies)
+	originalSrcPort uint16 // Original source port (becomes dst port in replies)
+	originalDstPort uint16 // Original destination port (becomes src port in replies)
+	proto           uint8
 }
 
 // destKey identifies a destination for handler lookups (without source port since it may change)
@@ -190,7 +92,8 @@ type ProxyHandler struct {
 	icmpHandler       *ICMPHandler
 	subnetLookup      *SubnetLookup
 	natTable          map[connKey]*natState
-	destRewriteTable  map[destKey]netip.Addr // Maps original dest to rewritten dest for handler lookups
+	reverseNatTable   map[reverseConnKey]*natState // Reverse lookup map for O(1) reply packet NAT
+	destRewriteTable  map[destKey]netip.Addr       // Maps original dest to rewritten dest for handler lookups
 	natMu             sync.RWMutex
 	enabled           bool
 	icmpReplies       chan []byte          // Channel for ICMP reply packets to be sent back through the tunnel
@@ -215,6 +118,7 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 		enabled:          true,
 		subnetLookup:     NewSubnetLookup(),
 		natTable:         make(map[connKey]*natState),
+		reverseNatTable:  make(map[reverseConnKey]*natState),
 		destRewriteTable: make(map[destKey]netip.Addr),
 		icmpReplies:      make(chan []byte, 256), // Buffer for ICMP reply packets
 		proxyEp:          channel.New(1024, uint32(options.MTU), ""),
@@ -517,10 +421,23 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 
 				// Store NAT state for this connection
 				p.natMu.Lock()
-				p.natTable[key] = &natState{
+				natEntry := &natState{
 					originalDst: dstAddr,
 					rewrittenTo: newDst,
 				}
+				p.natTable[key] = natEntry
+
+				// Create reverse lookup key for O(1) reply packet lookups
+				// Key: (rewrittenTo, originalSrcIP, originalSrcPort, originalDstPort, proto)
+				reverseKey := reverseConnKey{
+					rewrittenTo:     newDst.String(),
+					originalSrcIP:   srcAddr.String(),
+					originalSrcPort: srcPort,
+					originalDstPort: dstPort,
+					proto:           uint8(protocol),
+				}
+				p.reverseNatTable[reverseKey] = natEntry
+
 				// Store destination rewrite for handler lookups
 				p.destRewriteTable[dKey] = newDst
 				p.natMu.Unlock()
@@ -719,20 +636,22 @@ func (p *ProxyHandler) ReadOutgoingPacket() *buffer.View {
 				return view
 			}
 
-			// Look up NAT state for reverse translation
-			// The key uses the original dst (before rewrite), so for replies we need to
-			// find the entry where the rewritten address matches the current source
+			// Look up NAT state for reverse translation using O(1) reverse lookup map
+			// Key: (rewrittenTo, originalSrcIP, originalSrcPort, originalDstPort, proto)
+			// For reply packets:
+			// - reply's srcIP = rewrittenTo (the address we rewrote to)
+			// - reply's dstIP = originalSrcIP (original source IP)
+			// - reply's srcPort = originalDstPort (original destination port)
+			// - reply's dstPort = originalSrcPort (original source port)
 			p.natMu.RLock()
-			var natEntry *natState
-			for k, entry := range p.natTable {
-				// Match: reply's dst should be original src, reply's src should be rewritten dst
-				if k.srcIP == dstIP.String() && k.srcPort == dstPort &&
-					entry.rewrittenTo.String() == srcIP.String() && k.dstPort == srcPort &&
-					k.proto == uint8(protocol) {
-					natEntry = entry
-					break
-				}
+			reverseKey := reverseConnKey{
+				rewrittenTo:     srcIP.String(), // Reply's source is the rewritten address
+				originalSrcIP:   dstIP.String(), // Reply's destination is the original source
+				originalSrcPort: dstPort,        // Reply's destination port is the original source port
+				originalDstPort: srcPort,        // Reply's source port is the original destination port
+				proto:           uint8(protocol),
 			}
+			natEntry := p.reverseNatTable[reverseKey]
 			p.natMu.RUnlock()
 
 			if natEntry != nil {
