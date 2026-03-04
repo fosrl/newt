@@ -53,9 +53,14 @@ func (sl *SubnetLookup) GetAllRules() []SubnetRule {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
 
-	rules := make([]SubnetRule, 0, len(sl.rules))
-	for _, rule := range sl.rules {
-		rules = append(rules, *rule)
+	var rules []SubnetRule
+	for _, destTriePtr := range sl.sourceTrie.All() {
+		if destTriePtr == nil {
+			continue
+		}
+		for _, rule := range destTriePtr.rules {
+			rules = append(rules, *rule)
+		}
 	}
 	return rules
 }
