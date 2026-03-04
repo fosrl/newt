@@ -112,6 +112,8 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 		return nil, fmt.Errorf("failed to generate private key: %v", err)
 	}
 
+	logger.Debug("+++++++++++++++++++++++++++++++= the port is %d", port)
+	
 	if port == 0 {
 		// Find an available port
 		portRandom, err := util.FindAvailableUDPPort(49152, 65535)
@@ -724,7 +726,7 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 
 		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
 
-		logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.RewriteTo, target.PortRange)
+		logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v disableIcmp: %v", target.SourcePrefix, target.DestPrefix, target.RewriteTo, target.PortRange, target.DisableIcmp)
 	}
 
 	return nil
@@ -1117,7 +1119,7 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 
 		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
 
-		logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.RewriteTo, target.PortRange)
+		logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v disableIcmp: %v", target.SourcePrefix, target.DestPrefix, target.RewriteTo, target.PortRange, target.DisableIcmp)
 	}
 }
 
@@ -1234,7 +1236,7 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 		}
 
 		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
-		logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", target.SourcePrefix, target.DestPrefix, target.RewriteTo, target.PortRange)
+		logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v disableIcmp: %v", target.SourcePrefix, target.DestPrefix, target.RewriteTo, target.PortRange, target.DisableIcmp)
 	}
 }
 
