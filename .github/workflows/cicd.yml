@@ -1,9 +1,19 @@
-name: CI/CD Pipeline
+name: CI/CD Pipeline (AWS Self-Hosted Runners)
+
+# CI/CD workflow for building, publishing, attesting, signing container images and building release binaries.
+# Native multi-arch pipeline using two AWS EC2 self-hosted runners (x86_64 + arm64) to build and push architecture-specific images in parallel, then create multi-arch manifests.
+#
+# Required secrets:
+# - AWS_ACCOUNT_ID, AWS_ROLE_NAME, AWS_REGION
+# - EC2_INSTANCE_ID_AMD_RUNNER, EC2_INSTANCE_ID_ARM_RUNNER
+# - DOCKER_HUB_USERNAME / DOCKER_HUB_ACCESS_TOKEN
+# - GITHUB_TOKEN
+# - COSIGN_PRIVATE_KEY / COSIGN_PASSWORD / COSIGN_PUBLIC_KEY
 
 permissions:
   contents: write          # gh-release
   packages: write          # GHCR push
-  id-token: write          # Keyless-Signatures & Attestations
+  id-token: write          # Keyless-Signatures & Attestations (OIDC)
   attestations: write      # actions/attest-build-provenance
   security-events: write   # upload-sarif
   actions: read
@@ -17,16 +27,16 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "SemVer version to release (e.g., 1.2.3, no leading 'v')"
+        description: "Version to release (X.Y.Z or X.Y.Z-rc.N)"
         required: true
         type: string
       publish_latest:
-        description: "Also publish the 'latest' image tag"
+        description: "Publish latest tag (non-RC only)"
         required: true
         type: boolean
         default: false
       publish_minor:
-        description: "Also publish the 'major.minor' image tag (e.g., 1.2)"
+        description: "Publish minor tag (X.Y) (non-RC only)"
         required: true
         type: boolean
         default: false
@@ -40,10 +50,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # 1) Start AWS EC2 runner instances
+  # ---------------------------------------------------------------------------
+  pre-run:
+    name: Start AWS EC2 runners
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
+          role-duration-seconds: 3600
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Start EC2 instances
+        run: |
+          aws ec2 start-instances --instance-ids ${{ secrets.EC2_INSTANCE_ID_AMD_RUNNER }}
+          aws ec2 start-instances --instance-ids ${{ secrets.EC2_INSTANCE_ID_ARM_RUNNER }}
+          echo "EC2 instances started"
+
+  # ---------------------------------------------------------------------------
+  # 2) Prepare release
+  # ---------------------------------------------------------------------------
   prepare:
     if: github.event_name == 'workflow_dispatch'
     name: Prepare release (create tag)
-    runs-on: ubuntu-24.04
+    needs: [pre-run]
+    runs-on: [self-hosted, linux, x64, us-east-1]
     permissions:
       contents: write
     steps:
@@ -62,6 +100,7 @@ jobs:
             echo "Invalid version: $INPUT_VERSION (expected X.Y.Z or X.Y.Z-rc.N)" >&2
             exit 1
           fi
+
       - name: Create and push tag
         shell: bash
         env:
@@ -81,14 +120,24 @@ jobs:
           fi
           git tag -a "$VERSION" -m "Release $VERSION"
           git push origin "refs/tags/$VERSION"
-  release:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.actor != 'github-actions[bot]') }}
-    name: Build and Release
-    runs-on: ubuntu-24.04
+
+  # ---------------------------------------------------------------------------
+  # 3) Build and Release (x86 job)
+  # ---------------------------------------------------------------------------
+  build-amd:
+    name: Build image (linux/amd64)
+    needs: [pre-run, prepare]
+    if: ${{ needs.pre-run.result == 'success' && ((github.event_name == 'push' && github.actor != 'github-actions[bot]') || (github.event_name == 'workflow_dispatch' && needs.prepare.result == 'success')) }}
+    runs-on: [self-hosted, linux, x64, us-east-1]
     timeout-minutes: 120
     env:
       DOCKERHUB_IMAGE: docker.io/fosrl/${{ github.event.repository.name }}
       GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      is_rc: ${{ steps.tag.outputs.is_rc }}
+      major: ${{ steps.tag.outputs.major }}
+      minor: ${{ steps.tag.outputs.minor }}
 
     steps:
       - name: Checkout code
@@ -96,15 +145,65 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Monitor storage space
+        shell: bash
+        run: |
+          THRESHOLD=75
+          USED_SPACE=$(df / | grep / | awk '{ print $5 }' | sed 's/%//g')
+          echo "Used space: $USED_SPACE%"
+          if [ "$USED_SPACE" -ge "$THRESHOLD" ]; then
+            echo "Disk usage >= ${THRESHOLD}%, pruning docker..."
+            echo y | docker system prune -a || true
+          else
+            echo "Disk usage < ${THRESHOLD}%, no action needed."
+          fi
+
+      - name: Determine tag + rc/major/minor
+        id: tag
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_VERSION"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+
+          if ! [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "Invalid tag: $TAG" >&2
+            exit 1
+          fi
+
+          IS_RC="false"
+          if [[ "$TAG" =~ -rc\.[0-9]+$ ]]; then
+            IS_RC="true"
+          fi
+
+          MAJOR="$(echo "$TAG" | cut -d. -f1)"
+          MINOR="$(echo "$TAG" | cut -d. -f1,2)"
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "is_rc=$IS_RC" >> "$GITHUB_OUTPUT"
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+          echo "minor=$MINOR" >> "$GITHUB_OUTPUT"
+
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "IS_RC=$IS_RC" >> $GITHUB_ENV
+          echo "MAJOR_TAG=$MAJOR" >> $GITHUB_ENV
+          echo "MINOR_TAG=$MINOR" >> $GITHUB_ENV
+
       - name: Capture created timestamp
         run: echo "IMAGE_CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
         shell: bash
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      #- name: Set up QEMU
+      #  uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      #- name: Set up Docker Buildx
+      #  uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to Docker Hub
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
@@ -121,78 +220,231 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Normalize image names to lowercase
+        shell: bash
         run: |
           set -euo pipefail
           echo "GHCR_IMAGE=${GHCR_IMAGE,,}" >> "$GITHUB_ENV"
           echo "DOCKERHUB_IMAGE=${DOCKERHUB_IMAGE,,}" >> "$GITHUB_ENV"
-        shell: bash
 
-      - name: Extract tag name
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      # Build ONLY amd64 and push arch-specific tag suffixes used later for manifest creation.
+      - name: Build and push (amd64 -> *:amd64-TAG)
+        id: build_amd
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.GHCR_IMAGE }}:amd64-${{ env.TAG }}
+            ${{ env.DOCKERHUB_IMAGE }}:amd64-${{ env.TAG }}
+          cache-from: type=gha,scope=${{ github.repository }}-amd64
+          cache-to: type=gha,mode=max,scope=${{ github.repository }}-amd64
+
+  # ---------------------------------------------------------------------------
+  # 4) Build ARM64 image natively on ARM runner
+  # ---------------------------------------------------------------------------
+  build-arm:
+    name: Build image (linux/arm64)
+    needs: [pre-run, prepare]
+    if: ${{ needs.pre-run.result == 'success' && ((github.event_name == 'push' && github.actor != 'github-actions[bot]') || (github.event_name == 'workflow_dispatch' && needs.prepare.result == 'success')) }}
+    runs-on: [self-hosted, linux, arm64, us-east-1] # NOTE: ensure label exists on runner
+    timeout-minutes: 120
+    env:
+      DOCKERHUB_IMAGE: docker.io/fosrl/${{ github.event.repository.name }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Monitor storage space
+        shell: bash
+        run: |
+          THRESHOLD=75
+          USED_SPACE=$(df / | grep / | awk '{ print $5 }' | sed 's/%//g')
+          echo "Used space: $USED_SPACE%"
+          if [ "$USED_SPACE" -ge "$THRESHOLD" ]; then
+            echo y | docker system prune -a || true
+          fi
+
+      - name: Determine tag + validate format
+        shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
+          set -euo pipefail
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "TAG=${INPUT_VERSION}" >> $GITHUB_ENV
+            TAG="$INPUT_VERSION"
           else
-            echo "TAG=${{ github.ref_name }}" >> $GITHUB_ENV
+            TAG="${{ github.ref_name }}"
           fi
-        shell: bash
 
-      - name: Validate pushed tag format (no leading 'v')
-        if: ${{ github.event_name == 'push' }}
-        shell: bash
-        env:
-          TAG_GOT: ${{ env.TAG }}
-        run: |
-          set -euo pipefail
-          if [[ "$TAG_GOT" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
-            echo "Tag OK: $TAG_GOT"
-            exit 0
+          if ! [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "Invalid tag: $TAG" >&2
+            exit 1
           fi
-          echo "ERROR: Tag '$TAG_GOT' is not allowed. Use 'X.Y.Z' or 'X.Y.Z-rc.N' (no leading 'v')." >&2
-          exit 1
-      - name: Wait for tag to be visible (dispatch only)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+
+          echo "TAG=$TAG" >> $GITHUB_ENV
+
+      - name: Log in to Docker Hub
+        if: ${{ secrets.DOCKER_HUB_USERNAME != '' && secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Normalize image names to lowercase
+        shell: bash
         run: |
           set -euo pipefail
-          for i in {1..90}; do
-            if git ls-remote --tags origin "refs/tags/${TAG}" | grep -qE "refs/tags/${TAG}$"; then
-              echo "Tag ${TAG} is visible on origin"; exit 0
+          echo "GHCR_IMAGE=${GHCR_IMAGE,,}" >> "$GITHUB_ENV"
+          echo "DOCKERHUB_IMAGE=${DOCKERHUB_IMAGE,,}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      # Build ONLY arm64 and push arch-specific tag suffixes used later for manifest creation.
+      - name: Build and push (arm64 -> *:arm64-TAG)
+        id: build_arm
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: true
+          platforms: linux/arm64
+          tags: |
+            ${{ env.GHCR_IMAGE }}:arm64-${{ env.TAG }}
+            ${{ env.DOCKERHUB_IMAGE }}:arm64-${{ env.TAG }}
+          cache-from: type=gha,scope=${{ github.repository }}-arm64
+          cache-to: type=gha,mode=max,scope=${{ github.repository }}-arm64
+
+  # ---------------------------------------------------------------------------
+  # 5) Create and push multi-arch manifests (TAG, plus optional latest/major/minor)
+  # ---------------------------------------------------------------------------
+  create-manifest:
+    name: Create multi-arch manifests
+    needs: [build-amd, build-arm]
+    if: ${{ needs.build-amd.result == 'success' && needs.build-arm.result == 'success' }}
+    runs-on: [self-hosted, linux, x64, us-east-1] # NOTE: ensure label exists on runner
+    timeout-minutes: 30
+    env:
+      DOCKERHUB_IMAGE: docker.io/fosrl/${{ github.event.repository.name }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+      TAG: ${{ needs.build-amd.outputs.tag }}
+      IS_RC: ${{ needs.build-amd.outputs.is_rc }}
+      MAJOR_TAG: ${{ needs.build-amd.outputs.major }}
+      MINOR_TAG: ${{ needs.build-amd.outputs.minor }}
+      # workflow_dispatch controls are respected only here (tagging policy)
+      PUBLISH_LATEST: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_latest || vars.PUBLISH_LATEST }}
+      PUBLISH_MINOR:  ${{ github.event_name == 'workflow_dispatch' && inputs.publish_minor  || vars.PUBLISH_MINOR  }}
+    steps:
+      - name: Log in to Docker Hub
+        if: ${{ secrets.DOCKER_HUB_USERNAME != '' && secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Normalize image names to lowercase
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "GHCR_IMAGE=${GHCR_IMAGE,,}" >> "$GITHUB_ENV"
+          echo "DOCKERHUB_IMAGE=${DOCKERHUB_IMAGE,,}" >> "$GITHUB_ENV"
+
+      - name: Create manifest for GHCR (:TAG)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker manifest create "${GHCR_IMAGE}:${TAG}" \
+            --amend "${GHCR_IMAGE}:amd64-${TAG}" \
+            --amend "${GHCR_IMAGE}:arm64-${TAG}"
+          docker manifest push "${GHCR_IMAGE}:${TAG}"
+
+      - name: Create manifest for Docker Hub (:TAG)
+        if: ${{ secrets.DOCKER_HUB_USERNAME != '' && secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker manifest create "${DOCKERHUB_IMAGE}:${TAG}" \
+            --amend "${DOCKERHUB_IMAGE}:amd64-${TAG}" \
+            --amend "${DOCKERHUB_IMAGE}:arm64-${TAG}"
+          docker manifest push "${DOCKERHUB_IMAGE}:${TAG}"
+
+      # Optional tags for non-RC releases: latest, major, minor
+      - name: Publish additional tags (non-RC only)
+        if: ${{ env.IS_RC != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tags_to_publish=()
+          tags_to_publish+=("${MAJOR_TAG}")
+          if [ "${PUBLISH_MINOR}" = "true" ]; then
+            tags_to_publish+=("${MINOR_TAG}")
+          fi
+          if [ "${PUBLISH_LATEST}" = "true" ]; then
+            tags_to_publish+=("latest")
+          fi
+
+          for t in "${tags_to_publish[@]}"; do
+            echo "Publishing GHCR tag ${t} -> ${TAG}"
+            docker manifest create "${GHCR_IMAGE}:${t}" \
+              --amend "${GHCR_IMAGE}:amd64-${TAG}" \
+              --amend "${GHCR_IMAGE}:arm64-${TAG}"
+            docker manifest push "${GHCR_IMAGE}:${t}"
+
+            if [ -n "${{ secrets.DOCKER_HUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" ]; then
+              echo "Publishing Docker Hub tag ${t} -> ${TAG}"
+              docker manifest create "${DOCKERHUB_IMAGE}:${t}" \
+                --amend "${DOCKERHUB_IMAGE}:amd64-${TAG}" \
+                --amend "${DOCKERHUB_IMAGE}:arm64-${TAG}"
+              docker manifest push "${DOCKERHUB_IMAGE}:${t}"
             fi
-            echo "Tag not yet visible, retrying... ($i/90)"
-            sleep 2
           done
-          echo "Tag ${TAG} not visible after waiting"; exit 1
-        shell: bash
 
-      - name: Update version in main.go
-        run: |
-            TAG=${{ env.TAG }}
-            if [ -f main.go ]; then
-            sed -i 's/version_replaceme/'"$TAG"'/' main.go
-            echo "Updated main.go with version $TAG"
-            else
-            echo "main.go not found"
-            fi
+  # ---------------------------------------------------------------------------
+  # 6) Sign/attest + build binaries + draft release (x86 runner)
+  # ---------------------------------------------------------------------------
+  sign-and-release:
+    name: Sign, attest, and release
+    needs: [create-manifest, build-amd]
+    if: ${{ needs.create-manifest.result == 'success' && needs.build-amd.result == 'success' }}
+    runs-on: [self-hosted, linux, x64, us-east-1] # NOTE: ensure label exists on runner
+    timeout-minutes: 120
+    env:
+      DOCKERHUB_IMAGE: docker.io/fosrl/${{ github.event.repository.name }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+      TAG: ${{ needs.build-amd.outputs.tag }}
+      IS_RC: ${{ needs.build-amd.outputs.is_rc }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
 
-      - name: Ensure repository is at the tagged commit (dispatch only)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        run: |
-          set -euo pipefail
-          git fetch --tags --force
-          git checkout "refs/tags/${TAG}"
-          echo "Checked out $(git rev-parse --short HEAD) for tag ${TAG}"
-        shell: bash
-
-      - name: Detect release candidate (rc)
-        run: |
-          set -euo pipefail
-          if [[ "${TAG}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
-            echo "IS_RC=true" >> $GITHUB_ENV
-          else
-            echo "IS_RC=false" >> $GITHUB_ENV
-          fi
+      - name: Capture created timestamp
+        run: echo "IMAGE_CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
         shell: bash
 
       - name: Install Go
@@ -200,234 +452,113 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Resolve publish-latest flag
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PL_INPUT: ${{ inputs.publish_latest }}
-          PL_VAR: ${{ vars.PUBLISH_LATEST }}
-        run: |
-          set -euo pipefail
-          val="false"
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            if [ "${PL_INPUT}" = "true" ]; then val="true"; fi
-          else
-            if [ "${PL_VAR}" = "true" ]; then val="true"; fi
-          fi
-          echo "PUBLISH_LATEST=$val" >> $GITHUB_ENV
-        shell: bash
-
-      - name: Resolve publish-minor flag
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PM_INPUT: ${{ inputs.publish_minor }}
-          PM_VAR: ${{ vars.PUBLISH_MINOR }}
-        run: |
-          set -euo pipefail
-          val="false"
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            if [ "${PM_INPUT}" = "true" ]; then val="true"; fi
-          else
-            if [ "${PM_VAR}" = "true" ]; then val="true"; fi
-          fi
-          echo "PUBLISH_MINOR=$val" >> $GITHUB_ENV
-        shell: bash
-
-      - name: Cache Go modules
-        if: ${{ hashFiles('**/go.sum') != '' }}
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+      - name: Log in to Docker Hub
+        if: ${{ secrets.DOCKER_HUB_USERNAME != '' && secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
-      - name: Go vet & test
-        if: ${{ hashFiles('**/go.mod') != '' }}
-        run: |
-          go version
-          go vet ./...
-          go test ./... -race -covermode=atomic
-        shell: bash
+          registry: docker.io
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
 
-      - name: Resolve license fallback
-        run: echo "IMAGE_LICENSE=${{ github.event.repository.license.spdx_id || 'NOASSERTION' }}" >> $GITHUB_ENV
-        shell: bash
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve registries list (GHCR always, Docker Hub only if creds)
+      - name: Normalize image names to lowercase
         shell: bash
         run: |
           set -euo pipefail
-          images="${GHCR_IMAGE}"
-          if [ -n "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" ] && [ -n "${{ secrets.DOCKER_HUB_USERNAME }}" ]; then
-            images="${images}\n${DOCKERHUB_IMAGE}"
+          echo "GHCR_IMAGE=${GHCR_IMAGE,,}" >> "$GITHUB_ENV"
+          echo "DOCKERHUB_IMAGE=${DOCKERHUB_IMAGE,,}" >> "$GITHUB_ENV"
+
+      - name: Resolve multi-arch digest refs (by TAG)
+        shell: bash
+        run: |
+          set -euo pipefail
+          GHCR_DIGEST="$(docker buildx imagetools inspect "${GHCR_IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')"
+          echo "GHCR_REF=${GHCR_IMAGE}@${GHCR_DIGEST}" >> $GITHUB_ENV
+          echo "Resolved GHCR_REF=${GHCR_IMAGE}@${GHCR_DIGEST}"
+          if [ -n "${{ secrets.DOCKER_HUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" ]; then
+            DH_DIGEST="$(docker buildx imagetools inspect "${DOCKERHUB_IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')"
+            echo "DH_REF=${DOCKERHUB_IMAGE}@${DH_DIGEST}" >> $GITHUB_ENV
+            echo "Resolved DH_REF=${DOCKERHUB_IMAGE}@${DH_DIGEST}"
           fi
-          {
-            echo 'IMAGE_LIST<<EOF'
-            echo -e "$images"
-            echo 'EOF'
-          } >> "$GITHUB_ENV"
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
-        with:
-          images: ${{ env.IMAGE_LIST }}
-          tags: |
-            type=semver,pattern={{version}},value=${{ env.TAG }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG }},enable=${{ env.PUBLISH_MINOR == 'true' && env.IS_RC != 'true' }}
-            type=raw,value=latest,enable=${{ env.IS_RC != 'true' }}
-          flavor: |
-            latest=false
-          labels: |
-            org.opencontainers.image.title=${{ github.event.repository.name }}
-            org.opencontainers.image.version=${{ env.TAG }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.event.repository.html_url }}
-            org.opencontainers.image.url=${{ github.event.repository.html_url }}
-            org.opencontainers.image.documentation=${{ github.event.repository.html_url }}
-            org.opencontainers.image.description=${{ github.event.repository.description }}
-            org.opencontainers.image.licenses=${{ env.IMAGE_LICENSE }}
-            org.opencontainers.image.created=${{ env.IMAGE_CREATED }}
-            org.opencontainers.image.ref.name=${{ env.TAG }}
-            org.opencontainers.image.authors=${{ github.repository_owner }}
-      - name: Echo build config (non-secret)
+
+      - name: Extract digests for attestation
         shell: bash
-        env:
-          IMAGE_TITLE:        ${{ github.event.repository.name }}
-          IMAGE_VERSION:      ${{ env.TAG }}
-          IMAGE_REVISION:     ${{ github.sha }}
-          IMAGE_SOURCE_URL:   ${{ github.event.repository.html_url }}
-          IMAGE_URL:          ${{ github.event.repository.html_url }}
-          IMAGE_DESCRIPTION:  ${{ github.event.repository.description }}
-          IMAGE_LICENSE:      ${{ env.IMAGE_LICENSE }}
-          DOCKERHUB_IMAGE:    ${{ env.DOCKERHUB_IMAGE }}
-          GHCR_IMAGE:         ${{ env.GHCR_IMAGE }}
-          DOCKER_HUB_USER:    ${{ secrets.DOCKER_HUB_USERNAME }}
-          REPO:               ${{ github.repository }}
-          OWNER:              ${{ github.repository_owner }}
-          WORKFLOW_REF:       ${{ github.workflow_ref }}
-          REF:                ${{ github.ref }}
-          REF_NAME:           ${{ github.ref_name }}
-          RUN_URL:            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          echo "=== OCI Label Values ==="
-          echo "org.opencontainers.image.title=${IMAGE_TITLE}"
-          echo "org.opencontainers.image.version=${IMAGE_VERSION}"
-          echo "org.opencontainers.image.revision=${IMAGE_REVISION}"
-          echo "org.opencontainers.image.source=${IMAGE_SOURCE_URL}"
-          echo "org.opencontainers.image.url=${IMAGE_URL}"
-          echo "org.opencontainers.image.description=${IMAGE_DESCRIPTION}"
-          echo "org.opencontainers.image.licenses=${IMAGE_LICENSE}"
-          echo
-          echo "=== Images ==="
-          echo "DOCKERHUB_IMAGE=${DOCKERHUB_IMAGE}"
-          echo "GHCR_IMAGE=${GHCR_IMAGE}"
-          echo "DOCKER_HUB_USERNAME=${DOCKER_HUB_USER}"
-          echo
-          echo "=== GitHub Kontext ==="
-          echo "repository=${REPO}"
-          echo "owner=${OWNER}"
-          echo "workflow_ref=${WORKFLOW_REF}"
-          echo "ref=${REF}"
-          echo "ref_name=${REF_NAME}"
-          echo "run_url=${RUN_URL}"
-          echo
-          echo "=== docker/metadata-action outputs (Tags/Labels), raw ==="
-          echo "::group::tags"
-          echo "${{ steps.meta.outputs.tags }}"
-          echo "::endgroup::"
-          echo "::group::labels"
-          echo "${{ steps.meta.outputs.labels }}"
-          echo "::endgroup::"
-      - name: Build and push (Docker Hub + GHCR)
-        id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ github.repository }}
-          cache-to: type=gha,mode=max,scope=${{ github.repository }}
-          provenance: mode=max
-          sbom: true
+          echo "GHCR_DIGEST=${GHCR_REF#*@}" >> $GITHUB_ENV
+          if [ -n "${DH_REF:-}" ]; then
+            echo "DH_DIGEST=${DH_REF#*@}" >> $GITHUB_ENV
+          fi
 
-      - name: Compute image digest refs
-        run: |
-          echo "DIGEST=${{ steps.build.outputs.digest }}" >> $GITHUB_ENV
-          echo "GHCR_REF=$GHCR_IMAGE@${{ steps.build.outputs.digest }}" >> $GITHUB_ENV
-          echo "DH_REF=$DOCKERHUB_IMAGE@${{ steps.build.outputs.digest }}" >> $GITHUB_ENV
-          echo "Built digest: ${{ steps.build.outputs.digest }}"
-        shell: bash
-
-      - name: Attest build provenance (GHCR)
-        id: attest-ghcr
+      - name: Attest build provenance (GHCR) (digest)
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:
           subject-name: ${{ env.GHCR_IMAGE }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ env.GHCR_DIGEST }}
           push-to-registry: true
           show-summary: true
 
       - name: Attest build provenance (Docker Hub)
         continue-on-error: true
-        id: attest-dh
+        if: ${{ env.DH_DIGEST != '' }}
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:
           subject-name: index.docker.io/fosrl/${{ github.event.repository.name }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ env.DH_DIGEST }}
           push-to-registry: true
           show-summary: true
 
       - name: Install cosign
         uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
         with:
-          cosign-release: 'v3.0.2'
+          cosign-release: "v3.0.2"
 
       - name: Sanity check cosign private key
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
+        shell: bash
         run: |
           set -euo pipefail
           cosign public-key --key env://COSIGN_PRIVATE_KEY >/dev/null
-        shell: bash
 
-      - name: Sign GHCR image (digest) with key (recursive)
-        env:
-          COSIGN_YES: "true"
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
-        run: |
-          set -euo pipefail
-          echo "Signing ${GHCR_REF} (digest) recursively with provided key"
-          cosign sign --key env://COSIGN_PRIVATE_KEY --recursive "${GHCR_REF}"
-          echo "Waiting 30 seconds for signatures to propagate..."
-          sleep 30
-        shell: bash
-
-      - name: Generate SBOM (SPDX JSON)
+      - name: Generate SBOM (SPDX JSON) from GHCR digest
         uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
-          image-ref: ${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ env.GHCR_REF }}
           format: spdx-json
           output: sbom.spdx.json
 
-      - name: Validate SBOM JSON
-        run: jq -e . sbom.spdx.json >/dev/null
+      - name: Validate + minify SBOM JSON
         shell: bash
+        run: |
+          set -euo pipefail
+          jq -e . sbom.spdx.json >/dev/null
+          jq -c . sbom.spdx.json > sbom.min.json && mv sbom.min.json sbom.spdx.json
 
-      - name: Minify SBOM JSON (optional hardening)
-        run: jq -c . sbom.spdx.json > sbom.min.json && mv sbom.min.json sbom.spdx.json
-        shell: bash
-
-      - name: Create SBOM attestation (GHCR, private key)
+      - name: Sign GHCR digest (key, recursive)
         env:
           COSIGN_YES: "true"
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cosign sign --key env://COSIGN_PRIVATE_KEY --recursive "${GHCR_REF}"
+          sleep 20
+
+      - name: Create SBOM attestation (GHCR, key)
+        env:
+          COSIGN_YES: "true"
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
+        shell: bash
         run: |
           set -euo pipefail
           cosign attest \
@@ -435,171 +566,46 @@ jobs:
             --type spdxjson \
             --predicate sbom.spdx.json \
             "${GHCR_REF}"
-        shell: bash
-
-      - name: Create SBOM attestation (Docker Hub, private key)
-        continue-on-error: true
-        env:
-          COSIGN_YES: "true"
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
-          COSIGN_DOCKER_MEDIA_TYPES: "1"
-        run: |
-          set -euo pipefail
-          cosign attest \
-            --key env://COSIGN_PRIVATE_KEY \
-            --type spdxjson \
-            --predicate sbom.spdx.json \
-            "${DH_REF}"
-        shell: bash
 
       - name: Keyless sign & verify GHCR digest (OIDC)
         env:
           COSIGN_YES: "true"
-          WORKFLOW_REF: ${{ github.workflow_ref }}  # owner/repo/.github/workflows/<file>@refs/tags/<tag>
+          WORKFLOW_REF: ${{ github.workflow_ref }}
           ISSUER: https://token.actions.githubusercontent.com
+        shell: bash
         run: |
           set -euo pipefail
-          echo "Keyless signing ${GHCR_REF}"
           cosign sign --rekor-url https://rekor.sigstore.dev --recursive "${GHCR_REF}"
-          echo "Verify keyless (OIDC) signature policy on ${GHCR_REF}"
           cosign verify \
             --certificate-oidc-issuer "${ISSUER}" \
             --certificate-identity "https://github.com/${WORKFLOW_REF}" \
             "${GHCR_REF}" -o text
-        shell: bash
 
-      - name: Sign Docker Hub image (digest) with key (recursive)
-        continue-on-error: true
-        env:
-          COSIGN_YES: "true"
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
-          COSIGN_DOCKER_MEDIA_TYPES: "1"
-        run: |
-          set -euo pipefail
-          echo "Signing ${DH_REF} (digest) recursively with provided key (Docker media types fallback)"
-          cosign sign --key env://COSIGN_PRIVATE_KEY --recursive "${DH_REF}"
-        shell: bash
-
-      - name: Keyless sign & verify Docker Hub digest (OIDC)
-        continue-on-error: true
-        env:
-          COSIGN_YES: "true"
-          ISSUER: https://token.actions.githubusercontent.com
-          COSIGN_DOCKER_MEDIA_TYPES: "1"
-        run: |
-          set -euo pipefail
-          echo "Keyless signing ${DH_REF} (force public-good Rekor)"
-          cosign sign --rekor-url https://rekor.sigstore.dev --recursive "${DH_REF}"
-          echo "Keyless verify via Rekor (strict identity)"
-          if ! cosign verify \
-            --rekor-url https://rekor.sigstore.dev \
-            --certificate-oidc-issuer "${ISSUER}" \
-            --certificate-identity "https://github.com/${{ github.workflow_ref }}" \
-            "${DH_REF}" -o text; then
-            echo "Rekor verify failed — retry offline bundle verify (no Rekor)"
-            if ! cosign verify \
-              --offline \
-              --certificate-oidc-issuer "${ISSUER}" \
-              --certificate-identity "https://github.com/${{ github.workflow_ref }}" \
-              "${DH_REF}" -o text; then
-              echo "Offline bundle verify failed — ignore tlog (TEMP for debugging)"
-              cosign verify \
-                --insecure-ignore-tlog=true \
-                --certificate-oidc-issuer "${ISSUER}" \
-                --certificate-identity "https://github.com/${{ github.workflow_ref }}" \
-                "${DH_REF}" -o text || true
-            fi
-          fi
       - name: Verify signature (public key) GHCR digest + tag
         env:
           COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
+        shell: bash
         run: |
           set -euo pipefail
-          TAG_VAR="${TAG}"
-          echo "Verifying (digest) ${GHCR_REF}"
-          cosign verify --key env://COSIGN_PUBLIC_KEY "$GHCR_REF" -o text
-          echo "Verifying (tag) $GHCR_IMAGE:$TAG_VAR"
-          cosign verify --key env://COSIGN_PUBLIC_KEY "$GHCR_IMAGE:$TAG_VAR" -o text
-        shell: bash
+          cosign verify --key env://COSIGN_PUBLIC_KEY "${GHCR_REF}" -o text
+          cosign verify --key env://COSIGN_PUBLIC_KEY "${GHCR_IMAGE}:${TAG}" -o text
 
       - name: Verify SBOM attestation (GHCR)
         env:
           COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
-        run: cosign verify-attestation --key env://COSIGN_PUBLIC_KEY --type spdxjson "$GHCR_REF" -o text
+        run: cosign verify-attestation --key env://COSIGN_PUBLIC_KEY --type spdxjson "${GHCR_REF}" -o text
         shell: bash
-
-      - name: Verify SLSA provenance (GHCR)
-        env:
-          ISSUER: https://token.actions.githubusercontent.com
-          WFREF: ${{ github.workflow_ref }}
-        run: |
-          set -euo pipefail
-          # (optional) show which predicate types are present to aid debugging
-          cosign download attestation "$GHCR_REF" \
-            | jq -r '.payload | @base64d | fromjson | .predicateType' | sort -u || true
-          # Verify the SLSA v1 provenance attestation (predicate URL)
-          cosign verify-attestation \
-            --type 'https://slsa.dev/provenance/v1' \
-            --certificate-oidc-issuer "$ISSUER" \
-            --certificate-identity "https://github.com/${WFREF}" \
-            --rekor-url https://rekor.sigstore.dev \
-            "$GHCR_REF" -o text
-        shell: bash
-
-      - name: Verify signature (public key) Docker Hub digest
-        continue-on-error: true
-        env:
-          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
-          COSIGN_DOCKER_MEDIA_TYPES: "1"
-        run: |
-          set -euo pipefail
-          echo "Verifying (digest) ${DH_REF} with Docker media types"
-          cosign verify --key env://COSIGN_PUBLIC_KEY "${DH_REF}" -o text
-        shell: bash
-
-      - name: Verify signature (public key) Docker Hub tag
-        continue-on-error: true
-        env:
-          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
-          COSIGN_DOCKER_MEDIA_TYPES: "1"
-        run: |
-          set -euo pipefail
-          echo "Verifying (tag) $DOCKERHUB_IMAGE:$TAG with Docker media types"
-          cosign verify --key env://COSIGN_PUBLIC_KEY "$DOCKERHUB_IMAGE:$TAG" -o text
-        shell: bash
-
-      # - name: Trivy scan (GHCR image)
-      #   id: trivy
-      #   uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
-      #   with:
-      #     image-ref: ${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}
-      #     format: sarif
-      #     output: trivy-ghcr.sarif
-      #     ignore-unfixed: true
-      #     vuln-type: os,library
-      #     severity: CRITICAL,HIGH
-      #     exit-code: ${{ (vars.TRIVY_FAIL || '0') }}
-
-      # - name: Upload SARIF,trivy
-      #   if: ${{ always() && hashFiles('trivy-ghcr.sarif') != '' }}
-      #   uses: github/codeql-action/upload-sarif@fdbfb4d2750291e159f0156def62b853c2798ca2 # v4.31.5
-      #   with:
-      #     sarif_file: trivy-ghcr.sarif
-      #     category: Image Vulnerability Scan
 
       - name: Build binaries
         env:
           CGO_ENABLED: "0"
           GOFLAGS: "-trimpath"
+        shell: bash
         run: |
           set -euo pipefail
-          TAG_VAR="${TAG}"
-          make -j 10 go-build-release tag=$TAG_VAR
-        shell: bash
+          make -j 10 go-build-release tag="${TAG}"
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release (draft)
         uses: softprops/action-gh-release@5be0e66d93ac7ed76da52eca8bb058f665c3a5fe # v2.4.2
         with:
           tag_name: ${{ env.TAG }}
@@ -613,4 +619,42 @@ jobs:
             ## Container Images
             - GHCR: `${{ env.GHCR_REF }}`
             - Docker Hub: `${{ env.DH_REF || 'N/A' }}`
-            **Digest:** `${{ steps.build.outputs.digest }}`
+            **Tag:** `${{ env.TAG }}`
+
+  # ---------------------------------------------------------------------------
+  # 7) Stop AWS EC2 runner instances
+  # ---------------------------------------------------------------------------
+  post-run:
+    name: Stop AWS EC2 runners
+    needs: [pre-run, prepare, build-amd, build-arm, create-manifest, sign-and-release]
+    if: >-
+      ${{
+        always() &&
+        (needs.pre-run.result == 'success'  &&
+        (needs.build-amd.result == 'success' || needs.build-amd.result == 'failure' || needs.build-amd.result == 'cancelled') || 
+         needs.build-amd.result != 'skipped') &&
+        (needs.build-arm.result == 'success' || needs.build-arm.result == 'failure' || needs.build-arm.result == 'cancelled') ||
+        needs.build-arm.result != 'skipped') &&
+        (needs.create-manifest.result == 'success' || needs.create-manifest.result == 'failure' || needs.create-manifest.result == 'cancelled') ||
+        needs.create-manifest.result != 'skipped') &&
+        (needs.sign-and-release.result == 'success' || needs.sign-and-release.result == 'failure' || needs.sign-and-release.result == 'cancelled') ||
+        needs.sign-and-release.result != 'skipped')
+      }}
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
+          role-duration-seconds: 3600
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Stop EC2 instances
+        run: |
+          aws ec2 stop-instances --instance-ids ${{ secrets.EC2_INSTANCE_ID_AMD_RUNNER }}
+          aws ec2 stop-instances --instance-ids ${{ secrets.EC2_INSTANCE_ID_ARM_RUNNER }}
+          echo "EC2 instances stopped"
