@@ -112,6 +112,8 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 		return nil, fmt.Errorf("failed to generate private key: %v", err)
 	}
 
+	logger.Debug("+++++++++++++++++++++++++++++++= the port is %d", port)
+	
 	if port == 0 {
 		// Find an available port
 		portRandom, err := util.FindAvailableUDPPort(49152, 65535)
