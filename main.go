@@ -347,15 +347,6 @@ func runNewtMain(ctx context.Context) {
 		pingTimeout = 5 * time.Second
 	}
 
-	if portStr != "" {
-		portInt, err := strconv.Atoi(portStr)
-		if err != nil {
-			logger.Warn("Failed to parse PORT, choosing a random port")
-		} else {
-			port = uint16(portInt)
-		}
-	}
-
 	if dockerEnforceNetworkValidation == "" {
 		flag.StringVar(&dockerEnforceNetworkValidation, "docker-enforce-network-validation", "false", "Enforce validation of container on newt network (true or false)")
 	}
@@ -439,6 +430,15 @@ func runNewtMain(ctx context.Context) {
 	// Merge command line CA flags with environment variable CAs
 	if len(tlsClientCAsFlag) > 0 {
 		tlsClientCAs = append(tlsClientCAs, tlsClientCAsFlag...)
+	}
+
+	if portStr != "" {
+		portInt, err := strconv.Atoi(portStr)
+		if err != nil {
+			logger.Warn("Failed to parse PORT, choosing a random port")
+		} else {
+			port = uint16(portInt)
+		}
 	}
 
 	if *version {
@@ -618,6 +618,8 @@ func runNewtMain(ctx context.Context) {
 	var connected bool
 	var wgData WgData
 	var dockerEventMonitor *docker.EventMonitor
+	
+	logger.Debug("++++++++++++++++++++++ the port is %d", port)
 
 	if !disableClients {
 		setupClients(client)

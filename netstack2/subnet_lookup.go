@@ -167,10 +167,13 @@ func (sl *SubnetLookup) Match(srcIP, dstIP netip.Addr, port uint16, proto tcpip.
 
 			// Step 3: Check each rule for ICMP and port restrictions
 			for _, rule := range rules {
-				// Check if ICMP is disabled for this rule
-				if rule.DisableIcmp && (proto == header.ICMPv4ProtocolNumber || proto == header.ICMPv6ProtocolNumber) {
-					// ICMP is disabled for this subnet
-					return nil
+				// Handle ICMP before port range check — ICMP has no ports
+				if proto == header.ICMPv4ProtocolNumber || proto == header.ICMPv6ProtocolNumber {
+					if rule.DisableIcmp {
+						return nil
+					}
+					// ICMP is allowed; port ranges don't apply to ICMP
+					return rule
 				}
 
 				// Check port restrictions
