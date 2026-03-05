@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -363,27 +364,62 @@ func parseTargetData(data interface{}) (TargetData, error) {
 	return targetData, nil
 }
 
+// parseTargetString parses a target string in the format "listenPort:host:targetPort"
+// It properly handles IPv6 addresses which must be in brackets: "listenPort:[ipv6]:targetPort"
+// Examples:
+//   - IPv4: "3001:192.168.1.1:80"
+//   - IPv6: "3001:[::1]:8080" or "3001:[fd70:1452:b736:4dd5:caca:7db9:c588:f5b3]:80"
+//
+// Returns listenPort, targetAddress (in host:port format suitable for net.Dial), and error
+func parseTargetString(target string) (int, string, error) {
+	// Find the first colon to extract the listen port
+	firstColon := strings.Index(target, ":")
+	if firstColon == -1 {
+		return 0, "", fmt.Errorf("invalid target format, no colon found: %s", target)
+	}
+
+	listenPortStr := target[:firstColon]
+	var listenPort int
+	_, err := fmt.Sscanf(listenPortStr, "%d", &listenPort)
+	if err != nil {
+		return 0, "", fmt.Errorf("invalid listen port: %s", listenPortStr)
+	}
+	if listenPort <= 0 || listenPort > 65535 {
+		return 0, "", fmt.Errorf("listen port out of range: %d", listenPort)
+	}
+
+	// The remainder is host:targetPort - use net.SplitHostPort which handles IPv6 brackets
+	remainder := target[firstColon+1:]
+	host, targetPort, err := net.SplitHostPort(remainder)
+	if err != nil {
+		return 0, "", fmt.Errorf("invalid host:port format '%s': %w", remainder, err)
+	}
+
+	// Reject empty host or target port
+	if host == "" {
+		return 0, "", fmt.Errorf("empty host in target: %s", target)
+	}
+	if targetPort == "" {
+		return 0, "", fmt.Errorf("empty target port in target: %s", target)
+	}
+
+	// Reconstruct the target address using JoinHostPort (handles IPv6 properly)
+	targetAddr := net.JoinHostPort(host, targetPort)
+
+	return listenPort, targetAddr, nil
+}
+
 func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto string, targetData TargetData) error {
 	for _, t := range targetData.Targets {
-		// Split the first number off of the target with : separator and use as the port
-		parts := strings.Split(t, ":")
-		if len(parts) != 3 {
-			logger.Info("Invalid target format: %s", t)
-			continue
-		}
-
-		// Get the port as an int
-		port := 0
-		_, err := fmt.Sscanf(parts[0], "%d", &port)
+		// Parse the target string, handling both IPv4 and IPv6 addresses
+		port, target, err := parseTargetString(t)
 		if err != nil {
-			logger.Info("Invalid port: %s", parts[0])
+			logger.Info("Invalid target format: %s (%v)", t, err)
 			continue
 		}
 
 		switch action {
 		case "add":
-			target := parts[1] + ":" + parts[2]
-
 			// Call updown script if provided
 			processedTarget := target
 			if updownScript != "" {
@@ -410,8 +446,6 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 		case "remove":
 			logger.Info("Removing target with port %d", port)
 
-			target := parts[1] + ":" + parts[2]
-
 			// Call updown script if provided
 			if updownScript != "" {
 				_, err := executeUpdownScript(action, proto, target)
@@ -420,7 +454,7 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 				}
 			}
 
-			err := pm.RemoveTarget(proto, tunnelIP, port)
+			err = pm.RemoveTarget(proto, tunnelIP, port)
 			if err != nil {
 				logger.Error("Failed to remove target: %v", err)
 				return err
