@@ -11,7 +11,7 @@ import (
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 )
 
-func configureWindows(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
+func configureWindows(interfaceName string, prefix netip.Prefix) error {
 	logger.Info("Configuring Windows interface: %s", interfaceName)
 
 	// Get the LUID for the interface
@@ -25,23 +25,6 @@ func configureWindows(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
 		return fmt.Errorf("failed to get LUID for interface %s: %v", interfaceName, err)
 	}
 
-	// Create the IP address prefix
-	maskBits, _ := ipNet.Mask.Size()
-
-	// Ensure we convert to the correct IP version (IPv4 vs IPv6)
-	var addr netip.Addr
-	if ip4 := ip.To4(); ip4 != nil {
-		// IPv4 address
-		addr, _ = netip.AddrFromSlice(ip4)
-	} else {
-		// IPv6 address
-		addr, _ = netip.AddrFromSlice(ip)
-	}
-	if !addr.IsValid() {
-		return fmt.Errorf("failed to convert IP address")
-	}
-	prefix := netip.PrefixFrom(addr, maskBits)
-
 	// Add the IP address to the interface
 	logger.Info("Adding IP address %s to interface %s", prefix.String(), interfaceName)
 	err = luid.AddIPAddress(prefix)
@@ -54,7 +37,7 @@ func configureWindows(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
 	// need this step anymore as far as I can tell.
 
 	// // Wait for the interface to be up and have the correct IP
-	// err = waitForInterfaceUp(interfaceName, ip, 30*time.Second)
+	// err = waitForInterfaceUp(interfaceName, prefix.Addr(), 30*time.Second)
 	// if err != nil {
 	// 	return fmt.Errorf("interface did not come up within timeout: %v", err)
 	// }

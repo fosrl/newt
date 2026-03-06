@@ -124,10 +124,8 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 	}
 
 	// Create shared UDP socket for both holepunch and WireGuard
-	localAddr := &net.UDPAddr{
-		Port: int(port),
-		IP:   net.IPv4zero,
-	}
+	addrPort := netip.AddrPortFrom(netip.IPv4Unspecified(), port)
+	localAddr := net.UDPAddrFromAddrPort(addrPort)
 
 	udpConn, err := net.ListenUDP("udp", localAddr)
 	if err != nil {
@@ -317,17 +315,15 @@ func (s *WireGuardService) StartDirectUDPRelay(tunnelIP string) error {
 
 	s.directRelayStop = make(chan struct{})
 
-	// Parse the tunnel IP
-	ip := net.ParseIP(tunnelIP)
-	if ip == nil {
+	// Parse the tunnel IP using netip
+	addr, err := netip.ParseAddr(tunnelIP)
+	if err != nil {
 		return fmt.Errorf("invalid tunnel IP: %s", tunnelIP)
 	}
 
 	// Listen on the main tunnel netstack for UDP packets destined for the clients' WireGuard port
-	listenAddr := &net.UDPAddr{
-		IP:   ip,
-		Port: int(s.Port),
-	}
+	addrPort := netip.AddrPortFrom(addr, s.Port)
+	listenAddr := net.UDPAddrFromAddrPort(addrPort)
 
 	// Use othertnet (main tunnel's netstack) to listen
 	listener, err := s.othertnet.ListenUDP(listenAddr)

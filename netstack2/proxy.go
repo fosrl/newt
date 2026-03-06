@@ -253,8 +253,7 @@ func (p *ProxyHandler) resolveRewriteAddress(rewriteTo string) (netip.Addr, erro
 
 	// Use the first resolved IP address
 	ip := ips[0]
-	if ip4 := ip.To4(); ip4 != nil {
-		addr := netip.AddrFrom4([4]byte{ip4[0], ip4[1], ip4[2], ip4[3]})
+	if addr, ok := netip.AddrFromSlice(ip); ok && addr.Is4() {
 		logger.Debug("Resolved %s to %s", rewriteTo, addr)
 		return addr, nil
 	}

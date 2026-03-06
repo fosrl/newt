@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"strconv"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -287,14 +287,16 @@ func (m *Manager) TriggerHolePunch() error {
 			continue
 		}
 
-		serverAddr := net.JoinHostPort(host, strconv.Itoa(int(exitNode.RelayPort)))
-		remoteAddr, err := net.ResolveUDPAddr("udp", serverAddr)
+		// Parse the resolved host as netip.Addr
+		hostAddr, err := netip.ParseAddr(host)
 		if err != nil {
-			logger.Error("Failed to resolve UDP address %s: %v", serverAddr, err)
+			logger.Error("Failed to parse resolved address %s: %v", host, err)
 			continue
 		}
 
-		if err := m.sendHolePunch(remoteAddr, exitNode.PublicKey); err != nil {
+		addrPort := netip.AddrPortFrom(hostAddr, exitNode.RelayPort)
+
+		if err := m.sendHolePunch(addrPort, exitNode.PublicKey); err != nil {
 			logger.Warn("Failed to send on-demand hole punch to %s: %v", exitNode.Endpoint, err)
 			continue
 		}
@@ -377,9 +379,9 @@ func (m *Manager) runMultipleExitNodes() {
 
 	// Resolve all endpoints upfront
 	type resolvedExitNode struct {
-		remoteAddr   *net.UDPAddr
-		publicKey    string
-		endpointName string
+		remoteAddrPort netip.AddrPort
+		publicKey      string
+		endpointName   string
 	}
 
 	resolveNodes := func() []resolvedExitNode {
@@ -398,19 +400,21 @@ func (m *Manager) runMultipleExitNodes() {
 				continue
 			}
 
-			serverAddr := net.JoinHostPort(host, strconv.Itoa(int(exitNode.RelayPort)))
-			remoteAddr, err := net.ResolveUDPAddr("udp", serverAddr)
+			// Parse the resolved host as netip.Addr
+			hostAddr, err := netip.ParseAddr(host)
 			if err != nil {
-				logger.Error("Failed to resolve UDP address %s: %v", serverAddr, err)
+				logger.Error("Failed to parse resolved address %s: %v", host, err)
 				continue
 			}
 
+			addrPort := netip.AddrPortFrom(hostAddr, exitNode.RelayPort)
+
 			resolvedNodes = append(resolvedNodes, resolvedExitNode{
-				remoteAddr:   remoteAddr,
-				publicKey:    exitNode.PublicKey,
-				endpointName: exitNode.Endpoint,
+				remoteAddrPort: addrPort,
+				publicKey:      exitNode.PublicKey,
+				endpointName:   exitNode.Endpoint,
 			})
-			logger.Debug("Resolved exit node: %s -> %s", exitNode.Endpoint, remoteAddr.String())
+			logger.Debug("Resolved exit node: %s -> %s", exitNode.Endpoint, addrPort.String())
 		}
 		return resolvedNodes
 	}
@@ -422,7 +426,7 @@ func (m *Manager) runMultipleExitNodes() {
 	} else {
 		// Send initial hole punch to all exit nodes
 		for _, node := range resolvedNodes {
-			if err := m.sendHolePunch(node.remoteAddr, node.publicKey); err != nil {
+			if err := m.sendHolePunch(node.remoteAddrPort, node.publicKey); err != nil {
 				logger.Warn("Failed to send initial hole punch to %s: %v", node.endpointName, err)
 			}
 		}
@@ -457,7 +461,7 @@ func (m *Manager) runMultipleExitNodes() {
 			ticker.Reset(m.sendHolepunchInterval)
 			// Send immediate hole punch to newly resolved nodes
 			for _, node := range resolvedNodes {
-				if err := m.sendHolePunch(node.remoteAddr, node.publicKey); err != nil {
+				if err := m.sendHolePunch(node.remoteAddrPort, node.publicKey); err != nil {
 					logger.Debug("Failed to send hole punch to %s: %v", node.endpointName, err)
 				}
 			}
@@ -465,7 +469,7 @@ func (m *Manager) runMultipleExitNodes() {
 			// Send hole punch to all exit nodes (if any are available)
 			if len(resolvedNodes) > 0 {
 				for _, node := range resolvedNodes {
-					if err := m.sendHolePunch(node.remoteAddr, node.publicKey); err != nil {
+					if err := m.sendHolePunch(node.remoteAddrPort, node.publicKey); err != nil {
 						logger.Debug("Failed to send hole punch to %s: %v", node.endpointName, err)
 					}
 				}
@@ -487,7 +491,7 @@ func (m *Manager) runMultipleExitNodes() {
 }
 
 // sendHolePunch sends an encrypted hole punch packet using the shared bind
-func (m *Manager) sendHolePunch(remoteAddr *net.UDPAddr, serverPubKey string) error {
+func (m *Manager) sendHolePunch(remoteAddrPort netip.AddrPort, serverPubKey string) error {
 	m.mu.Lock()
 	token := m.token
 	ID := m.ID
@@ -537,12 +541,14 @@ func (m *Manager) sendHolePunch(remoteAddr *net.UDPAddr, serverPubKey string) er
 		return fmt.Errorf("failed to marshal encrypted payload: %w", err)
 	}
 
+	// Convert netip.AddrPort to *net.UDPAddr for SharedBind interface
+	remoteAddr := net.UDPAddrFromAddrPort(remoteAddrPort)
 	_, err = m.sharedBind.WriteToUDP(jsonData, remoteAddr)
 	if err != nil {
 		return fmt.Errorf("failed to write to UDP: %w", err)
 	}
 
-	logger.Debug("Sent UDP hole punch to %s: %s", remoteAddr.String(), string(jsonData))
+	logger.Debug("Sent UDP hole punch to %s: %s", remoteAddrPort.String(), string(jsonData))
 
 	return nil
 }

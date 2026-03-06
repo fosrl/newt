@@ -4,9 +4,9 @@ package network
 
 import (
 	"fmt"
-	"net"
+	"net/netip"
 )
 
-func configureWindows(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
+func configureWindows(interfaceName string, prefix netip.Prefix) error {
 	return fmt.Errorf("configureWindows called on non-Windows platform")
 }

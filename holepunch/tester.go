@@ -43,7 +43,7 @@ func DefaultTestOptions() TestConnectionOptions {
 
 // cachedAddr holds a cached resolved UDP address
 type cachedAddr struct {
-	addr      *net.UDPAddr
+	addrPort   netip.AddrPort
 	resolvedAt time.Time
 }
 
@@ -157,7 +157,7 @@ func (t *HolepunchTester) Stop() {
 }
 
 // resolveEndpoint resolves an endpoint to a UDP address, using cache when possible
-func (t *HolepunchTester) resolveEndpoint(endpoint string) (*net.UDPAddr, error) {
+func (t *HolepunchTester) resolveEndpoint(endpoint string) (netip.AddrPort, error) {
 	// Check cache first
 	t.addrCacheMu.RLock()
 	cached, ok := t.addrCache[endpoint]
@@ -165,7 +165,7 @@ func (t *HolepunchTester) resolveEndpoint(endpoint string) (*net.UDPAddr, error)
 	t.addrCacheMu.RUnlock()
 
 	if ok && time.Since(cached.resolvedAt) < ttl {
-		return cached.addr, nil
+		return cached.addrPort, nil
 	}
 
 	// Resolve the endpoint
@@ -174,25 +174,26 @@ func (t *HolepunchTester) resolveEndpoint(endpoint string) (*net.UDPAddr, error)
 		host = endpoint
 	}
 
-	_, _, err = net.SplitHostPort(host)
+	// Parse as AddrPort - if it fails, try adding default port
+	addrPort, err := netip.ParseAddrPort(host)
 	if err != nil {
-		host = net.JoinHostPort(host, "21820")
-	}
-
-	remoteAddr, err := net.ResolveUDPAddr("udp", host)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve UDP address %s: %w", host, err)
+		// Try parsing just the address and add default port
+		addr, addrErr := netip.ParseAddr(host)
+		if addrErr != nil {
+			return netip.AddrPort{}, fmt.Errorf("failed to parse address %s: %w", host, addrErr)
+		}
+		addrPort = netip.AddrPortFrom(addr, 21820)
 	}
 
 	// Cache the result
 	t.addrCacheMu.Lock()
 	t.addrCache[endpoint] = &cachedAddr{
-		addr:       remoteAddr,
+		addrPort:   addrPort,
 		resolvedAt: time.Now(),
 	}
 	t.addrCacheMu.Unlock()
 
-	return remoteAddr, nil
+	return addrPort, nil
 }
 
 // InvalidateCache removes a specific endpoint from the address cache
@@ -255,7 +256,7 @@ func (t *HolepunchTester) TestEndpoint(endpoint string, timeout time.Duration) T
 	}
 
 	// Resolve the endpoint (using cache)
-	remoteAddr, err := t.resolveEndpoint(endpoint)
+	remoteAddrPort, err := t.resolveEndpoint(endpoint)
 	if err != nil {
 		result.Error = err
 		return result
@@ -283,7 +284,8 @@ func (t *HolepunchTester) TestEndpoint(endpoint string, timeout time.Duration) T
 	copy(request, bind.MagicTestRequest)
 	copy(request[len(bind.MagicTestRequest):], randomData)
 
-	// Send the test packet
+	// Send the test packet - convert netip.AddrPort to *net.UDPAddr for SharedBind
+	remoteAddr := net.UDPAddrFromAddrPort(remoteAddrPort)
 	_, err = sharedBind.WriteToUDP(request, remoteAddr)
 	if err != nil {
 		t.pendingRequests.Delete(key)
@@ -337,15 +339,16 @@ func TestConnectionWithBind(sharedBind *bind.SharedBind, endpoint string, opts *
 		host = endpoint
 	}
 
-	_, _, err = net.SplitHostPort(host)
+	// Parse as AddrPort - if it fails, try adding default port
+	remoteAddrPort, err := netip.ParseAddrPort(host)
 	if err != nil {
-		host = net.JoinHostPort(host, "21820")
-	}
-
-	remoteAddr, err := net.ResolveUDPAddr("udp", host)
-	if err != nil {
-		result.Error = fmt.Errorf("failed to resolve UDP address %s: %w", host, err)
-		return result
+		// Try parsing just the address and add default port
+		addr, addrErr := netip.ParseAddr(host)
+		if addrErr != nil {
+			result.Error = fmt.Errorf("failed to parse address %s: %w", host, addrErr)
+			return result
+		}
+		remoteAddrPort = netip.AddrPortFrom(addr, 21820)
 	}
 
 	// Generate random data for the test packet
@@ -366,6 +369,9 @@ func TestConnectionWithBind(sharedBind *bind.SharedBind, endpoint string, opts *
 		result.Error = fmt.Errorf("could not get UDP connection from SharedBind")
 		return result
 	}
+
+	// Convert netip.AddrPort to *net.UDPAddr for SharedBind
+	remoteAddr := net.UDPAddrFromAddrPort(remoteAddrPort)
 
 	attempts := opts.Retries + 1
 	for attempt := 0; attempt < attempts; attempt++ {
