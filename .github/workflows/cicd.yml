@@ -136,7 +136,7 @@ jobs:
   build-amd:
     name: Build image (linux/amd64)
     needs: [pre-run, prepare]
-    if: ${{ needs.pre-run.result == 'success' && ((github.event_name == 'push' && github.actor != 'github-actions[bot]') || (github.event_name == 'workflow_dispatch' && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped'))) }}
+    if: ${{ needs.pre-run.result == 'success' && ((github.event_name == 'push' && github.actor != 'github-actions[bot]' && needs.prepare.result == 'skipped') || (github.event_name == 'workflow_dispatch' && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped'))) }}
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 120
     env:
@@ -293,7 +293,7 @@ jobs:
   build-arm:
     name: Build image (linux/arm64)
     needs: [pre-run, prepare]
-    if: ${{ needs.pre-run.result == 'success' && ((github.event_name == 'push' && github.actor != 'github-actions[bot]') || (github.event_name == 'workflow_dispatch' && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped'))) }}
+    if: ${{ needs.pre-run.result == 'success' && ((github.event_name == 'push' && github.actor != 'github-actions[bot]' && needs.prepare.result == 'skipped') || (github.event_name == 'workflow_dispatch' && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped'))) }}
     runs-on: [self-hosted, linux, arm64] # NOTE: ensure label exists on runner
     timeout-minutes: 120
     env:
@@ -417,7 +417,7 @@ jobs:
   build-armv7:
     name: Build image (linux/arm/v7)
     needs: [pre-run, prepare]
-    if: ${{ needs.pre-run.result == 'success' && ((github.event_name == 'push' && github.actor != 'github-actions[bot]') || (github.event_name == 'workflow_dispatch' && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped'))) }}
+    if: ${{ needs.pre-run.result == 'success' && ((github.event_name == 'push' && github.actor != 'github-actions[bot]' && needs.prepare.result == 'skipped') || (github.event_name == 'workflow_dispatch' && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped'))) }}
     runs-on: [self-hosted, linux, arm64]
     timeout-minutes: 120
     env:
@@ -887,7 +887,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          make -j 10 go-build-release tag="${TAG}"
+          make -j 10 go-build-release VERSION="${TAG}"
 
       - name: Create GitHub Release (draft)
         uses: softprops/action-gh-release@5be0e66d93ac7ed76da52eca8bb058f665c3a5fe # v2.4.2
