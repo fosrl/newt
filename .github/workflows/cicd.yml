@@ -269,6 +269,7 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
+          build-args: VERSION=${{ env.TAG }}
           tags: |
             ${{ env.GHCR_IMAGE }}:amd64-${{ env.TAG }}
             ${{ env.DOCKERHUB_IMAGE }}:amd64-${{ env.TAG }}
@@ -393,6 +394,7 @@ jobs:
           context: .
           push: true
           platforms: linux/arm64
+          build-args: VERSION=${{ env.TAG }}
           tags: |
             ${{ env.GHCR_IMAGE }}:arm64-${{ env.TAG }}
             ${{ env.DOCKERHUB_IMAGE }}:arm64-${{ env.TAG }}
@@ -509,6 +511,7 @@ jobs:
           context: .
           push: true
           platforms: linux/arm/v7
+          build-args: VERSION=${{ env.TAG }}
           tags: |
             ${{ env.GHCR_IMAGE }}:armv7-${{ env.TAG }}
             ${{ env.DOCKERHUB_IMAGE }}:armv7-${{ env.TAG }}
