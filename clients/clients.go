@@ -162,9 +162,8 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 		useNativeInterface: useNativeInterface,
 	}
 
-	// Create the holepunch manager with ResolveDomain function
-	// We'll need to pass a domain resolver function
-	service.holePunchManager = holepunch.NewManager(sharedBind, newtId, "newt", key.PublicKey().String())
+	// Create the holepunch manager
+	service.holePunchManager = holepunch.NewManager(sharedBind, newtId, "newt", key.PublicKey().String(), nil)
 
 	// Register websocket handlers
 	wsClient.RegisterHandler("newt/wg/receive-config", service.handleConfig)
