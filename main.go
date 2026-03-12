@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -147,6 +148,7 @@ var (
 	adminAddr         string
 	region            string
 	metricsAsyncBytes bool
+	pprofEnabled      bool
 	blueprintFile     string
 	noCloud           bool
 
@@ -225,6 +227,7 @@ func runNewtMain(ctx context.Context) {
 	adminAddrEnv := os.Getenv("NEWT_ADMIN_ADDR")
 	regionEnv := os.Getenv("NEWT_REGION")
 	asyncBytesEnv := os.Getenv("NEWT_METRICS_ASYNC_BYTES")
+	pprofEnabledEnv := os.Getenv("NEWT_PPROF_ENABLED")
 
 	disableClientsEnv := os.Getenv("DISABLE_CLIENTS")
 	disableClients = disableClientsEnv == "true"
@@ -390,6 +393,14 @@ func runNewtMain(ctx context.Context) {
 			metricsAsyncBytes = v
 		}
 	}
+	// pprof debug endpoint toggle
+	if pprofEnabledEnv == "" {
+		flag.BoolVar(&pprofEnabled, "pprof", false, "Enable pprof debug endpoints on admin server")
+	} else {
+		if v, err := strconv.ParseBool(pprofEnabledEnv); err == nil {
+			pprofEnabled = v
+		}
+	}
 	// Optional region flag (resource attribute)
 	if regionEnv == "" {
 		flag.StringVar(&region, "region", "", "Optional region resource attribute (also NEWT_REGION)")
@@ -484,6 +495,14 @@ func runNewtMain(ctx context.Context) {
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
 		if tel.PrometheusHandler != nil {
 			mux.Handle("/metrics", tel.PrometheusHandler)
+		}
+		if pprofEnabled {
+			mux.HandleFunc("/debug/pprof/", pprof.Index)
+			mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+			mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+			mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+			mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+			logger.Info("pprof debugging enabled on %s/debug/pprof/", tcfg.AdminAddr)
 		}
 		admin := &http.Server{
 			Addr:              tcfg.AdminAddr,
