@@ -619,8 +619,6 @@ func runNewtMain(ctx context.Context) {
 	var wgData WgData
 	var dockerEventMonitor *docker.EventMonitor
 	
-	logger.Debug("++++++++++++++++++++++ the port is %d", port)
-
 	if !disableClients {
 		setupClients(client)
 	}
