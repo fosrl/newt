@@ -1,7 +1,7 @@
-#!/bin/bash
+#!/bin/sh
 
 # Get Newt - Cross-platform installation script
-# Usage: curl -fsSL https://raw.githubusercontent.com/fosrl/newt/refs/heads/main/get-newt.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/fosrl/newt/refs/heads/main/get-newt.sh | sh
 
 set -e
 
@@ -17,15 +17,15 @@ GITHUB_API_URL="https://api.github.com/repos/${REPO}/releases/latest"
 
 # Function to print colored output
 print_status() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+    printf '%b[INFO]%b %s\n' "${GREEN}" "${NC}" "$1"
 }
 
 print_warning() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    printf '%b[WARN]%b %s\n' "${YELLOW}" "${NC}" "$1"
 }
 
 print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    printf '%b[ERROR]%b %s\n' "${RED}" "${NC}" "$1"
 }
 
 # Function to get latest version from GitHub API
@@ -113,16 +113,34 @@ get_install_dir() {
     if [ "$OS" = "windows" ]; then
         echo "$HOME/bin"
     else
-        # Try to use a directory in PATH, fallback to ~/.local/bin
-        if echo "$PATH" | grep -q "/usr/local/bin"; then
-            if [ -w "/usr/local/bin" ] 2>/dev/null; then
-                echo "/usr/local/bin"
-            else
-                echo "$HOME/.local/bin"
-            fi
+        # Prefer /usr/local/bin for system-wide installation
+        echo "/usr/local/bin"
+    fi
+}
+
+# Check if we need sudo for installation
+needs_sudo() {
+    local install_dir="$1"
+    if [ -w "$install_dir" ] 2>/dev/null; then
+        return 1  # No sudo needed
+    else
+        return 0  # Sudo needed
+    fi
+}
+
+# Get the appropriate command prefix (sudo or empty)
+get_sudo_cmd() {
+    local install_dir="$1"
+    if needs_sudo "$install_dir"; then
+        if command -v sudo >/dev/null 2>&1; then
+            echo "sudo"
         else
-            echo "$HOME/.local/bin"
+            print_error "Cannot write to ${install_dir} and sudo is not available."
+            print_error "Please run this script as root or install sudo."
+            exit 1
         fi
+    else
+        echo ""
     fi
 }
 
@@ -130,21 +148,24 @@ get_install_dir() {
 install_newt() {
     local platform="$1"
     local install_dir="$2"
+    local sudo_cmd="$3"
     local binary_name="newt_${platform}"
     local exe_suffix=""
-    
+
     # Add .exe suffix for Windows
-    if [[ "$platform" == *"windows"* ]]; then
-        binary_name="${binary_name}.exe"
-        exe_suffix=".exe"
-    fi
-    
+    case "$platform" in
+        *windows*)
+            binary_name="${binary_name}.exe"
+            exe_suffix=".exe"
+            ;;
+    esac
+
     local download_url="${BASE_URL}/${binary_name}"
     local temp_file="/tmp/newt${exe_suffix}"
     local final_path="${install_dir}/newt${exe_suffix}"
-    
+
     print_status "Downloading newt from ${download_url}"
-    
+
     # Download the binary
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL "$download_url" -o "$temp_file"
@@ -154,18 +175,22 @@ install_newt() {
         print_error "Neither curl nor wget is available. Please install one of them."
         exit 1
     fi
-    
+
+    # Make executable before moving
+    chmod +x "$temp_file"
+
     # Create install directory if it doesn't exist
-    mkdir -p "$install_dir"
-    
-    # Move binary to install directory
-    mv "$temp_file" "$final_path"
-    
-    # Make executable (not needed on Windows, but doesn't hurt)
-    chmod +x "$final_path"
-    
+    if [ -n "$sudo_cmd" ]; then
+        $sudo_cmd mkdir -p "$install_dir"
+        print_status "Using sudo to install to ${install_dir}"
+        $sudo_cmd mv "$temp_file" "$final_path"
+    else
+        mkdir -p "$install_dir"
+        mv "$temp_file" "$final_path"
+    fi
+
     print_status "newt installed to ${final_path}"
-    
+
     # Check if install directory is in PATH
     if ! echo "$PATH" | grep -q "$install_dir"; then
         print_warning "Install directory ${install_dir} is not in your PATH."
@@ -179,9 +204,9 @@ verify_installation() {
     local install_dir="$1"
     local exe_suffix=""
     
-    if [[ "$PLATFORM" == *"windows"* ]]; then
-        exe_suffix=".exe"
-    fi
+    case "$PLATFORM" in
+        *windows*) exe_suffix=".exe" ;;
+    esac
     
     local newt_path="${install_dir}/newt${exe_suffix}"
     
@@ -198,34 +223,36 @@ verify_installation() {
 # Main installation process
 main() {
     print_status "Installing latest version of newt..."
-    
+
     # Get latest version
     print_status "Fetching latest version from GitHub..."
     VERSION=$(get_latest_version)
     print_status "Latest version: v${VERSION}"
-    
+
     # Set base URL with the fetched version
     BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
-    
+
     # Detect platform
     PLATFORM=$(detect_platform)
     print_status "Detected platform: ${PLATFORM}"
-    
+
     # Get install directory
     INSTALL_DIR=$(get_install_dir)
     print_status "Install directory: ${INSTALL_DIR}"
-    
+
+    # Check if we need sudo
+    SUDO_CMD=$(get_sudo_cmd "$INSTALL_DIR")
+    if [ -n "$SUDO_CMD" ]; then
+        print_status "Root privileges required for installation to ${INSTALL_DIR}"
+    fi
+
     # Install newt
-    install_newt "$PLATFORM" "$INSTALL_DIR"
-    
+    install_newt "$PLATFORM" "$INSTALL_DIR" "$SUDO_CMD"
+
     # Verify installation
     if verify_installation "$INSTALL_DIR"; then
         print_status "newt is ready to use!"
-        if [[ "$PLATFORM" == *"windows"* ]]; then
-            print_status "Run 'newt --help' to get started"
-        else
-            print_status "Run 'newt --help' to get started"
-        fi
+        print_status "Run 'newt --help' to get started"
     else
         exit 1
     fi

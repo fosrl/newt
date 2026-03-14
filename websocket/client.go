@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -749,10 +750,13 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time) {
 			disconnectResult = "success"
 			return
 		default:
-			var msg WSMessage
-			err := c.conn.ReadJSON(&msg)
+			msgType, p, err := c.conn.ReadMessage()
 			if err == nil {
-				telemetry.IncWSMessage(c.metricsContext(), "in", "text")
+				if msgType == websocket.BinaryMessage {
+					telemetry.IncWSMessage(c.metricsContext(), "in", "binary")
+				} else {
+					telemetry.IncWSMessage(c.metricsContext(), "in", "text")
+				}
 			}
 			if err != nil {
 				// Check if we're shutting down before logging error
@@ -778,6 +782,29 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time) {
 			}
 
 			// Update config version from incoming message
+			var data []byte
+			if msgType == websocket.BinaryMessage {
+				gr, err := gzip.NewReader(bytes.NewReader(p))
+				if err != nil {
+					logger.Error("WebSocket failed to create gzip reader: %v", err)
+					continue
+				}
+				data, err = io.ReadAll(gr)
+				gr.Close()
+				if err != nil {
+					logger.Error("WebSocket failed to decompress message: %v", err)
+					continue
+				}
+			} else {
+				data = p
+			}
+
+			var msg WSMessage
+			if err = json.Unmarshal(data, &msg); err != nil {
+				logger.Error("WebSocket failed to parse message: %v", err)
+				continue
+			}
+			
 			c.setConfigVersion(msg.ConfigVersion)
 
 			c.handlersMux.RLock()
