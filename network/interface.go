@@ -3,6 +3,7 @@ package network
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -17,15 +18,15 @@ import (
 func ConfigureInterface(interfaceName string, tunnelIp string, mtu int) error {
 	logger.Info("The tunnel IP is: %s", tunnelIp)
 
-	// Parse the IP address and network
-	ip, ipNet, err := net.ParseCIDR(tunnelIp)
+	// Parse the IP address and network using netip
+	prefix, err := netip.ParsePrefix(tunnelIp)
 	if err != nil {
 		return fmt.Errorf("invalid IP address: %v", err)
 	}
 
 	// Convert CIDR mask to dotted decimal format (e.g., 255.255.255.0)
-	mask := net.IP(ipNet.Mask).String()
-	destinationAddress := ip.String()
+	mask := prefixToMaskString(prefix)
+	destinationAddress := prefix.Addr().String()
 
 	logger.Debug("The destination address is: %s", destinationAddress)
 
@@ -39,11 +40,11 @@ func ConfigureInterface(interfaceName string, tunnelIp string, mtu int) error {
 
 	switch runtime.GOOS {
 	case "linux":
-		return configureLinux(interfaceName, ip, ipNet)
+		return configureLinux(interfaceName, prefix)
 	case "darwin":
-		return configureDarwin(interfaceName, ip, ipNet)
+		return configureDarwin(interfaceName, prefix)
 	case "windows":
-		return configureWindows(interfaceName, ip, ipNet)
+		return configureWindows(interfaceName, prefix)
 	case "android":
 		return nil
 	case "ios":
@@ -53,8 +54,19 @@ func ConfigureInterface(interfaceName string, tunnelIp string, mtu int) error {
 	return nil
 }
 
+// prefixToMaskString converts a netip.Prefix to a dotted decimal subnet mask string
+func prefixToMaskString(prefix netip.Prefix) string {
+	bits := prefix.Bits()
+	if prefix.Addr().Is4() {
+		mask := net.CIDRMask(bits, 32)
+		return net.IP(mask).String()
+	}
+	// For IPv6, return the prefix length as we don't typically use dotted decimal
+	return fmt.Sprintf("/%d", bits)
+}
+
 // waitForInterfaceUp polls the network interface until it's up or times out
-func waitForInterfaceUp(interfaceName string, expectedIP net.IP, timeout time.Duration) error {
+func waitForInterfaceUp(interfaceName string, expectedIP netip.Addr, timeout time.Duration) error {
 	logger.Info("Waiting for interface %s to be up with IP %s", interfaceName, expectedIP)
 	deadline := time.Now().Add(timeout)
 	pollInterval := 500 * time.Millisecond
@@ -70,9 +82,14 @@ func waitForInterfaceUp(interfaceName string, expectedIP net.IP, timeout time.Du
 				if err == nil {
 					for _, addr := range addrs {
 						ipNet, ok := addr.(*net.IPNet)
-						if ok && ipNet.IP.Equal(expectedIP) {
-							logger.Info("Interface %s is up with correct IP", interfaceName)
-							return nil // Interface is up with correct IP
+						if ok {
+							if ifaceAddr, ok := netip.AddrFromSlice(ipNet.IP); ok {
+								// Unmap IPv4-mapped IPv6 addresses for comparison
+								if ifaceAddr.Unmap() == expectedIP.Unmap() {
+									logger.Info("Interface %s is up with correct IP", interfaceName)
+									return nil // Interface is up with correct IP
+								}
+							}
 						}
 					}
 					logger.Info("Interface %s is up but doesn't have expected IP yet", interfaceName)
@@ -114,13 +131,13 @@ func FindUnusedUTUN() (string, error) {
 	return "", fmt.Errorf("no unused utun interface found")
 }
 
-func configureDarwin(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
+func configureDarwin(interfaceName string, prefix netip.Prefix) error {
 	logger.Info("Configuring darwin interface: %s", interfaceName)
 
-	prefix, _ := ipNet.Mask.Size()
-	ipStr := fmt.Sprintf("%s/%d", ip.String(), prefix)
+	ipStr := prefix.String()
+	ip := prefix.Addr().String()
 
-	cmd := exec.Command("ifconfig", interfaceName, "inet", ipStr, ip.String(), "alias")
+	cmd := exec.Command("ifconfig", interfaceName, "inet", ipStr, ip, "alias")
 	logger.Info("Running command: %v", cmd)
 
 	out, err := cmd.CombinedOutput()
@@ -140,19 +157,19 @@ func configureDarwin(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
 	return nil
 }
 
-func configureLinux(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
+func configureLinux(interfaceName string, prefix netip.Prefix) error {
 	// Get the interface
 	link, err := netlink.LinkByName(interfaceName)
 	if err != nil {
 		return fmt.Errorf("failed to get interface %s: %v", interfaceName, err)
 	}
 
+	// Convert netip.Prefix to net.IPNet for netlink library
+	ipNet := prefixToIPNet(prefix)
+
 	// Create the IP address attributes
 	addr := &netlink.Addr{
-		IPNet: &net.IPNet{
-			IP:   ip,
-			Mask: ipNet.Mask,
-		},
+		IPNet: ipNet,
 	}
 
 	// Add the IP address to the interface
@@ -166,4 +183,22 @@ func configureLinux(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
 	}
 
 	return nil
+}
+
+// prefixToIPNet converts a netip.Prefix to a *net.IPNet for compatibility with netlink
+func prefixToIPNet(prefix netip.Prefix) *net.IPNet {
+	addr := prefix.Addr()
+	bits := prefix.Bits()
+	if addr.Is4() {
+		ip := addr.As4()
+		return &net.IPNet{
+			IP:   net.IP(ip[:]),
+			Mask: net.CIDRMask(bits, 32),
+		}
+	}
+	ip := addr.As16()
+	return &net.IPNet{
+		IP:   net.IP(ip[:]),
+		Mask: net.CIDRMask(bits, 128),
+	}
 }

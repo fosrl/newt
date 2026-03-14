@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -124,14 +125,15 @@ func IsWithinHostNetwork(socketPath string, targetAddress string, targetPort int
 		return false, err
 	}
 
-	// Determine if given an IP address
-	var parsedTargetAddressIp = net.ParseIP(targetAddress)
+	// Determine if given an IP address using netip
+	parsedTargetAddressIp, parseErr := netip.ParseAddr(targetAddress)
+	isIPAddress := parseErr == nil
 
 	// If we can find the passed hostname/IP address in the networks or as the container name, it is valid and can add it
 	for _, c := range containers {
 		for _, network := range c.Networks {
 			// If the target address is not an IP address, use the container name
-			if parsedTargetAddressIp == nil {
+			if !isIPAddress {
 				if c.Name == targetAddress {
 					for _, port := range c.Ports {
 						if port.PublicPort == targetPort || port.PrivatePort == targetPort {
@@ -141,7 +143,7 @@ func IsWithinHostNetwork(socketPath string, targetAddress string, targetPort int
 				}
 			} else {
 				//If the IP address matches, check the ports being mapped too
-				if network.IPAddress == targetAddress {
+				if network.IPAddress == parsedTargetAddressIp.String() {
 					for _, port := range c.Ports {
 						if port.PublicPort == targetPort || port.PrivatePort == targetPort {
 							return true, nil

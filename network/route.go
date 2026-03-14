@@ -3,6 +3,7 @@ package network
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -59,11 +60,14 @@ func LinuxAddRoute(destination string, gateway string, interfaceName string) err
 		return nil
 	}
 
-	// Parse destination CIDR
-	_, ipNet, err := net.ParseCIDR(destination)
+	// Parse destination CIDR using netip
+	prefix, err := netip.ParsePrefix(destination)
 	if err != nil {
 		return fmt.Errorf("invalid destination address: %v", err)
 	}
+
+	// Convert to net.IPNet for netlink library
+	ipNet := prefixToIPNet(prefix)
 
 	// Create route
 	route := &netlink.Route{
@@ -71,12 +75,19 @@ func LinuxAddRoute(destination string, gateway string, interfaceName string) err
 	}
 
 	if gateway != "" {
-		// Route with specific gateway
-		gw := net.ParseIP(gateway)
-		if gw == nil {
+		// Route with specific gateway using netip
+		gwAddr, err := netip.ParseAddr(gateway)
+		if err != nil {
 			return fmt.Errorf("invalid gateway address: %s", gateway)
 		}
-		route.Gw = gw
+		// Convert netip.Addr to net.IP for netlink
+		if gwAddr.Is4() {
+			ip4 := gwAddr.As4()
+			route.Gw = net.IP(ip4[:])
+		} else {
+			ip6 := gwAddr.As16()
+			route.Gw = net.IP(ip6[:])
+		}
 		logger.Info("Adding route to %s via gateway %s", destination, gateway)
 	} else if interfaceName != "" {
 		// Route via interface
@@ -103,11 +114,14 @@ func LinuxRemoveRoute(destination string) error {
 		return nil
 	}
 
-	// Parse destination CIDR
-	_, ipNet, err := net.ParseCIDR(destination)
+	// Parse destination CIDR using netip
+	prefix, err := netip.ParsePrefix(destination)
 	if err != nil {
 		return fmt.Errorf("invalid destination address: %v", err)
 	}
+
+	// Convert to net.IPNet for netlink library
+	ipNet := prefixToIPNet(prefix)
 
 	// Create route to delete
 	route := &netlink.Route{
@@ -165,15 +179,15 @@ func RemoveRouteForServerIP(serverIP string, interfaceName string) error {
 }
 
 func AddRouteForNetworkConfig(destination string) error {
-	// Parse the subnet to extract IP and mask
-	_, ipNet, err := net.ParseCIDR(destination)
+	// Parse the subnet to extract IP and mask using netip
+	prefix, err := netip.ParsePrefix(destination)
 	if err != nil {
 		return fmt.Errorf("failed to parse subnet %s: %v", destination, err)
 	}
 
 	// Convert CIDR mask to dotted decimal format (e.g., 255.255.255.0)
-	mask := net.IP(ipNet.Mask).String()
-	destinationAddress := ipNet.IP.String()
+	mask := prefixToMaskString(prefix)
+	destinationAddress := prefix.Masked().Addr().String()
 
 	AddIPv4IncludedRoute(IPv4Route{DestinationAddress: destinationAddress, SubnetMask: mask})
 
@@ -181,15 +195,15 @@ func AddRouteForNetworkConfig(destination string) error {
 }
 
 func RemoveRouteForNetworkConfig(destination string) error {
-	// Parse the subnet to extract IP and mask
-	_, ipNet, err := net.ParseCIDR(destination)
+	// Parse the subnet to extract IP and mask using netip
+	prefix, err := netip.ParsePrefix(destination)
 	if err != nil {
 		return fmt.Errorf("failed to parse subnet %s: %v", destination, err)
 	}
 
 	// Convert CIDR mask to dotted decimal format (e.g., 255.255.255.0)
-	mask := net.IP(ipNet.Mask).String()
-	destinationAddress := ipNet.IP.String()
+	mask := prefixToMaskString(prefix)
+	destinationAddress := prefix.Masked().Addr().String()
 
 	RemoveIPv4IncludedRoute(IPv4Route{DestinationAddress: destinationAddress, SubnetMask: mask})
 
