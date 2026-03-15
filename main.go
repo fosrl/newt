@@ -1627,6 +1627,12 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
 	}
 
+	if blueprintFile != "" {
+		go watchBlueprintFile(ctx, blueprintFile, func() error {
+			return sendBlueprint(client)
+		})
+	}
+
 	// Wait for context cancellation (from signal or service stop)
 	<-ctx.Done()
 
