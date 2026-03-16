@@ -521,3 +521,82 @@ func (m *Monitor) DisableTarget(id int) error {
 
 	return nil
 }
+
+// GetTargetIDs returns a slice of all current target IDs
+func (m *Monitor) GetTargetIDs() []int {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	ids := make([]int, 0, len(m.targets))
+	for id := range m.targets {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// SyncTargets synchronizes the current targets to match the desired set.
+// It removes targets not in the desired set and adds targets that are missing.
+func (m *Monitor) SyncTargets(desiredConfigs []Config) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	logger.Info("Syncing health check targets: %d desired targets", len(desiredConfigs))
+
+	// Build a set of desired target IDs
+	desiredIDs := make(map[int]Config)
+	for _, config := range desiredConfigs {
+		desiredIDs[config.ID] = config
+	}
+
+	// Find targets to remove (exist but not in desired set)
+	var toRemove []int
+	for id := range m.targets {
+		if _, exists := desiredIDs[id]; !exists {
+			toRemove = append(toRemove, id)
+		}
+	}
+
+	// Remove targets that are not in the desired set
+	for _, id := range toRemove {
+		logger.Info("Sync: removing health check target %d", id)
+		if target, exists := m.targets[id]; exists {
+			target.cancel()
+			delete(m.targets, id)
+		}
+	}
+
+	// Add or update targets from the desired set
+	var addedCount, updatedCount int
+	for id, config := range desiredIDs {
+		if existing, exists := m.targets[id]; exists {
+			// Target exists - check if config changed and update if needed
+			// For now, we'll replace it to ensure config is up to date
+			logger.Debug("Sync: updating health check target %d", id)
+			existing.cancel()
+			delete(m.targets, id)
+			if err := m.addTargetUnsafe(config); err != nil {
+				logger.Error("Sync: failed to update target %d: %v", id, err)
+				return fmt.Errorf("failed to update target %d: %v", id, err)
+			}
+			updatedCount++
+		} else {
+			// Target doesn't exist - add it
+			logger.Debug("Sync: adding health check target %d", id)
+			if err := m.addTargetUnsafe(config); err != nil {
+				logger.Error("Sync: failed to add target %d: %v", id, err)
+				return fmt.Errorf("failed to add target %d: %v", id, err)
+			}
+			addedCount++
+		}
+	}
+
+	logger.Info("Sync complete: removed %d, added %d, updated %d targets",
+		len(toRemove), addedCount, updatedCount)
+
+	// Notify callback if any changes were made
+	if (len(toRemove) > 0 || addedCount > 0 || updatedCount > 0) && m.callback != nil {
+		go m.callback(m.getAllTargetsUnsafe())
+	}
+
+	return nil
+}

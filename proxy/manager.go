@@ -736,3 +736,28 @@ func (pm *ProxyManager) PrintTargets() {
 		}
 	}
 }
+
+// GetTargets returns a copy of the current TCP and UDP targets
+// Returns map[listenIP]map[port]targetAddress for both TCP and UDP
+func (pm *ProxyManager) GetTargets() (tcpTargets map[string]map[int]string, udpTargets map[string]map[int]string) {
+	pm.mutex.RLock()
+	defer pm.mutex.RUnlock()
+
+	tcpTargets = make(map[string]map[int]string)
+	for listenIP, targets := range pm.tcpTargets {
+		tcpTargets[listenIP] = make(map[int]string)
+		for port, targetAddr := range targets {
+			tcpTargets[listenIP][port] = targetAddr
+		}
+	}
+
+	udpTargets = make(map[string]map[int]string)
+	for listenIP, targets := range pm.udpTargets {
+		udpTargets[listenIP] = make(map[int]string)
+		for port, targetAddr := range targets {
+			udpTargets[listenIP][port] = targetAddr
+		}
+	}
+
+	return tcpTargets, udpTargets
+}
