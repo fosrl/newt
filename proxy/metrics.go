@@ -129,8 +129,15 @@ func classifyProxyError(err error) string {
 		return "closed"
 	}
 	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return "timeout"
+	if errors.As(err, &ne) {
+		if ne.Timeout() {
+			return "timeout"
+		}
+		// Temporary() is deprecated, but we keep this branch to preserve the
+		// pre-refactor telemetry classification behavior.
+		if ne.Temporary() {
+			return "temporary"
+		}
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
