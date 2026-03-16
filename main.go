@@ -302,10 +302,10 @@ func runNewtMain(ctx context.Context) {
 		flag.StringVar(&dockerSocket, "docker-socket", "", "Path or address to Docker socket (typically unix:///var/run/docker.sock)")
 	}
 	if pingIntervalStr == "" {
-		flag.StringVar(&pingIntervalStr, "ping-interval", "3s", "Interval for pinging the server (default 3s)")
+		flag.StringVar(&pingIntervalStr, "ping-interval", "15s", "Interval for pinging the server (default 15s)")
 	}
 	if pingTimeoutStr == "" {
-		flag.StringVar(&pingTimeoutStr, "ping-timeout", "5s", "	Timeout for each ping (default 5s)")
+		flag.StringVar(&pingTimeoutStr, "ping-timeout", "7s", "	Timeout for each ping (default 7s)")
 	}
 	// load the prefer endpoint just as a flag
 	flag.StringVar(&preferEndpoint, "prefer-endpoint", "", "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
@@ -330,21 +330,21 @@ func runNewtMain(ctx context.Context) {
 	if pingIntervalStr != "" {
 		pingInterval, err = time.ParseDuration(pingIntervalStr)
 		if err != nil {
-			fmt.Printf("Invalid PING_INTERVAL value: %s, using default 3 seconds\n", pingIntervalStr)
-			pingInterval = 3 * time.Second
+			fmt.Printf("Invalid PING_INTERVAL value: %s, using default 15 seconds\n", pingIntervalStr)
+			pingInterval = 15 * time.Second
 		}
 	} else {
-		pingInterval = 3 * time.Second
+		pingInterval = 15 * time.Second
 	}
 
 	if pingTimeoutStr != "" {
 		pingTimeout, err = time.ParseDuration(pingTimeoutStr)
 		if err != nil {
-			fmt.Printf("Invalid PING_TIMEOUT value: %s, using default 5 seconds\n", pingTimeoutStr)
-			pingTimeout = 5 * time.Second
+			fmt.Printf("Invalid PING_TIMEOUT value: %s, using default 7 seconds\n", pingTimeoutStr)
+			pingTimeout = 7 * time.Second
 		}
 	} else {
-		pingTimeout = 5 * time.Second
+		pingTimeout = 7 * time.Second
 	}
 
 	if dockerEnforceNetworkValidation == "" {
