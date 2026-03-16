@@ -2,20 +2,17 @@ package proxy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/fosrl/newt/internal/state"
 	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -46,84 +43,6 @@ type ProxyManager struct {
 	flushStop       chan struct{}
 }
 
-// tunnelEntry holds per-tunnel attributes and (optional) async counters.
-type tunnelEntry struct {
-	attrInTCP  attribute.Set
-	attrOutTCP attribute.Set
-	attrInUDP  attribute.Set
-	attrOutUDP attribute.Set
-
-	bytesInTCP  atomic.Uint64
-	bytesOutTCP atomic.Uint64
-	bytesInUDP  atomic.Uint64
-	bytesOutUDP atomic.Uint64
-
-	activeTCP atomic.Int64
-	activeUDP atomic.Int64
-}
-
-// countingWriter wraps an io.Writer and adds bytes to OTel counter using a pre-built attribute set.
-type countingWriter struct {
-	ctx   context.Context
-	w     io.Writer
-	set   attribute.Set
-	pm    *ProxyManager
-	ent   *tunnelEntry
-	out   bool   // false=in, true=out
-	proto string // "tcp" or "udp"
-}
-
-func (cw *countingWriter) Write(p []byte) (int, error) {
-	n, err := cw.w.Write(p)
-	if n > 0 {
-		if cw.pm != nil && cw.pm.asyncBytes && cw.ent != nil {
-			switch cw.proto {
-			case "tcp":
-				if cw.out {
-					cw.ent.bytesOutTCP.Add(uint64(n))
-				} else {
-					cw.ent.bytesInTCP.Add(uint64(n))
-				}
-			case "udp":
-				if cw.out {
-					cw.ent.bytesOutUDP.Add(uint64(n))
-				} else {
-					cw.ent.bytesInUDP.Add(uint64(n))
-				}
-			}
-		} else {
-			telemetry.AddTunnelBytesSet(cw.ctx, int64(n), cw.set)
-		}
-	}
-	return n, err
-}
-
-func classifyProxyError(err error) string {
-	if err == nil {
-		return ""
-	}
-	if errors.Is(err, net.ErrClosed) {
-		return "closed"
-	}
-	if ne, ok := err.(net.Error); ok {
-		if ne.Timeout() {
-			return "timeout"
-		}
-		if ne.Temporary() {
-			return "temporary"
-		}
-	}
-	msg := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(msg, "refused"):
-		return "refused"
-	case strings.Contains(msg, "reset"):
-		return "reset"
-	default:
-		return "io_error"
-	}
-}
-
 // NewProxyManager creates a new proxy manager instance
 func NewProxyManager(tnet *netstack.Net) *ProxyManager {
 	return &ProxyManager{
@@ -144,32 +63,7 @@ func (pm *ProxyManager) SetTunnelID(id string) {
 	if _, ok := pm.tunnels[id]; !ok {
 		pm.tunnels[id] = &tunnelEntry{}
 	}
-	e := pm.tunnels[id]
-	// include site labels if available
-	site := telemetry.SiteLabelKVs()
-	build := func(base []attribute.KeyValue) attribute.Set {
-		if telemetry.ShouldIncludeTunnelID() {
-			base = append([]attribute.KeyValue{attribute.String("tunnel_id", id)}, base...)
-		}
-		base = append(site, base...)
-		return attribute.NewSet(base...)
-	}
-	e.attrInTCP = build([]attribute.KeyValue{
-		attribute.String("direction", "ingress"),
-		attribute.String("protocol", "tcp"),
-	})
-	e.attrOutTCP = build([]attribute.KeyValue{
-		attribute.String("direction", "egress"),
-		attribute.String("protocol", "tcp"),
-	})
-	e.attrInUDP = build([]attribute.KeyValue{
-		attribute.String("direction", "ingress"),
-		attribute.String("protocol", "udp"),
-	})
-	e.attrOutUDP = build([]attribute.KeyValue{
-		attribute.String("direction", "egress"),
-		attribute.String("protocol", "udp"),
-	})
+	pm.tunnels[id].buildAttrs(id)
 }
 
 // ClearTunnelID clears cached attribute sets for the current tunnel.
@@ -181,23 +75,7 @@ func (pm *ProxyManager) ClearTunnelID() {
 		return
 	}
 	if e, ok := pm.tunnels[id]; ok {
-		// final flush for this tunnel
-		inTCP := e.bytesInTCP.Swap(0)
-		outTCP := e.bytesOutTCP.Swap(0)
-		inUDP := e.bytesInUDP.Swap(0)
-		outUDP := e.bytesOutUDP.Swap(0)
-		if inTCP > 0 {
-			telemetry.AddTunnelBytesSet(context.Background(), int64(inTCP), e.attrInTCP)
-		}
-		if outTCP > 0 {
-			telemetry.AddTunnelBytesSet(context.Background(), int64(outTCP), e.attrOutTCP)
-		}
-		if inUDP > 0 {
-			telemetry.AddTunnelBytesSet(context.Background(), int64(inUDP), e.attrInUDP)
-		}
-		if outUDP > 0 {
-			telemetry.AddTunnelBytesSet(context.Background(), int64(outUDP), e.attrOutUDP)
-		}
+		e.flush()
 		delete(pm.tunnels, id)
 	}
 	pm.currentTunnelID = ""
@@ -362,43 +240,13 @@ func (pm *ProxyManager) flushLoop() {
 		case <-ticker.C:
 			pm.mutex.RLock()
 			for _, e := range pm.tunnels {
-				inTCP := e.bytesInTCP.Swap(0)
-				outTCP := e.bytesOutTCP.Swap(0)
-				inUDP := e.bytesInUDP.Swap(0)
-				outUDP := e.bytesOutUDP.Swap(0)
-				if inTCP > 0 {
-					telemetry.AddTunnelBytesSet(context.Background(), int64(inTCP), e.attrInTCP)
-				}
-				if outTCP > 0 {
-					telemetry.AddTunnelBytesSet(context.Background(), int64(outTCP), e.attrOutTCP)
-				}
-				if inUDP > 0 {
-					telemetry.AddTunnelBytesSet(context.Background(), int64(inUDP), e.attrInUDP)
-				}
-				if outUDP > 0 {
-					telemetry.AddTunnelBytesSet(context.Background(), int64(outUDP), e.attrOutUDP)
-				}
+				e.flush()
 			}
 			pm.mutex.RUnlock()
 		case <-pm.flushStop:
 			pm.mutex.RLock()
 			for _, e := range pm.tunnels {
-				inTCP := e.bytesInTCP.Swap(0)
-				outTCP := e.bytesOutTCP.Swap(0)
-				inUDP := e.bytesInUDP.Swap(0)
-				outUDP := e.bytesOutUDP.Swap(0)
-				if inTCP > 0 {
-					telemetry.AddTunnelBytesSet(context.Background(), int64(inTCP), e.attrInTCP)
-				}
-				if outTCP > 0 {
-					telemetry.AddTunnelBytesSet(context.Background(), int64(outTCP), e.attrOutTCP)
-				}
-				if inUDP > 0 {
-					telemetry.AddTunnelBytesSet(context.Background(), int64(inUDP), e.attrInUDP)
-				}
-				if outUDP > 0 {
-					telemetry.AddTunnelBytesSet(context.Background(), int64(outUDP), e.attrOutUDP)
-				}
+				e.flush()
 			}
 			pm.mutex.RUnlock()
 			return
@@ -536,19 +384,19 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 			var wg sync.WaitGroup
 			wg.Add(2)
 
-			go func(ent *tunnelEntry) {
+			go func(ent *tunnelEntry, async bool) {
 				defer wg.Done()
-				cw := &countingWriter{ctx: context.Background(), w: target, set: ent.attrInTCP, pm: pm, ent: ent, out: false, proto: "tcp"}
+				cw := &countingWriter{ctx: context.Background(), w: target, set: ent.attrInTCP, entry: ent, asyncBytes: async, out: false, proto: "tcp"}
 				_, _ = io.Copy(cw, accepted)
 				_ = target.Close()
-			}(entry)
+			}(entry, pm.asyncBytes)
 
-			go func(ent *tunnelEntry) {
+			go func(ent *tunnelEntry, async bool) {
 				defer wg.Done()
-				cw := &countingWriter{ctx: context.Background(), w: accepted, set: ent.attrOutTCP, pm: pm, ent: ent, out: true, proto: "tcp"}
+				cw := &countingWriter{ctx: context.Background(), w: accepted, set: ent.attrOutTCP, entry: ent, asyncBytes: async, out: true, proto: "tcp"}
 				_, _ = io.Copy(cw, target)
 				_ = accepted.Close()
-			}(entry)
+			}(entry, pm.asyncBytes)
 
 			wg.Wait()
 			if tunnelID != "" {
