@@ -48,6 +48,23 @@ type SubnetRule struct {
 	PortRanges   []PortRange  // empty slice means all ports allowed
 }
 
+// GetAllRules returns a copy of all subnet rules
+func (sl *SubnetLookup) GetAllRules() []SubnetRule {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+
+	var rules []SubnetRule
+	for _, destTriePtr := range sl.sourceTrie.All() {
+		if destTriePtr == nil {
+			continue
+		}
+		for _, rule := range destTriePtr.rules {
+			rules = append(rules, *rule)
+		}
+	}
+	return rules
+}
+
 // connKey uniquely identifies a connection for NAT tracking
 type connKey struct {
 	srcIP   string
@@ -198,6 +215,14 @@ func (p *ProxyHandler) RemoveSubnetRule(sourcePrefix, destPrefix netip.Prefix) {
 		return
 	}
 	p.subnetLookup.RemoveSubnet(sourcePrefix, destPrefix)
+}
+
+// GetAllRules returns all subnet rules from the proxy handler
+func (p *ProxyHandler) GetAllRules() []SubnetRule {
+	if p == nil || !p.enabled {
+		return nil
+	}
+	return p.subnetLookup.GetAllRules()
 }
 
 // LookupDestinationRewrite looks up the rewritten destination for a connection
