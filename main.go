@@ -618,7 +618,7 @@ func runNewtMain(ctx context.Context) {
 	var connected bool
 	var wgData WgData
 	var dockerEventMonitor *docker.EventMonitor
-	
+
 	if !disableClients {
 		setupClients(client)
 	}
@@ -1197,7 +1197,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			len(syncData.Targets.TCP), len(syncData.Targets.UDP), len(syncData.HealthCheckTargets))
 
 		//TODO: TEST AND IMPLEMENT THIS
-		
+
 		// // Build sets of desired targets (port -> target string)
 		// desiredTCP := make(map[int]string)
 		// for _, t := range syncData.Targets.TCP {
@@ -1793,6 +1793,8 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 	if pm != nil {
 		pm.Stop()
 	}
+
+	client.SendMessage("newt/disconnecting", map[string]any{})
 
 	if client != nil {
 		client.Close()
