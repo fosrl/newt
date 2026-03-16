@@ -36,11 +36,11 @@ type ProxyManager struct {
 	udpTargets map[string]map[int]string
 	listeners  []*gonet.TCPListener
 	udpConns   []*gonet.UDPConn
-	running    bool
+	running    atomic.Bool
 	mutex      sync.RWMutex
 
 	// telemetry (multi-tunnel)
-	currentTunnelID string
+	currentTunnelID atomic.Value // stores string
 	tunnels         map[string]*tunnelEntry
 	asyncBytes      bool
 	flushStop       chan struct{}
@@ -126,7 +126,7 @@ func classifyProxyError(err error) string {
 
 // NewProxyManager creates a new proxy manager instance
 func NewProxyManager(tnet *netstack.Net) *ProxyManager {
-	return &ProxyManager{
+	pm := &ProxyManager{
 		tnet:       tnet,
 		tcpTargets: make(map[string]map[int]string),
 		udpTargets: make(map[string]map[int]string),
@@ -134,13 +134,38 @@ func NewProxyManager(tnet *netstack.Net) *ProxyManager {
 		udpConns:   make([]*gonet.UDPConn, 0),
 		tunnels:    make(map[string]*tunnelEntry),
 	}
+	pm.currentTunnelID.Store("")
+	return pm
+}
+
+// getTunnelID returns the current tunnel ID safely.
+func (pm *ProxyManager) getTunnelID() string {
+	if v := pm.currentTunnelID.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// setTunnelID sets the current tunnel ID safely.
+func (pm *ProxyManager) setTunnelID(id string) {
+	pm.currentTunnelID.Store(id)
+}
+
+// isRunning returns whether the proxy manager is running.
+func (pm *ProxyManager) isRunning() bool {
+	return pm.running.Load()
+}
+
+// setRunning sets the running state.
+func (pm *ProxyManager) setRunning(r bool) {
+	pm.running.Store(r)
 }
 
 // SetTunnelID sets the WireGuard peer public key used as tunnel_id label.
 func (pm *ProxyManager) SetTunnelID(id string) {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
-	pm.currentTunnelID = id
+	pm.setTunnelID(id)
 	if _, ok := pm.tunnels[id]; !ok {
 		pm.tunnels[id] = &tunnelEntry{}
 	}
@@ -176,7 +201,7 @@ func (pm *ProxyManager) SetTunnelID(id string) {
 func (pm *ProxyManager) ClearTunnelID() {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
-	id := pm.currentTunnelID
+	id := pm.getTunnelID()
 	if id == "" {
 		return
 	}
@@ -200,7 +225,7 @@ func (pm *ProxyManager) ClearTunnelID() {
 		}
 		delete(pm.tunnels, id)
 	}
-	pm.currentTunnelID = ""
+	pm.setTunnelID("")
 }
 
 // init function without tnet
@@ -240,7 +265,7 @@ func (pm *ProxyManager) AddTarget(proto, listenIP string, port int, targetAddr s
 		return fmt.Errorf(errUnsupportedProtoFmt, proto)
 	}
 
-	if pm.running {
+	if pm.isRunning() {
 		return pm.startTarget(proto, listenIP, port, targetAddr)
 	} else {
 		logger.Debug("Not adding target because not running")
@@ -311,7 +336,7 @@ func (pm *ProxyManager) Start() error {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
 
-	if pm.running {
+	if pm.isRunning() {
 		return nil
 	}
 
@@ -333,7 +358,7 @@ func (pm *ProxyManager) Start() error {
 		}
 	}
 
-	pm.running = true
+	pm.setRunning(true)
 	return nil
 }
 
@@ -410,12 +435,12 @@ func (pm *ProxyManager) Stop() error {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
 
-	if !pm.running {
+	if !pm.isRunning() {
 		return nil
 	}
 
 	// Set running to false first to signal handlers to stop
-	pm.running = false
+	pm.setRunning(false)
 
 	// Close TCP listeners
 	for i := len(pm.listeners) - 1; i >= 0; i-- {
@@ -494,8 +519,8 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			telemetry.IncProxyAccept(context.Background(), pm.currentTunnelID, "tcp", "failure", classifyProxyError(err))
-			if !pm.running {
+			telemetry.IncProxyAccept(context.Background(), pm.getTunnelID(), "tcp", "failure", classifyProxyError(err))
+			if !pm.isRunning() {
 				return
 			}
 			if ne, ok := err.(net.Error); ok && !ne.Temporary() {
@@ -507,7 +532,7 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 			continue
 		}
 
-		tunnelID := pm.currentTunnelID
+		tunnelID := pm.getTunnelID()
 		telemetry.IncProxyAccept(context.Background(), tunnelID, "tcp", "success", "")
 		telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "tcp", telemetry.ProxyConnectionOpened)
 		if tunnelID != "" {
@@ -571,7 +596,7 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 	for {
 		n, remoteAddr, err := conn.ReadFrom(buffer)
 		if err != nil {
-			if !pm.running {
+			if !pm.isRunning() {
 				// Clean up all connections when stopping
 				clientsMutex.Lock()
 				for _, targetConn := range clientConns {
@@ -603,13 +628,13 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 
 		clientKey := remoteAddr.String()
 		// bytes from client -> target (direction=in)
-		if pm.currentTunnelID != "" && n > 0 {
+		if pm.getTunnelID() != "" && n > 0 {
 			if pm.asyncBytes {
-				if e := pm.getEntry(pm.currentTunnelID); e != nil {
+				if e := pm.getEntry(pm.getTunnelID()); e != nil {
 					e.bytesInUDP.Add(uint64(n))
 				}
 			} else {
-				if e := pm.getEntry(pm.currentTunnelID); e != nil {
+				if e := pm.getEntry(pm.getTunnelID()); e != nil {
 					telemetry.AddTunnelBytesSet(context.Background(), int64(n), e.attrInUDP)
 				}
 			}
@@ -622,17 +647,17 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			targetUDPAddr, err := net.ResolveUDPAddr("udp", targetAddr)
 			if err != nil {
 				logger.Error("Error resolving target address: %v", err)
-				telemetry.IncProxyAccept(context.Background(), pm.currentTunnelID, "udp", "failure", "resolve")
+				telemetry.IncProxyAccept(context.Background(), pm.getTunnelID(), "udp", "failure", "resolve")
 				continue
 			}
 
 			targetConn, err = net.DialUDP("udp", nil, targetUDPAddr)
 			if err != nil {
 				logger.Error("Error connecting to target: %v", err)
-				telemetry.IncProxyAccept(context.Background(), pm.currentTunnelID, "udp", "failure", classifyProxyError(err))
+				telemetry.IncProxyAccept(context.Background(), pm.getTunnelID(), "udp", "failure", classifyProxyError(err))
 				continue
 			}
-			tunnelID := pm.currentTunnelID
+			tunnelID := pm.getTunnelID()
 			telemetry.IncProxyAccept(context.Background(), tunnelID, "udp", "success", "")
 			telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "udp", telemetry.ProxyConnectionOpened)
 			// Only increment activeUDP after a successful DialUDP
@@ -672,13 +697,13 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 					}
 
 					// bytes from target -> client (direction=out)
-					if pm.currentTunnelID != "" && n > 0 {
+					if pm.getTunnelID() != "" && n > 0 {
 						if pm.asyncBytes {
-							if e := pm.getEntry(pm.currentTunnelID); e != nil {
+							if e := pm.getEntry(pm.getTunnelID()); e != nil {
 								e.bytesOutUDP.Add(uint64(n))
 							}
 						} else {
-							if e := pm.getEntry(pm.currentTunnelID); e != nil {
+							if e := pm.getEntry(pm.getTunnelID()); e != nil {
 								telemetry.AddTunnelBytesSet(context.Background(), int64(n), e.attrOutUDP)
 							}
 						}
@@ -687,7 +712,7 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 					_, err = conn.WriteTo(buffer[:n], remoteAddr)
 					if err != nil {
 						logger.Error("Error writing to client: %v", err)
-						telemetry.IncProxyDrops(context.Background(), pm.currentTunnelID, "udp")
+						telemetry.IncProxyDrops(context.Background(), pm.getTunnelID(), "udp")
 						result = "failure"
 						return // defer will handle cleanup
 					}
@@ -698,18 +723,18 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 		written, err := targetConn.Write(buffer[:n])
 		if err != nil {
 			logger.Error("Error writing to target: %v", err)
-			telemetry.IncProxyDrops(context.Background(), pm.currentTunnelID, "udp")
+			telemetry.IncProxyDrops(context.Background(), pm.getTunnelID(), "udp")
 			targetConn.Close()
 			clientsMutex.Lock()
 			delete(clientConns, clientKey)
 			clientsMutex.Unlock()
-		} else if pm.currentTunnelID != "" && written > 0 {
+		} else if pm.getTunnelID() != "" && written > 0 {
 			if pm.asyncBytes {
-				if e := pm.getEntry(pm.currentTunnelID); e != nil {
+				if e := pm.getEntry(pm.getTunnelID()); e != nil {
 					e.bytesInUDP.Add(uint64(written))
 				}
 			} else {
-				if e := pm.getEntry(pm.currentTunnelID); e != nil {
+				if e := pm.getEntry(pm.getTunnelID()); e != nil {
 					telemetry.AddTunnelBytesSet(context.Background(), int64(written), e.attrInUDP)
 				}
 			}
