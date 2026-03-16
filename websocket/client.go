@@ -38,7 +38,6 @@ type Client struct {
 	isConnected       bool
 	reconnectMux      sync.RWMutex
 	pingInterval      time.Duration
-	pingTimeout       time.Duration
 	onConnect         func() error
 	onTokenUpdate     func(token string)
 	writeMux          sync.Mutex
@@ -117,7 +116,7 @@ func (c *Client) MetricsContext() context.Context {
 }
 
 // NewClient creates a new websocket client
-func NewClient(clientType string, ID, secret string, endpoint string, pingInterval time.Duration, pingTimeout time.Duration, opts ...ClientOption) (*Client, error) {
+func NewClient(clientType string, ID, secret string, endpoint string, pingInterval time.Duration, opts ...ClientOption) (*Client, error) {
 	config := &Config{
 		ID:       ID,
 		Secret:   secret,
@@ -132,7 +131,6 @@ func NewClient(clientType string, ID, secret string, endpoint string, pingInterv
 		reconnectInterval: 3 * time.Second,
 		isConnected:       false,
 		pingInterval:      pingInterval,
-		pingTimeout:       pingTimeout,
 		clientType:        clientType,
 	}
 

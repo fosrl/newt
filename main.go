@@ -566,7 +566,6 @@ func runNewtMain(ctx context.Context) {
 		secret, // CLI arg takes precedence
 		endpoint,
 		30*time.Second,
-		pingTimeout,
 		opt,
 	)
 	if err != nil {
