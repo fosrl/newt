@@ -518,8 +518,9 @@ func (pm *ProxyManager) getEntry(id string) *tunnelEntry {
 func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string) {
 	for {
 		conn, err := listener.Accept()
+		tunnelID := pm.getTunnelID()
+
 		if err != nil {
-			tunnelID := pm.getTunnelID()
 			telemetry.IncProxyAccept(context.Background(), tunnelID, "tcp", "failure", classifyProxyError(err))
 			if !pm.isRunning() {
 				return
@@ -533,7 +534,6 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 			continue
 		}
 
-		tunnelID := pm.getTunnelID()
 		telemetry.IncProxyAccept(context.Background(), tunnelID, "tcp", "success", "")
 		telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "tcp", telemetry.ProxyConnectionOpened)
 		if tunnelID != "" {
