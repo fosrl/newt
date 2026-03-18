@@ -5,7 +5,9 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -365,11 +367,12 @@ func (m *Monitor) performHealthCheck(target *Target) {
 	target.LastCheck = time.Now()
 	target.LastError = ""
 
-	// Build URL
-	url := fmt.Sprintf("%s://%s", target.Config.Scheme, target.Config.Hostname)
+	// Build URL (use net.JoinHostPort to properly handle IPv6 addresses with ports)
+	host := target.Config.Hostname
 	if target.Config.Port > 0 {
-		url = fmt.Sprintf("%s:%d", url, target.Config.Port)
+		host = net.JoinHostPort(target.Config.Hostname, strconv.Itoa(target.Config.Port))
 	}
+	url := fmt.Sprintf("%s://%s", target.Config.Scheme, host)
 	if target.Config.Path != "" {
 		if !strings.HasPrefix(target.Config.Path, "/") {
 			url += "/"
