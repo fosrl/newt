@@ -43,6 +43,7 @@ type Target struct {
 	RewriteTo      string      `json:"rewriteTo,omitempty"`
 	DisableIcmp    bool        `json:"disableIcmp,omitempty"`
 	PortRange      []PortRange `json:"portRange,omitempty"`
+	ResourceId     int         `json:"resourceId,omitempty"`
 }
 
 type PortRange struct {
@@ -194,6 +195,15 @@ func (s *WireGuardService) Close() {
 	if s.stopGetConfig != nil {
 		s.stopGetConfig()
 		s.stopGetConfig = nil
+	}
+
+	// Flush access logs before tearing down the tunnel
+	if s.tnet != nil {
+		if ph := s.tnet.GetProxyHandler(); ph != nil {
+			if al := ph.GetAccessLogger(); al != nil {
+				al.Close()
+			}
+		}
 	}
 
 	// Stop the direct UDP relay first
@@ -663,7 +673,7 @@ func (s *WireGuardService) syncTargets(desiredTargets []Target) error {
 				})
 			}
 
-			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
+			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp, target.ResourceId)
 			logger.Info("Added target %s -> %s during sync", target.SourcePrefix, target.DestPrefix)
 		}
 	}
@@ -794,6 +804,13 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 
 	s.TunnelIP = tunnelIP.String()
 
+	// Configure the access log sender to ship compressed session logs via websocket
+	s.tnet.SetAccessLogSender(func(data string) error {
+		return s.client.SendMessageNoLog("newt/access-log", map[string]interface{}{
+			"compressed": data,
+		})
+	})
+
 	// Create WireGuard device using the shared bind
 	s.device = device.NewDevice(s.tun, s.sharedBind, device.NewLogger(
 		device.LogLevelSilent, // Use silent logging by default - could be made configurable
@@ -914,7 +931,7 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 			if err != nil {
 				return fmt.Errorf("invalid CIDR %s: %v", sp, err)
 			}
-			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
+			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp, target.ResourceId)
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}
 	}
@@ -1307,7 +1324,7 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 				logger.Info("Invalid CIDR %s: %v", sp, err)
 				continue
 			}
-			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
+			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp, target.ResourceId)
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}
 	}
@@ -1425,7 +1442,7 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 				logger.Info("Invalid CIDR %s: %v", sp, err)
 				continue
 			}
-			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
+			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp, target.ResourceId)
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}
 	}
