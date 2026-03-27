@@ -162,6 +162,9 @@ var (
 
 	// Provisioning key – exchanged once for a permanent newt ID + secret
 	provisioningKey string
+
+	// Path to config file (overrides CONFIG_FILE env var and default location)
+	configFile string
 )
 
 func main() {
@@ -268,6 +271,7 @@ func runNewtMain(ctx context.Context) {
 	noCloudEnv := os.Getenv("NO_CLOUD")
 	noCloud = noCloudEnv == "true"
 	provisioningKey = os.Getenv("NEWT_PROVISIONING_KEY")
+	configFile = os.Getenv("CONFIG_FILE")
 
 	if endpoint == "" {
 		flag.StringVar(&endpoint, "endpoint", "", "Endpoint of your pangolin server")
@@ -318,6 +322,9 @@ func runNewtMain(ctx context.Context) {
 	flag.StringVar(&preferEndpoint, "prefer-endpoint", "", "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
 	if provisioningKey == "" {
 		flag.StringVar(&provisioningKey, "provisioning-key", "", "One-time provisioning key used to obtain a newt ID and secret from the server")
+	}
+	if configFile == "" {
+		flag.StringVar(&configFile, "config-file", "", "Path to config file (overrides CONFIG_FILE env var and default location)")
 	}
 
 	// Add new mTLS flags
@@ -593,6 +600,7 @@ func runNewtMain(ctx context.Context) {
 		endpoint,
 		30*time.Second,
 		opt,
+		websocket.WithConfigFile(configFile),
 	)
 	if err != nil {
 		logger.Fatal("Failed to create client: %v", err)

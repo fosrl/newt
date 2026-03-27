@@ -42,6 +42,7 @@ type Client struct {
 	onTokenUpdate     func(token string)
 	writeMux          sync.Mutex
 	clientType        string // Type of client (e.g., "newt", "olm")
+	configFilePath    string // Optional override for the config file path
 	tlsConfig         TLSConfig
 	metricsCtxMu      sync.RWMutex
 	metricsCtx        context.Context
@@ -77,6 +78,12 @@ func WithBaseURL(url string) ClientOption {
 }
 
 // WithTLSConfig sets the TLS configuration for the client
+func WithConfigFile(path string) ClientOption {
+	return func(c *Client) {
+		c.configFilePath = path
+	}
+}
+
 func WithTLSConfig(config TLSConfig) ClientOption {
 	return func(c *Client) {
 		c.tlsConfig = config

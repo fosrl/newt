@@ -19,7 +19,10 @@ import (
 	"github.com/fosrl/newt/logger"
 )
 
-func getConfigPath(clientType string) string {
+func getConfigPath(clientType string, overridePath string) string {
+	if overridePath != "" {
+		return overridePath
+	}
 	configFile := os.Getenv("CONFIG_FILE")
 	if configFile == "" {
 		var configDir string
@@ -45,7 +48,7 @@ func getConfigPath(clientType string) string {
 
 func (c *Client) loadConfig() error {
 	originalConfig := *c.config // Store original config to detect changes
-	configPath := getConfigPath(c.clientType)
+	configPath := getConfigPath(c.clientType, c.configFilePath)
 
 	if c.config.ID != "" && c.config.Secret != "" && c.config.Endpoint != "" {
 		logger.Debug("Config already provided, skipping loading from file")
@@ -118,7 +121,7 @@ func (c *Client) saveConfig() error {
 		return nil
 	}
 
-	configPath := getConfigPath(c.clientType)
+	configPath := getConfigPath(c.clientType, c.configFilePath)
 	data, err := json.MarshalIndent(c.config, "", "  ")
 	if err != nil {
 		return err
