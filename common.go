@@ -287,9 +287,12 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 							}
 							stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
 							// Send registration message to the server for backward compatibility
+							bcChainId := generateChainId()
+							pendingRegisterChainId = bcChainId
 							err := client.SendMessage("newt/wg/register", map[string]interface{}{
 								"publicKey":           publicKey.String(),
 								"backwardsCompatible": true,
+								"chainId":             bcChainId,
 							})
 							if err != nil {
 								logger.Error("Failed to send registration message: %v", err)
