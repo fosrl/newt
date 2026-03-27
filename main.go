@@ -159,6 +159,9 @@ var (
 
 	// Legacy PKCS12 support (deprecated)
 	tlsPrivateKey string
+
+	// Provisioning key – exchanged once for a permanent newt ID + secret
+	provisioningKey string
 )
 
 func main() {
@@ -264,6 +267,7 @@ func runNewtMain(ctx context.Context) {
 	blueprintFile = os.Getenv("BLUEPRINT_FILE")
 	noCloudEnv := os.Getenv("NO_CLOUD")
 	noCloud = noCloudEnv == "true"
+	provisioningKey = os.Getenv("NEWT_PROVISIONING_KEY")
 
 	if endpoint == "" {
 		flag.StringVar(&endpoint, "endpoint", "", "Endpoint of your pangolin server")
@@ -312,6 +316,9 @@ func runNewtMain(ctx context.Context) {
 	}
 	// load the prefer endpoint just as a flag
 	flag.StringVar(&preferEndpoint, "prefer-endpoint", "", "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
+	if provisioningKey == "" {
+		flag.StringVar(&provisioningKey, "provisioning-key", "", "One-time provisioning key used to obtain a newt ID and secret from the server")
+	}
 
 	// Add new mTLS flags
 	if tlsClientCert == "" {
@@ -590,6 +597,12 @@ func runNewtMain(ctx context.Context) {
 	if err != nil {
 		logger.Fatal("Failed to create client: %v", err)
 	}
+	// If a provisioning key was supplied via CLI / env and the config file did
+	// not already carry one, inject it now so provisionIfNeeded() can use it.
+	if provisioningKey != "" && client.GetConfig().ProvisioningKey == "" {
+		client.GetConfig().ProvisioningKey = provisioningKey
+	}
+
 	endpoint = client.GetConfig().Endpoint // Update endpoint from config
 	id = client.GetConfig().ID             // Update ID from config
 	// Update site labels for metrics with the resolved ID

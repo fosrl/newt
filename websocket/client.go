@@ -481,6 +481,11 @@ func (c *Client) connectWithRetry() {
 func (c *Client) establishConnection() error {
 	ctx := context.Background()
 
+	// Exchange provisioning key for permanent credentials if needed.
+	if err := c.provisionIfNeeded(); err != nil {
+		return fmt.Errorf("failed to provision newt credentials: %w", err)
+	}
+
 	// Get token for authentication
 	token, err := c.getToken()
 	if err != nil {
