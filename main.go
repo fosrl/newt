@@ -62,6 +62,7 @@ type TargetData struct {
 
 type ExitNodeData struct {
 	ExitNodes []ExitNode `json:"exitNodes"`
+	ChainId   string     `json:"chainId"`
 }
 
 // ExitNode represents an exit node with an ID, endpoint, and weight.
@@ -132,6 +133,7 @@ var (
 	pingStopChan                       chan struct{}
 	stopFunc                           func()
 	pendingRegisterChainId             string
+	pendingPingChainId                 string
 	healthFile                         string
 	useNativeInterface                 bool
 	authorizedKeysFile                 string
@@ -919,8 +921,11 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
 
 		// Request exit nodes from the server
+		pingChainId := generateChainId()
+		pendingPingChainId = pingChainId
 		stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{
 			"noCloud": noCloud,
+			"chainId": pingChainId,
 		}, 3*time.Second)
 
 		logger.Info("Tunnel destroyed, ready for reconnection")
@@ -949,6 +954,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 	client.RegisterHandler("newt/ping/exitNodes", func(msg websocket.WSMessage) {
 		logger.Debug("Received ping message")
+
 		if stopFunc != nil {
 			stopFunc()     // stop the ws from sending more requests
 			stopFunc = nil // reset stopFunc to nil to avoid double stopping
@@ -967,6 +973,14 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			return
 		}
 		exitNodes := exitNodeData.ExitNodes
+
+		if exitNodeData.ChainId != "" {
+			if exitNodeData.ChainId != pendingPingChainId {
+				logger.Debug("Discarding duplicate/stale newt/ping/exitNodes (chainId=%s, expected=%s)", exitNodeData.ChainId, pendingPingChainId)
+				return
+			}
+			pendingPingChainId = "" // consume – further duplicates with this id are rejected
+		}
 
 		if len(exitNodes) == 0 {
 			logger.Info("No exit nodes provided")
@@ -1762,8 +1776,11 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				stopFunc()
 			}
 			// request from the server the list of nodes to ping
+			pingChainId := generateChainId()
+			pendingPingChainId = pingChainId
 			stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{
 				"noCloud": noCloud,
+				"chainId": pingChainId,
 			}, 3*time.Second)
 			logger.Debug("Requesting exit nodes from server")
 
