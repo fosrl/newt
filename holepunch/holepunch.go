@@ -27,16 +27,17 @@ type ExitNode struct {
 
 // Manager handles UDP hole punching operations
 type Manager struct {
-	mu         sync.Mutex
-	running    bool
-	stopChan   chan struct{}
-	sharedBind *bind.SharedBind
-	ID         string
-	token      string
-	publicKey  string
-	clientType string
-	exitNodes  map[string]ExitNode // key is endpoint
-	updateChan chan struct{}       // signals the goroutine to refresh exit nodes
+	mu          sync.Mutex
+	running     bool
+	stopChan    chan struct{}
+	sharedBind  *bind.SharedBind
+	ID          string
+	token       string
+	publicKey   string
+	clientType  string
+	exitNodes   map[string]ExitNode // key is endpoint
+	updateChan  chan struct{}        // signals the goroutine to refresh exit nodes
+	publicDNS []string
 
 	sendHolepunchInterval    time.Duration
 	sendHolepunchIntervalMin time.Duration
@@ -49,12 +50,13 @@ const defaultSendHolepunchIntervalMax = 60 * time.Second
 const defaultSendHolepunchIntervalMin = 1 * time.Second
 
 // NewManager creates a new hole punch manager
-func NewManager(sharedBind *bind.SharedBind, ID string, clientType string, publicKey string) *Manager {
+func NewManager(sharedBind *bind.SharedBind, ID string, clientType string, publicKey string, publicDNS []string) *Manager {
 	return &Manager{
 		sharedBind:               sharedBind,
 		ID:                       ID,
 		clientType:               clientType,
 		publicKey:                publicKey,
+		publicDNS:              publicDNS,
 		exitNodes:                make(map[string]ExitNode),
 		sendHolepunchInterval:    defaultSendHolepunchIntervalMin,
 		sendHolepunchIntervalMin: defaultSendHolepunchIntervalMin,
@@ -281,7 +283,13 @@ func (m *Manager) TriggerHolePunch() error {
 	// Send hole punch to all exit nodes
 	successCount := 0
 	for _, exitNode := range currentExitNodes {
-		host, err := util.ResolveDomain(exitNode.Endpoint)
+		var host string
+		var err error
+		if len(m.publicDNS) > 0 {
+			host, err = util.ResolveDomainUpstream(exitNode.Endpoint, m.publicDNS)
+		} else {
+			host, err = util.ResolveDomain(exitNode.Endpoint)
+		}
 		if err != nil {
 			logger.Warn("Failed to resolve endpoint %s: %v", exitNode.Endpoint, err)
 			continue
@@ -392,7 +400,13 @@ func (m *Manager) runMultipleExitNodes() {
 
 		var resolvedNodes []resolvedExitNode
 		for _, exitNode := range currentExitNodes {
-			host, err := util.ResolveDomain(exitNode.Endpoint)
+			var host string
+			var err error
+			if len(m.publicDNS) > 0 {
+				host, err = util.ResolveDomainUpstream(exitNode.Endpoint, m.publicDNS)
+			} else {
+				host, err = util.ResolveDomain(exitNode.Endpoint)
+			}
 			if err != nil {
 				logger.Warn("Failed to resolve endpoint %s: %v", exitNode.Endpoint, err)
 				continue
