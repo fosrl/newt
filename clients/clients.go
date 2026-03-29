@@ -2,6 +2,8 @@ package clients
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -34,6 +36,7 @@ type WgConfig struct {
 	IpAddress string   `json:"ipAddress"`
 	Peers     []Peer   `json:"peers"`
 	Targets   []Target `json:"targets"`
+	ChainId   string   `json:"chainId"`
 }
 
 type Target struct {
@@ -82,7 +85,8 @@ type WireGuardService struct {
 	host          string
 	serverPubKey  string
 	token         string
-	stopGetConfig func()
+	stopGetConfig        func()
+	pendingConfigChainId string
 	// Netstack fields
 	tun    tun.Device
 	tnet   *netstack2.Net
@@ -105,6 +109,13 @@ type WireGuardService struct {
 	netstackListener   net.PacketConn
 	netstackListenerMu sync.Mutex
 	wgTesterServer     *wgtester.Server
+}
+
+// generateChainId generates a random chain ID for deduplicating round-trip messages.
+func generateChainId() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func NewWireGuardService(interfaceName string, port uint16, mtu int, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool) (*WireGuardService, error) {
@@ -441,9 +452,12 @@ func (s *WireGuardService) LoadRemoteConfig() error {
 		s.stopGetConfig()
 		s.stopGetConfig = nil
 	}
+	chainId := generateChainId()
+	s.pendingConfigChainId = chainId
 	s.stopGetConfig = s.client.SendMessageInterval("newt/wg/get-config", map[string]interface{}{
 		"publicKey": s.key.PublicKey().String(),
 		"port":      s.Port,
+		"chainId":   chainId,
 	}, 2*time.Second)
 
 	logger.Debug("Requesting WireGuard configuration from remote server")
@@ -468,6 +482,17 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 		logger.Info("Error unmarshaling target data: %v", err)
 		return
 	}
+
+	// Deduplicate using chainId: discard responses that don't match the
+	// pending request, or that we have already processed.
+	if config.ChainId != "" {
+		if config.ChainId != s.pendingConfigChainId {
+			logger.Debug("Discarding duplicate/stale newt/wg/get-config response (chainId=%s, expected=%s)", config.ChainId, s.pendingConfigChainId)
+			return
+		}
+		s.pendingConfigChainId = "" // consume – further duplicates are rejected
+	}
+
 	s.config = config
 
 	if s.stopGetConfig != nil {
