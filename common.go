@@ -285,7 +285,11 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 							if tunnelID != "" {
 								telemetry.IncReconnect(context.Background(), tunnelID, "client", telemetry.ReasonTimeout)
 							}
-							stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
+							pingChainId := generateChainId()
+							pendingPingChainId = pingChainId
+							stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{
+								"chainId": pingChainId,
+							}, 3*time.Second)
 							// Send registration message to the server for backward compatibility
 							bcChainId := generateChainId()
 							pendingRegisterChainId = bcChainId
