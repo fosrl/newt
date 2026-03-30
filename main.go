@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -46,6 +48,7 @@ type WgData struct {
 	TunnelIP           string               `json:"tunnelIP"`
 	Targets            TargetsByType        `json:"targets"`
 	HealthCheckTargets []healthcheck.Config `json:"healthCheckTargets"`
+	ChainId            string               `json:"chainId"`
 }
 
 type TargetsByType struct {
@@ -59,6 +62,7 @@ type TargetData struct {
 
 type ExitNodeData struct {
 	ExitNodes []ExitNode `json:"exitNodes"`
+	ChainId   string     `json:"chainId"`
 }
 
 // ExitNode represents an exit node with an ID, endpoint, and weight.
@@ -128,6 +132,8 @@ var (
 	publicKey                          wgtypes.Key
 	pingStopChan                       chan struct{}
 	stopFunc                           func()
+	pendingRegisterChainId             string
+	pendingPingChainId                 string
 	healthFile                         string
 	useNativeInterface                 bool
 	authorizedKeysFile                 string
@@ -166,6 +172,13 @@ var (
 	// Path to config file (overrides CONFIG_FILE env var and default location)
 	configFile string
 )
+
+// generateChainId generates a random chain ID for deduplicating round-trip messages.
+func generateChainId() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 func main() {
 	// Check for subcommands first (only principals exits early)
@@ -727,6 +740,24 @@ func runNewtMain(ctx context.Context) {
 		defer func() {
 			telemetry.IncSiteRegistration(ctx, regResult)
 		}()
+
+		// Deduplicate using chainId: if the server echoes back a chainId we have
+		// already consumed (or one that doesn't match our current pending request),
+		// throw the message away to avoid setting up the tunnel twice.
+		var chainData struct {
+			ChainId string `json:"chainId"`
+		}
+		if jsonBytes, err := json.Marshal(msg.Data); err == nil {
+			_ = json.Unmarshal(jsonBytes, &chainData)
+		}
+		if chainData.ChainId != "" {
+			if chainData.ChainId != pendingRegisterChainId {
+				logger.Debug("Discarding duplicate/stale newt/wg/connect (chainId=%s, expected=%s)", chainData.ChainId, pendingRegisterChainId)
+				return
+			}
+			pendingRegisterChainId = "" // consume – further duplicates with this id are rejected
+		}
+
 		if stopFunc != nil {
 			stopFunc()     // stop the ws from sending more requests
 			stopFunc = nil // reset stopFunc to nil to avoid double stopping
@@ -911,8 +942,11 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
 
 		// Request exit nodes from the server
+		pingChainId := generateChainId()
+		pendingPingChainId = pingChainId
 		stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{
 			"noCloud": noCloud,
+			"chainId": pingChainId,
 		}, 3*time.Second)
 
 		logger.Info("Tunnel destroyed, ready for reconnection")
@@ -941,6 +975,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 	client.RegisterHandler("newt/ping/exitNodes", func(msg websocket.WSMessage) {
 		logger.Debug("Received ping message")
+
 		if stopFunc != nil {
 			stopFunc()     // stop the ws from sending more requests
 			stopFunc = nil // reset stopFunc to nil to avoid double stopping
@@ -959,6 +994,14 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			return
 		}
 		exitNodes := exitNodeData.ExitNodes
+
+		if exitNodeData.ChainId != "" {
+			if exitNodeData.ChainId != pendingPingChainId {
+				logger.Debug("Discarding duplicate/stale newt/ping/exitNodes (chainId=%s, expected=%s)", exitNodeData.ChainId, pendingPingChainId)
+				return
+			}
+			pendingPingChainId = "" // consume – further duplicates with this id are rejected
+		}
 
 		if len(exitNodes) == 0 {
 			logger.Info("No exit nodes provided")
@@ -992,10 +1035,13 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				},
 			}
 
+			chainId := generateChainId()
+			pendingRegisterChainId = chainId
 			stopFunc = client.SendMessageInterval(topicWGRegister, map[string]interface{}{
 				"publicKey":   publicKey.String(),
 				"pingResults": pingResults,
 				"newtVersion": newtVersion,
+				"chainId":     chainId,
 			}, 2*time.Second)
 
 			return
@@ -1095,10 +1141,13 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
 
 		// Send the ping results to the cloud for selection
+		chainId := generateChainId()
+		pendingRegisterChainId = chainId
 		stopFunc = client.SendMessageInterval(topicWGRegister, map[string]interface{}{
 			"publicKey":   publicKey.String(),
 			"pingResults": pingResults,
 			"newtVersion": newtVersion,
+			"chainId":     chainId,
 		}, 2*time.Second)
 
 		logger.Debug("Sent exit node ping results to cloud for selection: pingResults=%+v", pingResults)
@@ -1748,8 +1797,11 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				stopFunc()
 			}
 			// request from the server the list of nodes to ping
+			pingChainId := generateChainId()
+			pendingPingChainId = pingChainId
 			stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{
 				"noCloud": noCloud,
+				"chainId": pingChainId,
 			}, 3*time.Second)
 			logger.Debug("Requesting exit nodes from server")
 
@@ -1761,10 +1813,13 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
 
 		// Send registration message to the server for backward compatibility
+		bcChainId := generateChainId()
+		pendingRegisterChainId = bcChainId
 		err := client.SendMessage(topicWGRegister, map[string]interface{}{
 			"publicKey":           publicKey.String(),
 			"newtVersion":         newtVersion,
 			"backwardsCompatible": true,
+			"chainId":             bcChainId,
 		})
 
 		sendBlueprint(client)
