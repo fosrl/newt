@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -99,6 +100,10 @@ func (c *Client) loadConfig() error {
 	if c.config.ProvisioningKey == "" {
 		c.config.ProvisioningKey = config.ProvisioningKey
 	}
+	// Always load the name from the file if not already set
+	if c.config.Name == "" {
+		c.config.Name = config.Name
+	}
 
 	// Check if CLI args provided values that override file values
 	if (!fileHadID && originalConfig.ID != "") ||
@@ -135,6 +140,21 @@ func (c *Client) saveConfig() error {
 	return err
 }
 
+// interpolateString replaces {{env.VAR}} tokens in s with the corresponding
+// environment variable values. Tokens that do not match a supported scheme are
+// left unchanged, mirroring the blueprint interpolation logic.
+func interpolateString(s string) string {
+	re := regexp.MustCompile(`\{\{([^}]+)\}\}`)
+	return re.ReplaceAllStringFunc(s, func(match string) string {
+		inner := strings.TrimSpace(match[2 : len(match)-2])
+		if strings.HasPrefix(inner, "env.") {
+			varName := strings.TrimPrefix(inner, "env.")
+			return os.Getenv(varName)
+		}
+		return match
+	})
+}
+
 // provisionIfNeeded checks whether a provisioning key is present and, if so,
 // exchanges it for a newt ID and secret by calling the registration endpoint.
 // On success the config is updated in-place and flagged for saving so that
@@ -158,8 +178,14 @@ func (c *Client) provisionIfNeeded() error {
 	}
 	baseEndpoint := strings.TrimRight(baseURL.String(), "/")
 
+	// Interpolate any {{env.VAR}} tokens in the name before sending.
+	name := interpolateString(c.config.Name)
+
 	reqBody := map[string]interface{}{
 		"provisioningKey": c.config.ProvisioningKey,
+	}
+	if name != "" {
+		reqBody["name"] = name
 	}
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
@@ -236,6 +262,7 @@ func (c *Client) provisionIfNeeded() error {
 	c.config.ID = provResp.Data.NewtID
 	c.config.Secret = provResp.Data.Secret
 	c.config.ProvisioningKey = ""
+	c.config.Name = ""
 	c.configNeedsSave = true
 
 	// Save immediately so that if the subsequent connection attempt fails the

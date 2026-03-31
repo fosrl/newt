@@ -6,6 +6,7 @@ type Config struct {
 	Endpoint        string `json:"endpoint"`
 	TlsClientCert   string `json:"tlsClientCert"`
 	ProvisioningKey string `json:"provisioningKey,omitempty"`
+	Name            string `json:"name,omitempty"`
 }
 
 type TokenResponse struct {
