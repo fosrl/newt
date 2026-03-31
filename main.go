@@ -169,6 +169,9 @@ var (
 	// Provisioning key – exchanged once for a permanent newt ID + secret
 	provisioningKey string
 
+	// Optional name for the site created during provisioning
+	newtName string
+
 	// Path to config file (overrides CONFIG_FILE env var and default location)
 	configFile string
 )
@@ -284,6 +287,7 @@ func runNewtMain(ctx context.Context) {
 	noCloudEnv := os.Getenv("NO_CLOUD")
 	noCloud = noCloudEnv == "true"
 	provisioningKey = os.Getenv("NEWT_PROVISIONING_KEY")
+	newtName = os.Getenv("NEWT_NAME")
 	configFile = os.Getenv("CONFIG_FILE")
 
 	if endpoint == "" {
@@ -335,6 +339,9 @@ func runNewtMain(ctx context.Context) {
 	flag.StringVar(&preferEndpoint, "prefer-endpoint", "", "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
 	if provisioningKey == "" {
 		flag.StringVar(&provisioningKey, "provisioning-key", "", "One-time provisioning key used to obtain a newt ID and secret from the server")
+	}
+	if newtName == "" {
+		flag.StringVar(&newtName, "name", "", "Name for the site created during provisioning (supports {{env.VAR}} interpolation)")
 	}
 	if configFile == "" {
 		flag.StringVar(&configFile, "config-file", "", "Path to config file (overrides CONFIG_FILE env var and default location)")
@@ -622,6 +629,9 @@ func runNewtMain(ctx context.Context) {
 	// not already carry one, inject it now so provisionIfNeeded() can use it.
 	if provisioningKey != "" && client.GetConfig().ProvisioningKey == "" {
 		client.GetConfig().ProvisioningKey = provisioningKey
+	}
+	if newtName != "" && client.GetConfig().Name == "" {
+		client.GetConfig().Name = newtName
 	}
 
 	endpoint = client.GetConfig().Endpoint // Update endpoint from config
