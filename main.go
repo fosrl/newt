@@ -1820,6 +1820,30 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			} else {
 				logger.Warn("CLIENTS WILL NOT WORK ON THIS VERSION OF NEWT WITH THIS VERSION OF PANGOLIN, PLEASE UPDATE THE SERVER TO 1.13 OR HIGHER OR DOWNGRADE NEWT")
 			}
+			
+			sendBlueprint(client)
+		} else {
+			// Resend current health check status for all targets in case the server
+			// missed updates while newt was disconnected.
+			targets := healthMonitor.GetTargets()
+			if len(targets) > 0 {
+				healthStatuses := make(map[int]interface{})
+				for id, target := range targets {
+					healthStatuses[id] = map[string]interface{}{
+						"status":     target.Status.String(),
+						"lastCheck":  target.LastCheck.Format(time.RFC3339),
+						"checkCount": target.CheckCount,
+						"lastError":  target.LastError,
+						"config":     target.Config,
+					}
+				}
+				logger.Debug("Reconnected: resending health check status for %d targets", len(healthStatuses))
+				if err := client.SendMessage("newt/healthcheck/status", map[string]interface{}{
+					"targets": healthStatuses,
+				}); err != nil {
+					logger.Error("Failed to resend health check status on reconnect: %v", err)
+				}
+			}
 		}
 
 		// Send registration message to the server for backward compatibility
@@ -1831,8 +1855,6 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			"backwardsCompatible": true,
 			"chainId":             bcChainId,
 		})
-
-		sendBlueprint(client)
 
 		if err != nil {
 			logger.Error("Failed to send registration message: %v", err)
