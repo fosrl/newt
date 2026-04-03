@@ -49,10 +49,11 @@ type cachedAddr struct {
 
 // HolepunchTester monitors holepunch connectivity using magic packets
 type HolepunchTester struct {
-	sharedBind *bind.SharedBind
-	mu         sync.RWMutex
-	running    bool
-	stopChan   chan struct{}
+	sharedBind  *bind.SharedBind
+	publicDNS []string
+	mu          sync.RWMutex
+	running     bool
+	stopChan    chan struct{}
 
 	// Pending requests waiting for responses (key: echo data as string)
 	pendingRequests sync.Map // map[string]*pendingRequest
@@ -84,9 +85,10 @@ type pendingRequest struct {
 }
 
 // NewHolepunchTester creates a new holepunch tester using the given SharedBind
-func NewHolepunchTester(sharedBind *bind.SharedBind) *HolepunchTester {
+func NewHolepunchTester(sharedBind *bind.SharedBind, publicDNS []string) *HolepunchTester {
 	return &HolepunchTester{
 		sharedBind:   sharedBind,
+		publicDNS:  publicDNS,
 		addrCache:    make(map[string]*cachedAddr),
 		addrCacheTTL: 5 * time.Minute, // Cache addresses for 5 minutes
 	}
@@ -169,7 +171,13 @@ func (t *HolepunchTester) resolveEndpoint(endpoint string) (*net.UDPAddr, error)
 	}
 
 	// Resolve the endpoint
-	host, err := util.ResolveDomain(endpoint)
+	var host string
+	var err error
+	if len(t.publicDNS) > 0 {
+		host, err = util.ResolveDomainUpstream(endpoint, t.publicDNS)
+	} else {
+		host, err = util.ResolveDomain(endpoint)
+	}
 	if err != nil {
 		host = endpoint
 	}
