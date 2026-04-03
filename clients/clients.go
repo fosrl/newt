@@ -2,6 +2,8 @@ package clients
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -34,14 +36,16 @@ type WgConfig struct {
 	IpAddress string   `json:"ipAddress"`
 	Peers     []Peer   `json:"peers"`
 	Targets   []Target `json:"targets"`
+	ChainId   string   `json:"chainId"`
 }
 
 type Target struct {
-	SourcePrefix string      `json:"sourcePrefix"`
-	DestPrefix   string      `json:"destPrefix"`
-	RewriteTo    string      `json:"rewriteTo,omitempty"`
-	DisableIcmp  bool        `json:"disableIcmp,omitempty"`
-	PortRange    []PortRange `json:"portRange,omitempty"`
+	SourcePrefix   string      `json:"sourcePrefix"`
+	SourcePrefixes []string    `json:"sourcePrefixes"`
+	DestPrefix     string      `json:"destPrefix"`
+	RewriteTo      string      `json:"rewriteTo,omitempty"`
+	DisableIcmp    bool        `json:"disableIcmp,omitempty"`
+	PortRange      []PortRange `json:"portRange,omitempty"`
 }
 
 type PortRange struct {
@@ -81,7 +85,8 @@ type WireGuardService struct {
 	host          string
 	serverPubKey  string
 	token         string
-	stopGetConfig func()
+	stopGetConfig        func()
+	pendingConfigChainId string
 	// Netstack fields
 	tun    tun.Device
 	tnet   *netstack2.Net
@@ -106,14 +111,19 @@ type WireGuardService struct {
 	wgTesterServer     *wgtester.Server
 }
 
+// generateChainId generates a random chain ID for deduplicating round-trip messages.
+func generateChainId() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 func NewWireGuardService(interfaceName string, port uint16, mtu int, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool) (*WireGuardService, error) {
 	key, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %v", err)
 	}
 
-	logger.Debug("+++++++++++++++++++++++++++++++= the port is %d", port)
-	
 	if port == 0 {
 		// Find an available port
 		portRandom, err := util.FindAvailableUDPPort(49152, 65535)
@@ -162,9 +172,8 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 		useNativeInterface: useNativeInterface,
 	}
 
-	// Create the holepunch manager with ResolveDomain function
-	// We'll need to pass a domain resolver function
-	service.holePunchManager = holepunch.NewManager(sharedBind, newtId, "newt", key.PublicKey().String())
+	// Create the holepunch manager
+	service.holePunchManager = holepunch.NewManager(sharedBind, newtId, "newt", key.PublicKey().String(), nil)
 
 	// Register websocket handlers
 	wsClient.RegisterHandler("newt/wg/receive-config", service.handleConfig)
@@ -174,6 +183,7 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 	wsClient.RegisterHandler("newt/wg/targets/add", service.handleAddTarget)
 	wsClient.RegisterHandler("newt/wg/targets/remove", service.handleRemoveTarget)
 	wsClient.RegisterHandler("newt/wg/targets/update", service.handleUpdateTarget)
+	wsClient.RegisterHandler("newt/wg/sync", service.handleSyncConfig)
 
 	return service, nil
 }
@@ -279,7 +289,7 @@ func (s *WireGuardService) StartHolepunch(publicKey string, endpoint string, rel
 	}
 
 	if relayPort == 0 {
-	    relayPort = 21820
+		relayPort = 21820
 	}
 
 	// Convert websocket.ExitNode to holepunch.ExitNode
@@ -442,9 +452,12 @@ func (s *WireGuardService) LoadRemoteConfig() error {
 		s.stopGetConfig()
 		s.stopGetConfig = nil
 	}
+	chainId := generateChainId()
+	s.pendingConfigChainId = chainId
 	s.stopGetConfig = s.client.SendMessageInterval("newt/wg/get-config", map[string]interface{}{
 		"publicKey": s.key.PublicKey().String(),
 		"port":      s.Port,
+		"chainId":   chainId,
 	}, 2*time.Second)
 
 	logger.Debug("Requesting WireGuard configuration from remote server")
@@ -469,6 +482,17 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 		logger.Info("Error unmarshaling target data: %v", err)
 		return
 	}
+
+	// Deduplicate using chainId: discard responses that don't match the
+	// pending request, or that we have already processed.
+	if config.ChainId != "" {
+		if config.ChainId != s.pendingConfigChainId {
+			logger.Debug("Discarding duplicate/stale newt/wg/get-config response (chainId=%s, expected=%s)", config.ChainId, s.pendingConfigChainId)
+			return
+		}
+		s.pendingConfigChainId = "" // consume – further duplicates are rejected
+	}
+
 	s.config = config
 
 	if s.stopGetConfig != nil {
@@ -492,6 +516,183 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	}
 
 	logger.Info("Client connectivity setup. Ready to accept connections from clients!")
+}
+
+// SyncConfig represents the configuration sent from server for syncing
+type SyncConfig struct {
+	Targets []Target `json:"targets"`
+	Peers   []Peer   `json:"peers"`
+}
+
+func (s *WireGuardService) handleSyncConfig(msg websocket.WSMessage) {
+	var syncConfig SyncConfig
+
+	logger.Debug("Received sync message: %v", msg)
+	logger.Info("Received sync configuration from remote server")
+
+	jsonData, err := json.Marshal(msg.Data)
+	if err != nil {
+		logger.Error("Error marshaling sync data: %v", err)
+		return
+	}
+
+	if err := json.Unmarshal(jsonData, &syncConfig); err != nil {
+		logger.Error("Error unmarshaling sync data: %v", err)
+		return
+	}
+
+	// Sync peers
+	if err := s.syncPeers(syncConfig.Peers); err != nil {
+		logger.Error("Failed to sync peers: %v", err)
+	}
+
+	// Sync targets
+	if err := s.syncTargets(syncConfig.Targets); err != nil {
+		logger.Error("Failed to sync targets: %v", err)
+	}
+}
+
+// syncPeers synchronizes the current peers with the desired state
+// It removes peers not in the desired list and adds missing ones
+func (s *WireGuardService) syncPeers(desiredPeers []Peer) error {
+	if s.device == nil {
+		return fmt.Errorf("WireGuard device is not initialized")
+	}
+
+	// Get current peers from the device
+	currentConfig, err := s.device.IpcGet()
+	if err != nil {
+		return fmt.Errorf("failed to get current device config: %v", err)
+	}
+
+	// Parse current peer public keys
+	lines := strings.Split(currentConfig, "\n")
+	currentPeerKeys := make(map[string]bool)
+	for _, line := range lines {
+		if strings.HasPrefix(line, "public_key=") {
+			pubKey := strings.TrimPrefix(line, "public_key=")
+			currentPeerKeys[pubKey] = true
+		}
+	}
+
+	// Build a map of desired peers by their public key (normalized)
+	desiredPeerMap := make(map[string]Peer)
+	for _, peer := range desiredPeers {
+		// Normalize the public key for comparison
+		pubKey, err := wgtypes.ParseKey(peer.PublicKey)
+		if err != nil {
+			logger.Warn("Invalid public key in desired peers: %s", peer.PublicKey)
+			continue
+		}
+		normalizedKey := util.FixKey(pubKey.String())
+		desiredPeerMap[normalizedKey] = peer
+	}
+
+	// Remove peers that are not in the desired list
+	for currentKey := range currentPeerKeys {
+		if _, exists := desiredPeerMap[currentKey]; !exists {
+			// Parse the key back to get the original format for removal
+			removeConfig := fmt.Sprintf("public_key=%s\nremove=true", currentKey)
+			if err := s.device.IpcSet(removeConfig); err != nil {
+				logger.Warn("Failed to remove peer %s during sync: %v", currentKey, err)
+			} else {
+				logger.Info("Removed peer %s during sync", currentKey)
+			}
+		}
+	}
+
+	// Add peers that are missing
+	for normalizedKey, peer := range desiredPeerMap {
+		if _, exists := currentPeerKeys[normalizedKey]; !exists {
+			if err := s.addPeerToDevice(peer); err != nil {
+				logger.Warn("Failed to add peer %s during sync: %v", peer.PublicKey, err)
+			} else {
+				logger.Info("Added peer %s during sync", peer.PublicKey)
+			}
+		}
+	}
+
+	return nil
+}
+
+// syncTargets synchronizes the current targets with the desired state
+// It removes targets not in the desired list and adds missing ones
+func (s *WireGuardService) syncTargets(desiredTargets []Target) error {
+	if s.tnet == nil {
+		// Native interface mode - proxy features not available, skip silently
+		logger.Debug("Skipping target sync - using native interface (no proxy support)")
+		return nil
+	}
+
+	// Get current rules from the proxy handler
+	currentRules := s.tnet.GetProxySubnetRules()
+
+	// Build a map of current rules by source+dest prefix
+	type ruleKey struct {
+		sourcePrefix string
+		destPrefix   string
+	}
+	currentRuleMap := make(map[ruleKey]bool)
+	for _, rule := range currentRules {
+		key := ruleKey{
+			sourcePrefix: rule.SourcePrefix.String(),
+			destPrefix:   rule.DestPrefix.String(),
+		}
+		currentRuleMap[key] = true
+	}
+
+	// Build a map of desired targets
+	desiredTargetMap := make(map[ruleKey]Target)
+	for _, target := range desiredTargets {
+		key := ruleKey{
+			sourcePrefix: target.SourcePrefix,
+			destPrefix:   target.DestPrefix,
+		}
+		desiredTargetMap[key] = target
+	}
+
+	// Remove targets that are not in the desired list
+	for _, rule := range currentRules {
+		key := ruleKey{
+			sourcePrefix: rule.SourcePrefix.String(),
+			destPrefix:   rule.DestPrefix.String(),
+		}
+		if _, exists := desiredTargetMap[key]; !exists {
+			s.tnet.RemoveProxySubnetRule(rule.SourcePrefix, rule.DestPrefix)
+			logger.Info("Removed target %s -> %s during sync", rule.SourcePrefix.String(), rule.DestPrefix.String())
+		}
+	}
+
+	// Add targets that are missing
+	for key, target := range desiredTargetMap {
+		if _, exists := currentRuleMap[key]; !exists {
+			sourcePrefix, err := netip.ParsePrefix(target.SourcePrefix)
+			if err != nil {
+				logger.Warn("Invalid source prefix %s during sync: %v", target.SourcePrefix, err)
+				continue
+			}
+
+			destPrefix, err := netip.ParsePrefix(target.DestPrefix)
+			if err != nil {
+				logger.Warn("Invalid dest prefix %s during sync: %v", target.DestPrefix, err)
+				continue
+			}
+
+			var portRanges []netstack2.PortRange
+			for _, pr := range target.PortRange {
+				portRanges = append(portRanges, netstack2.PortRange{
+					Min:      pr.Min,
+					Max:      pr.Max,
+					Protocol: pr.Protocol,
+				})
+			}
+
+			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
+			logger.Info("Added target %s -> %s during sync", target.SourcePrefix, target.DestPrefix)
+		}
+	}
+
+	return nil
 }
 
 func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
@@ -697,6 +898,19 @@ func (s *WireGuardService) ensureWireguardPeers(peers []Peer) error {
 	return nil
 }
 
+// resolveSourcePrefixes returns the effective list of source prefixes for a target,
+// supporting both the legacy single SourcePrefix field and the new SourcePrefixes array.
+// If SourcePrefixes is non-empty it takes precedence; otherwise SourcePrefix is used.
+func resolveSourcePrefixes(target Target) []string {
+	if len(target.SourcePrefixes) > 0 {
+		return target.SourcePrefixes
+	}
+	if target.SourcePrefix != "" {
+		return []string{target.SourcePrefix}
+	}
+	return nil
+}
+
 func (s *WireGuardService) ensureTargets(targets []Target) error {
 	if s.tnet == nil {
 		// Native interface mode - proxy features not available, skip silently
@@ -705,11 +919,6 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 	}
 
 	for _, target := range targets {
-		sourcePrefix, err := netip.ParsePrefix(target.SourcePrefix)
-		if err != nil {
-			return fmt.Errorf("invalid CIDR %s: %v", target.SourcePrefix, err)
-		}
-
 		destPrefix, err := netip.ParsePrefix(target.DestPrefix)
 		if err != nil {
 			return fmt.Errorf("invalid CIDR %s: %v", target.DestPrefix, err)
@@ -724,9 +933,14 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 			})
 		}
 
-		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
-
-		logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v disableIcmp: %v", target.SourcePrefix, target.DestPrefix, target.RewriteTo, target.PortRange, target.DisableIcmp)
+		for _, sp := range resolveSourcePrefixes(target) {
+			sourcePrefix, err := netip.ParsePrefix(sp)
+			if err != nil {
+				return fmt.Errorf("invalid CIDR %s: %v", sp, err)
+			}
+			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
+			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
+		}
 	}
 
 	return nil
@@ -1045,7 +1259,7 @@ func (s *WireGuardService) processPeerBandwidth(publicKey string, rxBytes, txByt
 					BytesOut:  bytesOutMB,
 				}
 			}
-			
+
 			return nil
 		}
 	}
@@ -1096,12 +1310,6 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 
 	// Process all targets
 	for _, target := range targets {
-		sourcePrefix, err := netip.ParsePrefix(target.SourcePrefix)
-		if err != nil {
-			logger.Info("Invalid CIDR %s: %v", target.SourcePrefix, err)
-			continue
-		}
-
 		destPrefix, err := netip.ParsePrefix(target.DestPrefix)
 		if err != nil {
 			logger.Info("Invalid CIDR %s: %v", target.DestPrefix, err)
@@ -1111,15 +1319,21 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 		var portRanges []netstack2.PortRange
 		for _, pr := range target.PortRange {
 			portRanges = append(portRanges, netstack2.PortRange{
-				Min: pr.Min,
-				Max: pr.Max,
-				Protocol:    pr.Protocol,
+				Min:      pr.Min,
+				Max:      pr.Max,
+				Protocol: pr.Protocol,
 			})
 		}
 
-		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
-
-		logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v disableIcmp: %v", target.SourcePrefix, target.DestPrefix, target.RewriteTo, target.PortRange, target.DisableIcmp)
+		for _, sp := range resolveSourcePrefixes(target) {
+			sourcePrefix, err := netip.ParsePrefix(sp)
+			if err != nil {
+				logger.Info("Invalid CIDR %s: %v", sp, err)
+				continue
+			}
+			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
+			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
+		}
 	}
 }
 
@@ -1148,21 +1362,21 @@ func (s *WireGuardService) handleRemoveTarget(msg websocket.WSMessage) {
 
 	// Process all targets
 	for _, target := range targets {
-		sourcePrefix, err := netip.ParsePrefix(target.SourcePrefix)
-		if err != nil {
-			logger.Info("Invalid CIDR %s: %v", target.SourcePrefix, err)
-			continue
-		}
-
 		destPrefix, err := netip.ParsePrefix(target.DestPrefix)
 		if err != nil {
 			logger.Info("Invalid CIDR %s: %v", target.DestPrefix, err)
 			continue
 		}
 
-		s.tnet.RemoveProxySubnetRule(sourcePrefix, destPrefix)
-
-		logger.Info("Removed target subnet %s with destination %s", target.SourcePrefix, target.DestPrefix)
+		for _, sp := range resolveSourcePrefixes(target) {
+			sourcePrefix, err := netip.ParsePrefix(sp)
+			if err != nil {
+				logger.Info("Invalid CIDR %s: %v", sp, err)
+				continue
+			}
+			s.tnet.RemoveProxySubnetRule(sourcePrefix, destPrefix)
+			logger.Info("Removed target subnet %s with destination %s", sp, target.DestPrefix)
+		}
 	}
 }
 
@@ -1196,30 +1410,24 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 
 	// Process all update requests
 	for _, target := range requests.OldTargets {
-		sourcePrefix, err := netip.ParsePrefix(target.SourcePrefix)
-		if err != nil {
-			logger.Info("Invalid CIDR %s: %v", target.SourcePrefix, err)
-			continue
-		}
-
 		destPrefix, err := netip.ParsePrefix(target.DestPrefix)
 		if err != nil {
 			logger.Info("Invalid CIDR %s: %v", target.DestPrefix, err)
 			continue
 		}
 
-		s.tnet.RemoveProxySubnetRule(sourcePrefix, destPrefix)
-		logger.Info("Removed target subnet %s with destination %s", target.SourcePrefix, target.DestPrefix)
+		for _, sp := range resolveSourcePrefixes(target) {
+			sourcePrefix, err := netip.ParsePrefix(sp)
+			if err != nil {
+				logger.Info("Invalid CIDR %s: %v", sp, err)
+				continue
+			}
+			s.tnet.RemoveProxySubnetRule(sourcePrefix, destPrefix)
+			logger.Info("Removed target subnet %s with destination %s", sp, target.DestPrefix)
+		}
 	}
 
 	for _, target := range requests.NewTargets {
-		// Now add the new target
-		sourcePrefix, err := netip.ParsePrefix(target.SourcePrefix)
-		if err != nil {
-			logger.Info("Invalid CIDR %s: %v", target.SourcePrefix, err)
-			continue
-		}
-
 		destPrefix, err := netip.ParsePrefix(target.DestPrefix)
 		if err != nil {
 			logger.Info("Invalid CIDR %s: %v", target.DestPrefix, err)
@@ -1229,14 +1437,21 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 		var portRanges []netstack2.PortRange
 		for _, pr := range target.PortRange {
 			portRanges = append(portRanges, netstack2.PortRange{
-				Min:         pr.Min,
-				Max:         pr.Max,
-				Protocol:    pr.Protocol,
+				Min:      pr.Min,
+				Max:      pr.Max,
+				Protocol: pr.Protocol,
 			})
 		}
 
-		s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
-		logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v disableIcmp: %v", target.SourcePrefix, target.DestPrefix, target.RewriteTo, target.PortRange, target.DisableIcmp)
+		for _, sp := range resolveSourcePrefixes(target) {
+			sourcePrefix, err := netip.ParsePrefix(sp)
+			if err != nil {
+				logger.Info("Invalid CIDR %s: %v", sp, err)
+				continue
+			}
+			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp)
+			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
+		}
 	}
 }
 

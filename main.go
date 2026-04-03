@@ -3,13 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -45,6 +48,7 @@ type WgData struct {
 	TunnelIP           string               `json:"tunnelIP"`
 	Targets            TargetsByType        `json:"targets"`
 	HealthCheckTargets []healthcheck.Config `json:"healthCheckTargets"`
+	ChainId            string               `json:"chainId"`
 }
 
 type TargetsByType struct {
@@ -58,6 +62,7 @@ type TargetData struct {
 
 type ExitNodeData struct {
 	ExitNodes []ExitNode `json:"exitNodes"`
+	ChainId   string     `json:"chainId"`
 }
 
 // ExitNode represents an exit node with an ID, endpoint, and weight.
@@ -127,6 +132,8 @@ var (
 	publicKey                          wgtypes.Key
 	pingStopChan                       chan struct{}
 	stopFunc                           func()
+	pendingRegisterChainId             string
+	pendingPingChainId                 string
 	healthFile                         string
 	useNativeInterface                 bool
 	authorizedKeysFile                 string
@@ -147,6 +154,7 @@ var (
 	adminAddr         string
 	region            string
 	metricsAsyncBytes bool
+	pprofEnabled      bool
 	blueprintFile     string
 	noCloud           bool
 
@@ -158,6 +166,13 @@ var (
 	// Legacy PKCS12 support (deprecated)
 	tlsPrivateKey string
 )
+
+// generateChainId generates a random chain ID for deduplicating round-trip messages.
+func generateChainId() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 func main() {
 	// Check for subcommands first (only principals exits early)
@@ -225,6 +240,7 @@ func runNewtMain(ctx context.Context) {
 	adminAddrEnv := os.Getenv("NEWT_ADMIN_ADDR")
 	regionEnv := os.Getenv("NEWT_REGION")
 	asyncBytesEnv := os.Getenv("NEWT_METRICS_ASYNC_BYTES")
+	pprofEnabledEnv := os.Getenv("NEWT_PPROF_ENABLED")
 
 	disableClientsEnv := os.Getenv("DISABLE_CLIENTS")
 	disableClients = disableClientsEnv == "true"
@@ -302,10 +318,10 @@ func runNewtMain(ctx context.Context) {
 		flag.StringVar(&dockerSocket, "docker-socket", "", "Path or address to Docker socket (typically unix:///var/run/docker.sock)")
 	}
 	if pingIntervalStr == "" {
-		flag.StringVar(&pingIntervalStr, "ping-interval", "3s", "Interval for pinging the server (default 3s)")
+		flag.StringVar(&pingIntervalStr, "ping-interval", "15s", "Interval for pinging the server (default 15s)")
 	}
 	if pingTimeoutStr == "" {
-		flag.StringVar(&pingTimeoutStr, "ping-timeout", "5s", "	Timeout for each ping (default 5s)")
+		flag.StringVar(&pingTimeoutStr, "ping-timeout", "7s", "	Timeout for each ping (default 7s)")
 	}
 	// load the prefer endpoint just as a flag
 	flag.StringVar(&preferEndpoint, "prefer-endpoint", "", "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
@@ -330,21 +346,21 @@ func runNewtMain(ctx context.Context) {
 	if pingIntervalStr != "" {
 		pingInterval, err = time.ParseDuration(pingIntervalStr)
 		if err != nil {
-			fmt.Printf("Invalid PING_INTERVAL value: %s, using default 3 seconds\n", pingIntervalStr)
-			pingInterval = 3 * time.Second
+			fmt.Printf("Invalid PING_INTERVAL value: %s, using default 15 seconds\n", pingIntervalStr)
+			pingInterval = 15 * time.Second
 		}
 	} else {
-		pingInterval = 3 * time.Second
+		pingInterval = 15 * time.Second
 	}
 
 	if pingTimeoutStr != "" {
 		pingTimeout, err = time.ParseDuration(pingTimeoutStr)
 		if err != nil {
-			fmt.Printf("Invalid PING_TIMEOUT value: %s, using default 5 seconds\n", pingTimeoutStr)
-			pingTimeout = 5 * time.Second
+			fmt.Printf("Invalid PING_TIMEOUT value: %s, using default 7 seconds\n", pingTimeoutStr)
+			pingTimeout = 7 * time.Second
 		}
 	} else {
-		pingTimeout = 5 * time.Second
+		pingTimeout = 7 * time.Second
 	}
 
 	if dockerEnforceNetworkValidation == "" {
@@ -388,6 +404,14 @@ func runNewtMain(ctx context.Context) {
 	} else {
 		if v, err := strconv.ParseBool(asyncBytesEnv); err == nil {
 			metricsAsyncBytes = v
+		}
+	}
+	// pprof debug endpoint toggle
+	if pprofEnabledEnv == "" {
+		flag.BoolVar(&pprofEnabled, "pprof", false, "Enable pprof debug endpoints on admin server")
+	} else {
+		if v, err := strconv.ParseBool(pprofEnabledEnv); err == nil {
+			pprofEnabled = v
 		}
 	}
 	// Optional region flag (resource attribute)
@@ -485,6 +509,14 @@ func runNewtMain(ctx context.Context) {
 		if tel.PrometheusHandler != nil {
 			mux.Handle("/metrics", tel.PrometheusHandler)
 		}
+		if pprofEnabled {
+			mux.HandleFunc("/debug/pprof/", pprof.Index)
+			mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+			mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+			mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+			mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+			logger.Info("pprof debugging enabled on %s/debug/pprof/", tcfg.AdminAddr)
+		}
 		admin := &http.Server{
 			Addr:              tcfg.AdminAddr,
 			Handler:           otelhttp.NewHandler(mux, "newt-admin"),
@@ -565,8 +597,7 @@ func runNewtMain(ctx context.Context) {
 		id,     // CLI arg takes precedence
 		secret, // CLI arg takes precedence
 		endpoint,
-		pingInterval,
-		pingTimeout,
+		30*time.Second,
 		opt,
 	)
 	if err != nil {
@@ -618,8 +649,6 @@ func runNewtMain(ctx context.Context) {
 	var connected bool
 	var wgData WgData
 	var dockerEventMonitor *docker.EventMonitor
-	
-	logger.Debug("++++++++++++++++++++++ the port is %d", port)
 
 	if !disableClients {
 		setupClients(client)
@@ -690,6 +719,24 @@ func runNewtMain(ctx context.Context) {
 		defer func() {
 			telemetry.IncSiteRegistration(ctx, regResult)
 		}()
+
+		// Deduplicate using chainId: if the server echoes back a chainId we have
+		// already consumed (or one that doesn't match our current pending request),
+		// throw the message away to avoid setting up the tunnel twice.
+		var chainData struct {
+			ChainId string `json:"chainId"`
+		}
+		if jsonBytes, err := json.Marshal(msg.Data); err == nil {
+			_ = json.Unmarshal(jsonBytes, &chainData)
+		}
+		if chainData.ChainId != "" {
+			if chainData.ChainId != pendingRegisterChainId {
+				logger.Debug("Discarding duplicate/stale newt/wg/connect (chainId=%s, expected=%s)", chainData.ChainId, pendingRegisterChainId)
+				return
+			}
+			pendingRegisterChainId = "" // consume – further duplicates with this id are rejected
+		}
+
 		if stopFunc != nil {
 			stopFunc()     // stop the ws from sending more requests
 			stopFunc = nil // reset stopFunc to nil to avoid double stopping
@@ -874,8 +921,11 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
 
 		// Request exit nodes from the server
+		pingChainId := generateChainId()
+		pendingPingChainId = pingChainId
 		stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{
 			"noCloud": noCloud,
+			"chainId": pingChainId,
 		}, 3*time.Second)
 
 		logger.Info("Tunnel destroyed, ready for reconnection")
@@ -904,6 +954,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 	client.RegisterHandler("newt/ping/exitNodes", func(msg websocket.WSMessage) {
 		logger.Debug("Received ping message")
+
 		if stopFunc != nil {
 			stopFunc()     // stop the ws from sending more requests
 			stopFunc = nil // reset stopFunc to nil to avoid double stopping
@@ -922,6 +973,14 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			return
 		}
 		exitNodes := exitNodeData.ExitNodes
+
+		if exitNodeData.ChainId != "" {
+			if exitNodeData.ChainId != pendingPingChainId {
+				logger.Debug("Discarding duplicate/stale newt/ping/exitNodes (chainId=%s, expected=%s)", exitNodeData.ChainId, pendingPingChainId)
+				return
+			}
+			pendingPingChainId = "" // consume – further duplicates with this id are rejected
+		}
 
 		if len(exitNodes) == 0 {
 			logger.Info("No exit nodes provided")
@@ -955,11 +1014,14 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				},
 			}
 
+			chainId := generateChainId()
+			pendingRegisterChainId = chainId
 			stopFunc = client.SendMessageInterval(topicWGRegister, map[string]interface{}{
 				"publicKey":   publicKey.String(),
 				"pingResults": pingResults,
 				"newtVersion": newtVersion,
-			}, 1*time.Second)
+				"chainId":     chainId,
+			}, 2*time.Second)
 
 			return
 		}
@@ -1058,11 +1120,14 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
 
 		// Send the ping results to the cloud for selection
+		chainId := generateChainId()
+		pendingRegisterChainId = chainId
 		stopFunc = client.SendMessageInterval(topicWGRegister, map[string]interface{}{
 			"publicKey":   publicKey.String(),
 			"pingResults": pingResults,
 			"newtVersion": newtVersion,
-		}, 1*time.Second)
+			"chainId":     chainId,
+		}, 2*time.Second)
 
 		logger.Debug("Sent exit node ping results to cloud for selection: pingResults=%+v", pingResults)
 	})
@@ -1165,6 +1230,153 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			// 	updateTargets(wgService.GetProxyManager(), "remove", wgData.TunnelIP, "tcp", targetData)
 			// }
 		}
+	})
+
+	// Register handler for syncing targets (TCP, UDP, and health checks)
+	client.RegisterHandler("newt/sync", func(msg websocket.WSMessage) {
+		logger.Info("Received sync message")
+
+		// if there is no wgData or pm, we can't sync targets
+		if wgData.TunnelIP == "" || pm == nil {
+			logger.Info(msgNoTunnelOrProxy)
+			return
+		}
+
+		// Define the sync data structure
+		type SyncData struct {
+			Targets            TargetsByType        `json:"targets"`
+			HealthCheckTargets []healthcheck.Config `json:"healthCheckTargets"`
+		}
+
+		var syncData SyncData
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling sync data: %v", err)
+			return
+		}
+
+		if err := json.Unmarshal(jsonData, &syncData); err != nil {
+			logger.Error("Error unmarshaling sync data: %v", err)
+			return
+		}
+
+		logger.Debug("Sync data received: TCP targets=%d, UDP targets=%d, health check targets=%d",
+			len(syncData.Targets.TCP), len(syncData.Targets.UDP), len(syncData.HealthCheckTargets))
+
+		//TODO: TEST AND IMPLEMENT THIS
+
+		// // Build sets of desired targets (port -> target string)
+		// desiredTCP := make(map[int]string)
+		// for _, t := range syncData.Targets.TCP {
+		// 	parts := strings.Split(t, ":")
+		// 	if len(parts) != 3 {
+		// 		logger.Warn("Invalid TCP target format: %s", t)
+		// 		continue
+		// 	}
+		// 	port := 0
+		// 	if _, err := fmt.Sscanf(parts[0], "%d", &port); err != nil {
+		// 		logger.Warn("Invalid port in TCP target: %s", parts[0])
+		// 		continue
+		// 	}
+		// 	desiredTCP[port] = parts[1] + ":" + parts[2]
+		// }
+
+		// desiredUDP := make(map[int]string)
+		// for _, t := range syncData.Targets.UDP {
+		// 	parts := strings.Split(t, ":")
+		// 	if len(parts) != 3 {
+		// 		logger.Warn("Invalid UDP target format: %s", t)
+		// 		continue
+		// 	}
+		// 	port := 0
+		// 	if _, err := fmt.Sscanf(parts[0], "%d", &port); err != nil {
+		// 		logger.Warn("Invalid port in UDP target: %s", parts[0])
+		// 		continue
+		// 	}
+		// 	desiredUDP[port] = parts[1] + ":" + parts[2]
+		// }
+
+		// // Get current targets from proxy manager
+		// currentTCP, currentUDP := pm.GetTargets()
+
+		// // Sync TCP targets
+		// // Remove TCP targets not in desired set
+		// if tcpForIP, ok := currentTCP[wgData.TunnelIP]; ok {
+		// 	for port := range tcpForIP {
+		// 		if _, exists := desiredTCP[port]; !exists {
+		// 			logger.Info("Sync: removing TCP target on port %d", port)
+		// 			targetStr := fmt.Sprintf("%d:%s", port, tcpForIP[port])
+		// 			updateTargets(pm, "remove", wgData.TunnelIP, "tcp", TargetData{Targets: []string{targetStr}})
+		// 		}
+		// 	}
+		// }
+
+		// // Add TCP targets that are missing
+		// for port, target := range desiredTCP {
+		// 	needsAdd := true
+		// 	if tcpForIP, ok := currentTCP[wgData.TunnelIP]; ok {
+		// 		if currentTarget, exists := tcpForIP[port]; exists {
+		// 			// Check if target address changed
+		// 			if currentTarget == target {
+		// 				needsAdd = false
+		// 			} else {
+		// 				// Target changed, remove old one first
+		// 				logger.Info("Sync: updating TCP target on port %d", port)
+		// 				targetStr := fmt.Sprintf("%d:%s", port, currentTarget)
+		// 				updateTargets(pm, "remove", wgData.TunnelIP, "tcp", TargetData{Targets: []string{targetStr}})
+		// 			}
+		// 		}
+		// 	}
+		// 	if needsAdd {
+		// 		logger.Info("Sync: adding TCP target on port %d -> %s", port, target)
+		// 		targetStr := fmt.Sprintf("%d:%s", port, target)
+		// 		updateTargets(pm, "add", wgData.TunnelIP, "tcp", TargetData{Targets: []string{targetStr}})
+		// 	}
+		// }
+
+		// // Sync UDP targets
+		// // Remove UDP targets not in desired set
+		// if udpForIP, ok := currentUDP[wgData.TunnelIP]; ok {
+		// 	for port := range udpForIP {
+		// 		if _, exists := desiredUDP[port]; !exists {
+		// 			logger.Info("Sync: removing UDP target on port %d", port)
+		// 			targetStr := fmt.Sprintf("%d:%s", port, udpForIP[port])
+		// 			updateTargets(pm, "remove", wgData.TunnelIP, "udp", TargetData{Targets: []string{targetStr}})
+		// 		}
+		// 	}
+		// }
+
+		// // Add UDP targets that are missing
+		// for port, target := range desiredUDP {
+		// 	needsAdd := true
+		// 	if udpForIP, ok := currentUDP[wgData.TunnelIP]; ok {
+		// 		if currentTarget, exists := udpForIP[port]; exists {
+		// 			// Check if target address changed
+		// 			if currentTarget == target {
+		// 				needsAdd = false
+		// 			} else {
+		// 				// Target changed, remove old one first
+		// 				logger.Info("Sync: updating UDP target on port %d", port)
+		// 				targetStr := fmt.Sprintf("%d:%s", port, currentTarget)
+		// 				updateTargets(pm, "remove", wgData.TunnelIP, "udp", TargetData{Targets: []string{targetStr}})
+		// 			}
+		// 		}
+		// 	}
+		// 	if needsAdd {
+		// 		logger.Info("Sync: adding UDP target on port %d -> %s", port, target)
+		// 		targetStr := fmt.Sprintf("%d:%s", port, target)
+		// 		updateTargets(pm, "add", wgData.TunnelIP, "udp", TargetData{Targets: []string{targetStr}})
+		// 	}
+		// }
+
+		// // Sync health check targets
+		// if err := healthMonitor.SyncTargets(syncData.HealthCheckTargets); err != nil {
+		// 	logger.Error("Failed to sync health check targets: %v", err)
+		// } else {
+		// 	logger.Info("Successfully synced health check targets")
+		// }
+
+		logger.Info("Sync complete")
 	})
 
 	// Register handler for Docker socket check
@@ -1564,8 +1776,11 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				stopFunc()
 			}
 			// request from the server the list of nodes to ping
+			pingChainId := generateChainId()
+			pendingPingChainId = pingChainId
 			stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{
 				"noCloud": noCloud,
+				"chainId": pingChainId,
 			}, 3*time.Second)
 			logger.Debug("Requesting exit nodes from server")
 
@@ -1577,10 +1792,13 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
 
 		// Send registration message to the server for backward compatibility
+		bcChainId := generateChainId()
+		pendingRegisterChainId = bcChainId
 		err := client.SendMessage(topicWGRegister, map[string]interface{}{
 			"publicKey":           publicKey.String(),
 			"newtVersion":         newtVersion,
 			"backwardsCompatible": true,
+			"chainId":             bcChainId,
 		})
 
 		sendBlueprint(client)
@@ -1648,6 +1866,8 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 	if pm != nil {
 		pm.Stop()
 	}
+
+	client.SendMessage("newt/disconnecting", map[string]any{})
 
 	if client != nil {
 		client.Close()

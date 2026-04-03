@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -13,6 +14,99 @@ import (
 	"github.com/fosrl/newt/logger"
 	"golang.zx2c4.com/wireguard/device"
 )
+
+func ResolveDomainUpstream(domain string, publicDNS []string) (string, error) {
+	// trim whitespace
+	domain = strings.TrimSpace(domain)
+
+	// Remove any protocol prefix if present (do this first, before splitting host/port)
+	domain = strings.TrimPrefix(domain, "http://")
+	domain = strings.TrimPrefix(domain, "https://")
+
+	// if there are any trailing slashes, remove them
+	domain = strings.TrimSuffix(domain, "/")
+
+	// Check if there's a port in the domain
+	host, port, err := net.SplitHostPort(domain)
+	if err != nil {
+		// No port found, use the domain as is
+		host = domain
+		port = ""
+	}
+
+	// Check if host is already an IP address (IPv4 or IPv6)
+	// For IPv6, the host from SplitHostPort will already have brackets stripped
+	// but if there was no port, we need to handle bracketed IPv6 addresses
+	cleanHost := strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if ip := net.ParseIP(cleanHost); ip != nil {
+		// It's already an IP address, no need to resolve
+		ipAddr := ip.String()
+		if port != "" {
+			return net.JoinHostPort(ipAddr, port), nil
+		}
+		return ipAddr, nil
+	}
+
+	// Lookup IP addresses using the upstream DNS servers if provided
+	var ips []net.IP
+	if len(publicDNS) > 0 {
+		var lastErr error
+		for _, server := range publicDNS {
+			// Ensure the upstream DNS address has a port
+			dnsAddr := server
+			if _, _, err := net.SplitHostPort(dnsAddr); err != nil {
+				// No port specified, default to 53
+				dnsAddr = net.JoinHostPort(server, "53")
+			}
+
+			resolver := &net.Resolver{
+				PreferGo: true,
+				Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+					d := net.Dialer{}
+					return d.DialContext(ctx, "udp", dnsAddr)
+				},
+			}
+			ips, lastErr = resolver.LookupIP(context.Background(), "ip", host)
+			if lastErr == nil {
+				break
+			}
+		}
+		if lastErr != nil {
+			return "", fmt.Errorf("DNS lookup failed using all upstream servers: %v", lastErr)
+		}
+	} else {
+		ips, err = net.LookupIP(host)
+		if err != nil {
+			return "", fmt.Errorf("DNS lookup failed: %v", err)
+		}
+	}
+
+	if len(ips) == 0 {
+		return "", fmt.Errorf("no IP addresses found for domain %s", host)
+	}
+
+	// Get the first IPv4 address if available
+	var ipAddr string
+	for _, ip := range ips {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			ipAddr = ipv4.String()
+			break
+		}
+	}
+
+	// If no IPv4 found, use the first IP (might be IPv6)
+	if ipAddr == "" {
+		ipAddr = ips[0].String()
+	}
+
+	// Add port back if it existed
+	if port != "" {
+		ipAddr = net.JoinHostPort(ipAddr, port)
+	}
+
+	return ipAddr, nil
+}
+
 
 func ResolveDomain(domain string) (string, error) {
 	// trim whitespace
