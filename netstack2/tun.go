@@ -354,10 +354,10 @@ func (net *Net) ListenUDP(laddr *net.UDPAddr) (*gonet.UDPConn, error) {
 // AddProxySubnetRule adds a subnet rule to the proxy handler
 // If portRanges is nil or empty, all ports are allowed for this subnet
 // rewriteTo can be either an IP/CIDR (e.g., "192.168.1.1/32") or a domain name (e.g., "example.com")
-func (net *Net) AddProxySubnetRule(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool) {
+func (net *Net) AddProxySubnetRule(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool, resourceId int) {
 	tun := (*netTun)(net)
 	if tun.proxyHandler != nil {
-		tun.proxyHandler.AddSubnetRule(sourcePrefix, destPrefix, rewriteTo, portRanges, disableIcmp)
+		tun.proxyHandler.AddSubnetRule(sourcePrefix, destPrefix, rewriteTo, portRanges, disableIcmp, resourceId)
 	}
 }
 
@@ -383,6 +383,15 @@ func (net *Net) GetProxySubnetRules() []SubnetRule {
 func (net *Net) GetProxyHandler() *ProxyHandler {
 	tun := (*netTun)(net)
 	return tun.proxyHandler
+}
+
+// SetAccessLogSender configures the function used to send compressed access log
+// batches to the server. This should be called once the websocket client is available.
+func (net *Net) SetAccessLogSender(fn SendFunc) {
+	tun := (*netTun)(net)
+	if tun.proxyHandler != nil {
+		tun.proxyHandler.SetAccessLogSender(fn)
+	}
 }
 
 type PingConn struct {

@@ -158,6 +158,18 @@ func (h *TCPHandler) handleTCPConn(netstackConn *gonet.TCPConn, id stack.Transpo
 
 	targetAddr := fmt.Sprintf("%s:%d", actualDstIP, dstPort)
 
+	// Look up resource ID and start access session if applicable
+	var accessSessionID string
+	if h.proxyHandler != nil {
+		resourceId := h.proxyHandler.LookupResourceId(srcIP, dstIP, dstPort, uint8(tcp.ProtocolNumber))
+		if resourceId != 0 {
+			if al := h.proxyHandler.GetAccessLogger(); al != nil {
+				srcAddr := fmt.Sprintf("%s:%d", srcIP, srcPort)
+				accessSessionID = al.StartTCPSession(resourceId, srcAddr, targetAddr)
+			}
+		}
+	}
+
 	// Create context with timeout for connection establishment
 	ctx, cancel := context.WithTimeout(context.Background(), tcpConnectTimeout)
 	defer cancel()
@@ -167,10 +179,25 @@ func (h *TCPHandler) handleTCPConn(netstackConn *gonet.TCPConn, id stack.Transpo
 	targetConn, err := d.DialContext(ctx, "tcp", targetAddr)
 	if err != nil {
 		logger.Info("TCP Forwarder: Failed to connect to %s: %v", targetAddr, err)
+		// End access session on connection failure
+		if accessSessionID != "" {
+			if al := h.proxyHandler.GetAccessLogger(); al != nil {
+				al.EndTCPSession(accessSessionID)
+			}
+		}
 		// Connection failed, netstack will handle RST
 		return
 	}
 	defer targetConn.Close()
+
+	// End access session when connection closes
+	if accessSessionID != "" {
+		defer func() {
+			if al := h.proxyHandler.GetAccessLogger(); al != nil {
+				al.EndTCPSession(accessSessionID)
+			}
+		}()
+	}
 
 	logger.Info("TCP Forwarder: Successfully connected to %s, starting bidirectional copy", targetAddr)
 
@@ -279,6 +306,27 @@ func (h *UDPHandler) handleUDPConn(netstackConn *gonet.UDPConn, id stack.Transpo
 	}
 
 	targetAddr := fmt.Sprintf("%s:%d", actualDstIP, dstPort)
+
+	// Look up resource ID and start access session if applicable
+	var accessSessionID string
+	if h.proxyHandler != nil {
+		resourceId := h.proxyHandler.LookupResourceId(srcIP, dstIP, dstPort, uint8(udp.ProtocolNumber))
+		if resourceId != 0 {
+			if al := h.proxyHandler.GetAccessLogger(); al != nil {
+				srcAddr := fmt.Sprintf("%s:%d", srcIP, srcPort)
+				accessSessionID = al.TrackUDPSession(resourceId, srcAddr, targetAddr)
+			}
+		}
+	}
+
+	// End access session when UDP handler returns (timeout or error)
+	if accessSessionID != "" {
+		defer func() {
+			if al := h.proxyHandler.GetAccessLogger(); al != nil {
+				al.EndUDPSession(accessSessionID)
+			}
+		}()
+	}
 
 	// Resolve target address
 	remoteUDPAddr, err := net.ResolveUDPAddr("udp", targetAddr)

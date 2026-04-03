@@ -47,7 +47,7 @@ func prefixEqual(a, b netip.Prefix) bool {
 // AddSubnet adds a subnet rule with source and destination prefixes and optional port restrictions
 // If portRanges is nil or empty, all ports are allowed for this subnet
 // rewriteTo can be either an IP/CIDR (e.g., "192.168.1.1/32") or a domain name (e.g., "example.com")
-func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool) {
+func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool, resourceId int) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
@@ -57,6 +57,7 @@ func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, rewrite
 		DisableIcmp:  disableIcmp,
 		RewriteTo:    rewriteTo,
 		PortRanges:   portRanges,
+		ResourceId:   resourceId,
 	}
 
 	// Canonicalize source prefix to handle host bits correctly
