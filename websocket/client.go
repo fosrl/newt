@@ -53,6 +53,7 @@ type Client struct {
 	processingMessage bool           // Flag to track if a message is currently being processed
 	processingMux     sync.RWMutex   // Protects processingMessage
 	processingWg      sync.WaitGroup // WaitGroup to wait for message processing to complete
+	justProvisioned   bool           // Set to true when provisionIfNeeded exchanges a key for permanent credentials
 }
 
 type ClientOption func(*Client)
@@ -100,6 +101,16 @@ func (c *Client) OnConnect(callback func() error) {
 
 func (c *Client) OnTokenUpdate(callback func(token string)) {
 	c.onTokenUpdate = callback
+}
+
+// WasJustProvisioned reports whether the client exchanged a provisioning key
+// for permanent credentials during the most recent connection attempt. It
+// consumes the flag – subsequent calls return false until provisioning occurs
+// again (which, in practice, never happens once credentials are persisted).
+func (c *Client) WasJustProvisioned() bool {
+	v := c.justProvisioned
+	c.justProvisioned = false
+	return v
 }
 
 func (c *Client) metricsContext() context.Context {

@@ -155,8 +155,9 @@ var (
 	region            string
 	metricsAsyncBytes bool
 	pprofEnabled      bool
-	blueprintFile     string
-	noCloud           bool
+	blueprintFile              string
+	provisioningBlueprintFile  string
+	noCloud                    bool
 
 	// New mTLS configuration variables
 	tlsClientCert string
@@ -284,6 +285,7 @@ func runNewtMain(ctx context.Context) {
 		tlsPrivateKey = os.Getenv("TLS_CLIENT_CERT")
 	}
 	blueprintFile = os.Getenv("BLUEPRINT_FILE")
+	provisioningBlueprintFile = os.Getenv("PROVISIONING_BLUEPRINT_FILE")
 	noCloudEnv := os.Getenv("NO_CLOUD")
 	noCloud = noCloudEnv == "true"
 	provisioningKey = os.Getenv("NEWT_PROVISIONING_KEY")
@@ -392,6 +394,9 @@ func runNewtMain(ctx context.Context) {
 	}
 	if blueprintFile == "" {
 		flag.StringVar(&blueprintFile, "blueprint-file", "", "Path to blueprint file (if unset, no blueprint will be applied)")
+	}
+	if provisioningBlueprintFile == "" {
+		flag.StringVar(&provisioningBlueprintFile, "provisioning-blueprint-file", "", "Path to blueprint file applied once after a provisioning credential exchange (if unset, no provisioning blueprint will be applied)")
 	}
 	if noCloudEnv == "" {
 		flag.BoolVar(&noCloud, "no-cloud", false, "Disable cloud failover")
@@ -1821,7 +1826,11 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				logger.Warn("CLIENTS WILL NOT WORK ON THIS VERSION OF NEWT WITH THIS VERSION OF PANGOLIN, PLEASE UPDATE THE SERVER TO 1.13 OR HIGHER OR DOWNGRADE NEWT")
 			}
 			
-			sendBlueprint(client)
+			sendBlueprint(client, blueprintFile)
+			if client.WasJustProvisioned() {
+				logger.Info("Provisioning detected – sending provisioning blueprint")
+				sendBlueprint(client, provisioningBlueprintFile)
+			}
 		} else {
 			// Resend current health check status for all targets in case the server
 			// missed updates while newt was disconnected.
