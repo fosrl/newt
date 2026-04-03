@@ -22,6 +22,12 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
 
+const (
+	// udpAccessSessionTimeout is how long a UDP access session stays alive without traffic
+	// before being considered ended by the access logger
+	udpAccessSessionTimeout = 120 * time.Second
+)
+
 // PortRange represents an allowed range of ports (inclusive) with optional protocol filtering
 // Protocol can be "tcp", "udp", or "" (empty string means both protocols)
 type PortRange struct {
@@ -46,6 +52,7 @@ type SubnetRule struct {
 	DisableIcmp  bool         // If true, ICMP traffic is blocked for this subnet
 	RewriteTo    string       // Optional rewrite address for DNAT - can be IP/CIDR or domain name
 	PortRanges   []PortRange  // empty slice means all ports allowed
+	ResourceId   int          // Optional resource ID from the server for access logging
 }
 
 // GetAllRules returns a copy of all subnet rules
@@ -111,10 +118,12 @@ type ProxyHandler struct {
 	natTable          map[connKey]*natState
 	reverseNatTable   map[reverseConnKey]*natState // Reverse lookup map for O(1) reply packet NAT
 	destRewriteTable  map[destKey]netip.Addr       // Maps original dest to rewritten dest for handler lookups
+	resourceTable     map[destKey]int              // Maps connection key to resource ID for access logging
 	natMu             sync.RWMutex
 	enabled           bool
 	icmpReplies       chan []byte          // Channel for ICMP reply packets to be sent back through the tunnel
 	notifiable        channel.Notification // Notification handler for triggering reads
+	accessLogger      *AccessLogger        // Access logger for tracking sessions
 }
 
 // ProxyHandlerOptions configures the proxy handler
@@ -137,7 +146,9 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 		natTable:         make(map[connKey]*natState),
 		reverseNatTable:  make(map[reverseConnKey]*natState),
 		destRewriteTable: make(map[destKey]netip.Addr),
+		resourceTable:    make(map[destKey]int),
 		icmpReplies:      make(chan []byte, 256), // Buffer for ICMP reply packets
+		accessLogger:     NewAccessLogger(udpAccessSessionTimeout),
 		proxyEp:          channel.New(1024, uint32(options.MTU), ""),
 		proxyStack: stack.New(stack.Options{
 			NetworkProtocols: []stack.NetworkProtocolFactory{
@@ -202,11 +213,11 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 // destPrefix: The IP prefix of the destination
 // rewriteTo: Optional address to rewrite destination to - can be IP/CIDR or domain name
 // If portRanges is nil or empty, all ports are allowed for this subnet
-func (p *ProxyHandler) AddSubnetRule(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool) {
+func (p *ProxyHandler) AddSubnetRule(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool, resourceId int) {
 	if p == nil || !p.enabled {
 		return
 	}
-	p.subnetLookup.AddSubnet(sourcePrefix, destPrefix, rewriteTo, portRanges, disableIcmp)
+	p.subnetLookup.AddSubnet(sourcePrefix, destPrefix, rewriteTo, portRanges, disableIcmp, resourceId)
 }
 
 // RemoveSubnetRule removes a subnet from the proxy handler
@@ -223,6 +234,43 @@ func (p *ProxyHandler) GetAllRules() []SubnetRule {
 		return nil
 	}
 	return p.subnetLookup.GetAllRules()
+}
+
+// LookupResourceId looks up the resource ID for a connection
+// Returns 0 if no resource ID is associated with this connection
+func (p *ProxyHandler) LookupResourceId(srcIP, dstIP string, dstPort uint16, proto uint8) int {
+	if p == nil || !p.enabled {
+		return 0
+	}
+
+	key := destKey{
+		srcIP:   srcIP,
+		dstIP:   dstIP,
+		dstPort: dstPort,
+		proto:   proto,
+	}
+
+	p.natMu.RLock()
+	defer p.natMu.RUnlock()
+
+	return p.resourceTable[key]
+}
+
+// GetAccessLogger returns the access logger for session tracking
+func (p *ProxyHandler) GetAccessLogger() *AccessLogger {
+	if p == nil {
+		return nil
+	}
+	return p.accessLogger
+}
+
+// SetAccessLogSender configures the function used to send compressed access log
+// batches to the server. This should be called once the websocket client is available.
+func (p *ProxyHandler) SetAccessLogSender(fn SendFunc) {
+	if p == nil || !p.enabled || p.accessLogger == nil {
+		return
+	}
+	p.accessLogger.SetSendFunc(fn)
 }
 
 // LookupDestinationRewrite looks up the rewritten destination for a connection
@@ -387,8 +435,22 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 	// Check if the source IP, destination IP, port, and protocol match any subnet rule
 	matchedRule := p.subnetLookup.Match(srcAddr, dstAddr, dstPort, protocol)
 	if matchedRule != nil {
-		logger.Debug("HandleIncomingPacket: Matched rule for %s -> %s (proto=%d, port=%d)",
-			srcAddr, dstAddr, protocol, dstPort)
+		logger.Debug("HandleIncomingPacket: Matched rule for %s -> %s (proto=%d, port=%d, resourceId=%d)",
+			srcAddr, dstAddr, protocol, dstPort, matchedRule.ResourceId)
+
+		// Store resource ID for connections without DNAT as well
+		if matchedRule.ResourceId != 0 && matchedRule.RewriteTo == "" {
+			dKey := destKey{
+				srcIP:   srcAddr.String(),
+				dstIP:   dstAddr.String(),
+				dstPort: dstPort,
+				proto:   uint8(protocol),
+			}
+			p.natMu.Lock()
+			p.resourceTable[dKey] = matchedRule.ResourceId
+			p.natMu.Unlock()
+		}
+
 		// Check if we need to perform DNAT
 		if matchedRule.RewriteTo != "" {
 			// Create connection tracking key using original destination
@@ -418,6 +480,13 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 				dstIP:   dstAddr.String(),
 				dstPort: dstPort,
 				proto:   uint8(protocol),
+			}
+
+			// Store resource ID for access logging if present
+			if matchedRule.ResourceId != 0 {
+				p.natMu.Lock()
+				p.resourceTable[dKey] = matchedRule.ResourceId
+				p.natMu.Unlock()
 			}
 
 			// Check if we already have a NAT entry for this connection
@@ -718,6 +787,11 @@ func (p *ProxyHandler) QueueICMPReply(packet []byte) bool {
 func (p *ProxyHandler) Close() error {
 	if p == nil || !p.enabled {
 		return nil
+	}
+
+	// Shut down access logger
+	if p.accessLogger != nil {
+		p.accessLogger.Close()
 	}
 
 	// Close ICMP replies channel

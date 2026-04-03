@@ -42,6 +42,7 @@ type Client struct {
 	onTokenUpdate     func(token string)
 	writeMux          sync.Mutex
 	clientType        string // Type of client (e.g., "newt", "olm")
+	configFilePath    string // Optional override for the config file path
 	tlsConfig         TLSConfig
 	metricsCtxMu      sync.RWMutex
 	metricsCtx        context.Context
@@ -52,6 +53,7 @@ type Client struct {
 	processingMessage bool           // Flag to track if a message is currently being processed
 	processingMux     sync.RWMutex   // Protects processingMessage
 	processingWg      sync.WaitGroup // WaitGroup to wait for message processing to complete
+	justProvisioned   bool           // Set to true when provisionIfNeeded exchanges a key for permanent credentials
 }
 
 type ClientOption func(*Client)
@@ -77,6 +79,12 @@ func WithBaseURL(url string) ClientOption {
 }
 
 // WithTLSConfig sets the TLS configuration for the client
+func WithConfigFile(path string) ClientOption {
+	return func(c *Client) {
+		c.configFilePath = path
+	}
+}
+
 func WithTLSConfig(config TLSConfig) ClientOption {
 	return func(c *Client) {
 		c.tlsConfig = config
@@ -93,6 +101,16 @@ func (c *Client) OnConnect(callback func() error) {
 
 func (c *Client) OnTokenUpdate(callback func(token string)) {
 	c.onTokenUpdate = callback
+}
+
+// WasJustProvisioned reports whether the client exchanged a provisioning key
+// for permanent credentials during the most recent connection attempt. It
+// consumes the flag – subsequent calls return false until provisioning occurs
+// again (which, in practice, never happens once credentials are persisted).
+func (c *Client) WasJustProvisioned() bool {
+	v := c.justProvisioned
+	c.justProvisioned = false
+	return v
 }
 
 func (c *Client) metricsContext() context.Context {
@@ -480,6 +498,11 @@ func (c *Client) connectWithRetry() {
 
 func (c *Client) establishConnection() error {
 	ctx := context.Background()
+
+	// Exchange provisioning key for permanent credentials if needed.
+	if err := c.provisionIfNeeded(); err != nil {
+		return fmt.Errorf("failed to provision newt credentials: %w", err)
+	}
 
 	// Get token for authentication
 	token, err := c.getToken()

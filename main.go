@@ -155,8 +155,9 @@ var (
 	region            string
 	metricsAsyncBytes bool
 	pprofEnabled      bool
-	blueprintFile     string
-	noCloud           bool
+	blueprintFile              string
+	provisioningBlueprintFile  string
+	noCloud                    bool
 
 	// New mTLS configuration variables
 	tlsClientCert string
@@ -165,6 +166,15 @@ var (
 
 	// Legacy PKCS12 support (deprecated)
 	tlsPrivateKey string
+
+	// Provisioning key – exchanged once for a permanent newt ID + secret
+	provisioningKey string
+
+	// Optional name for the site created during provisioning
+	newtName string
+
+	// Path to config file (overrides CONFIG_FILE env var and default location)
+	configFile string
 )
 
 // generateChainId generates a random chain ID for deduplicating round-trip messages.
@@ -275,8 +285,12 @@ func runNewtMain(ctx context.Context) {
 		tlsPrivateKey = os.Getenv("TLS_CLIENT_CERT")
 	}
 	blueprintFile = os.Getenv("BLUEPRINT_FILE")
+	provisioningBlueprintFile = os.Getenv("PROVISIONING_BLUEPRINT_FILE")
 	noCloudEnv := os.Getenv("NO_CLOUD")
 	noCloud = noCloudEnv == "true"
+	provisioningKey = os.Getenv("NEWT_PROVISIONING_KEY")
+	newtName = os.Getenv("NEWT_NAME")
+	configFile = os.Getenv("CONFIG_FILE")
 
 	if endpoint == "" {
 		flag.StringVar(&endpoint, "endpoint", "", "Endpoint of your pangolin server")
@@ -325,6 +339,15 @@ func runNewtMain(ctx context.Context) {
 	}
 	// load the prefer endpoint just as a flag
 	flag.StringVar(&preferEndpoint, "prefer-endpoint", "", "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
+	if provisioningKey == "" {
+		flag.StringVar(&provisioningKey, "provisioning-key", "", "One-time provisioning key used to obtain a newt ID and secret from the server")
+	}
+	if newtName == "" {
+		flag.StringVar(&newtName, "name", "", "Name for the site created during provisioning (supports {{env.VAR}} interpolation)")
+	}
+	if configFile == "" {
+		flag.StringVar(&configFile, "config-file", "", "Path to config file (overrides CONFIG_FILE env var and default location)")
+	}
 
 	// Add new mTLS flags
 	if tlsClientCert == "" {
@@ -371,6 +394,9 @@ func runNewtMain(ctx context.Context) {
 	}
 	if blueprintFile == "" {
 		flag.StringVar(&blueprintFile, "blueprint-file", "", "Path to blueprint file (if unset, no blueprint will be applied)")
+	}
+	if provisioningBlueprintFile == "" {
+		flag.StringVar(&provisioningBlueprintFile, "provisioning-blueprint-file", "", "Path to blueprint file applied once after a provisioning credential exchange (if unset, no provisioning blueprint will be applied)")
 	}
 	if noCloudEnv == "" {
 		flag.BoolVar(&noCloud, "no-cloud", false, "Disable cloud failover")
@@ -599,10 +625,20 @@ func runNewtMain(ctx context.Context) {
 		endpoint,
 		30*time.Second,
 		opt,
+		websocket.WithConfigFile(configFile),
 	)
 	if err != nil {
 		logger.Fatal("Failed to create client: %v", err)
 	}
+	// If a provisioning key was supplied via CLI / env and the config file did
+	// not already carry one, inject it now so provisionIfNeeded() can use it.
+	if provisioningKey != "" && client.GetConfig().ProvisioningKey == "" {
+		client.GetConfig().ProvisioningKey = provisioningKey
+	}
+	if newtName != "" && client.GetConfig().Name == "" {
+		client.GetConfig().Name = newtName
+	}
+
 	endpoint = client.GetConfig().Endpoint // Update endpoint from config
 	id = client.GetConfig().ID             // Update ID from config
 	// Update site labels for metrics with the resolved ID
@@ -1789,6 +1825,34 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			} else {
 				logger.Warn("CLIENTS WILL NOT WORK ON THIS VERSION OF NEWT WITH THIS VERSION OF PANGOLIN, PLEASE UPDATE THE SERVER TO 1.13 OR HIGHER OR DOWNGRADE NEWT")
 			}
+			
+			sendBlueprint(client, blueprintFile)
+			if client.WasJustProvisioned() {
+				logger.Info("Provisioning detected – sending provisioning blueprint")
+				sendBlueprint(client, provisioningBlueprintFile)
+			}
+		} else {
+			// Resend current health check status for all targets in case the server
+			// missed updates while newt was disconnected.
+			targets := healthMonitor.GetTargets()
+			if len(targets) > 0 {
+				healthStatuses := make(map[int]interface{})
+				for id, target := range targets {
+					healthStatuses[id] = map[string]interface{}{
+						"status":     target.Status.String(),
+						"lastCheck":  target.LastCheck.Format(time.RFC3339),
+						"checkCount": target.CheckCount,
+						"lastError":  target.LastError,
+						"config":     target.Config,
+					}
+				}
+				logger.Debug("Reconnected: resending health check status for %d targets", len(healthStatuses))
+				if err := client.SendMessage("newt/healthcheck/status", map[string]interface{}{
+					"targets": healthStatuses,
+				}); err != nil {
+					logger.Error("Failed to resend health check status on reconnect: %v", err)
+				}
+			}
 		}
 
 		// Send registration message to the server for backward compatibility
@@ -1800,8 +1864,6 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			"backwardsCompatible": true,
 			"chainId":             bcChainId,
 		})
-
-		sendBlueprint(client)
 
 		if err != nil {
 			logger.Error("Failed to send registration message: %v", err)

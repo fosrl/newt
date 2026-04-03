@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -516,15 +517,41 @@ func executeUpdownScript(action, proto, target string) (string, error) {
 	return target, nil
 }
 
-func sendBlueprint(client *websocket.Client) error {
-	if blueprintFile == "" {
+// interpolateBlueprint finds all {{...}} tokens in the raw blueprint bytes and
+// replaces recognised schemes with their resolved values. Currently supported:
+//
+//   - env.<VAR>  – replaced with the value of the named environment variable
+//
+// Any token that does not match a supported scheme is left as-is so that
+// future schemes (e.g. tag., api.) are preserved rather than silently dropped.
+func interpolateBlueprint(data []byte) []byte {
+	re := regexp.MustCompile(`\{\{([^}]+)\}\}`)
+	return re.ReplaceAllFunc(data, func(match []byte) []byte {
+		// strip the surrounding {{ }}
+		inner := strings.TrimSpace(string(match[2 : len(match)-2]))
+
+		if strings.HasPrefix(inner, "env.") {
+			varName := strings.TrimPrefix(inner, "env.")
+			return []byte(os.Getenv(varName))
+		}
+
+		// unrecognised scheme – leave the token untouched
+		return match
+	})
+}
+
+func sendBlueprint(client *websocket.Client, file string) error {
+	if file == "" {
 		return nil
 	}
 	// try to read the blueprint file
-	blueprintData, err := os.ReadFile(blueprintFile)
+	blueprintData, err := os.ReadFile(file)
 	if err != nil {
 		logger.Error("Failed to read blueprint file: %v", err)
 	} else {
+		// interpolate {{env.VAR}} (and any future schemes) before parsing
+		blueprintData = interpolateBlueprint(blueprintData)
+
 		// first we should convert the yaml to json and error if the yaml is bad
 		var yamlObj interface{}
 		var blueprintJsonData string
