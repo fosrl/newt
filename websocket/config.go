@@ -264,6 +264,7 @@ func (c *Client) provisionIfNeeded() error {
 	c.config.ProvisioningKey = ""
 	c.config.Name = ""
 	c.configNeedsSave = true
+	c.justProvisioned = true
 
 	// Save immediately so that if the subsequent connection attempt fails the
 	// provisioning key is already gone from disk and the next retry uses the

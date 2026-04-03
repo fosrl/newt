@@ -540,12 +540,12 @@ func interpolateBlueprint(data []byte) []byte {
 	})
 }
 
-func sendBlueprint(client *websocket.Client) error {
-	if blueprintFile == "" {
+func sendBlueprint(client *websocket.Client, file string) error {
+	if file == "" {
 		return nil
 	}
 	// try to read the blueprint file
-	blueprintData, err := os.ReadFile(blueprintFile)
+	blueprintData, err := os.ReadFile(file)
 	if err != nil {
 		logger.Error("Failed to read blueprint file: %v", err)
 	} else {
