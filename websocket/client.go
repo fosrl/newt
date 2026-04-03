@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -37,7 +38,6 @@ type Client struct {
 	isConnected       bool
 	reconnectMux      sync.RWMutex
 	pingInterval      time.Duration
-	pingTimeout       time.Duration
 	onConnect         func() error
 	onTokenUpdate     func(token string)
 	writeMux          sync.Mutex
@@ -47,6 +47,11 @@ type Client struct {
 	metricsCtx        context.Context
 	configNeedsSave   bool // Flag to track if config needs to be saved
 	serverVersion     string
+	configVersion     int64        // Latest config version received from server
+	configVersionMux  sync.RWMutex
+	processingMessage bool           // Flag to track if a message is currently being processed
+	processingMux     sync.RWMutex   // Protects processingMessage
+	processingWg      sync.WaitGroup // WaitGroup to wait for message processing to complete
 }
 
 type ClientOption func(*Client)
@@ -111,7 +116,7 @@ func (c *Client) MetricsContext() context.Context {
 }
 
 // NewClient creates a new websocket client
-func NewClient(clientType string, ID, secret string, endpoint string, pingInterval time.Duration, pingTimeout time.Duration, opts ...ClientOption) (*Client, error) {
+func NewClient(clientType string, ID, secret string, endpoint string, pingInterval time.Duration, opts ...ClientOption) (*Client, error) {
 	config := &Config{
 		ID:       ID,
 		Secret:   secret,
@@ -126,7 +131,6 @@ func NewClient(clientType string, ID, secret string, endpoint string, pingInterv
 		reconnectInterval: 3 * time.Second,
 		isConnected:       false,
 		pingInterval:      pingInterval,
-		pingTimeout:       pingTimeout,
 		clientType:        clientType,
 	}
 
@@ -152,6 +156,20 @@ func (c *Client) GetConfig() *Config {
 
 func (c *Client) GetServerVersion() string {
 	return c.serverVersion
+}
+
+// GetConfigVersion returns the latest config version received from server
+func (c *Client) GetConfigVersion() int64 {
+	c.configVersionMux.RLock()
+	defer c.configVersionMux.RUnlock()
+	return c.configVersion
+}
+
+// setConfigVersion updates the config version
+func (c *Client) setConfigVersion(version int64) {
+	c.configVersionMux.Lock()
+	defer c.configVersionMux.Unlock()
+	c.configVersion = version
 }
 
 // Connect establishes the WebSocket connection
@@ -641,7 +659,57 @@ func (c *Client) setupPKCS12TLS() (*tls.Config, error) {
 }
 
 // pingMonitor sends pings at a short interval and triggers reconnect on failure
+func (c *Client) sendPing() {
+	if c.conn == nil {
+		return
+	}
+
+	// Skip ping if a message is currently being processed
+	c.processingMux.RLock()
+	isProcessing := c.processingMessage
+	c.processingMux.RUnlock()
+	if isProcessing {
+		logger.Debug("Skipping ping, message is being processed")
+		return
+	}
+
+	c.configVersionMux.RLock()
+	configVersion := c.configVersion
+	c.configVersionMux.RUnlock()
+
+	pingMsg := WSMessage{
+		Type:          "newt/ping",
+		Data:          map[string]interface{}{},
+		ConfigVersion: configVersion,
+	}
+
+	c.writeMux.Lock()
+	err := c.conn.WriteJSON(pingMsg)
+	if err == nil {
+		telemetry.IncWSMessage(c.metricsContext(), "out", "ping")
+	}
+	c.writeMux.Unlock()
+
+	if err != nil {
+		// Check if we're shutting down before logging error and reconnecting
+		select {
+		case <-c.done:
+			// Expected during shutdown
+			return
+		default:
+			logger.Error("Ping failed: %v", err)
+			telemetry.IncWSKeepaliveFailure(c.metricsContext(), "ping_write")
+			telemetry.IncWSReconnect(c.metricsContext(), "ping_write")
+			c.reconnect()
+			return
+		}
+	}
+}
+
 func (c *Client) pingMonitor() {
+	// Send an immediate ping as soon as we connect
+	c.sendPing()
+
 	ticker := time.NewTicker(c.pingInterval)
 	defer ticker.Stop()
 
@@ -650,29 +718,7 @@ func (c *Client) pingMonitor() {
 		case <-c.done:
 			return
 		case <-ticker.C:
-			if c.conn == nil {
-				return
-			}
-			c.writeMux.Lock()
-			err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(c.pingTimeout))
-			if err == nil {
-				telemetry.IncWSMessage(c.metricsContext(), "out", "ping")
-			}
-			c.writeMux.Unlock()
-			if err != nil {
-				// Check if we're shutting down before logging error and reconnecting
-				select {
-				case <-c.done:
-					// Expected during shutdown
-					return
-				default:
-					logger.Error("Ping failed: %v", err)
-					telemetry.IncWSKeepaliveFailure(c.metricsContext(), "ping_write")
-					telemetry.IncWSReconnect(c.metricsContext(), "ping_write")
-					c.reconnect()
-					return
-				}
-			}
+			c.sendPing()
 		}
 	}
 }
@@ -709,10 +755,13 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time) {
 			disconnectResult = "success"
 			return
 		default:
-			var msg WSMessage
-			err := c.conn.ReadJSON(&msg)
+			msgType, p, err := c.conn.ReadMessage()
 			if err == nil {
-				telemetry.IncWSMessage(c.metricsContext(), "in", "text")
+				if msgType == websocket.BinaryMessage {
+					telemetry.IncWSMessage(c.metricsContext(), "in", "binary")
+				} else {
+					telemetry.IncWSMessage(c.metricsContext(), "in", "text")
+				}
 			}
 			if err != nil {
 				// Check if we're shutting down before logging error
@@ -737,9 +786,47 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time) {
 				}
 			}
 
+			// Update config version from incoming message
+			var data []byte
+			if msgType == websocket.BinaryMessage {
+				gr, err := gzip.NewReader(bytes.NewReader(p))
+				if err != nil {
+					logger.Error("WebSocket failed to create gzip reader: %v", err)
+					continue
+				}
+				data, err = io.ReadAll(gr)
+				gr.Close()
+				if err != nil {
+					logger.Error("WebSocket failed to decompress message: %v", err)
+					continue
+				}
+			} else {
+				data = p
+			}
+
+			var msg WSMessage
+			if err = json.Unmarshal(data, &msg); err != nil {
+				logger.Error("WebSocket failed to parse message: %v", err)
+				continue
+			}
+			
+			c.setConfigVersion(msg.ConfigVersion)
+
 			c.handlersMux.RLock()
 			if handler, ok := c.handlers[msg.Type]; ok {
+				// Mark that we're processing a message
+				c.processingMux.Lock()
+				c.processingMessage = true
+				c.processingMux.Unlock()
+				c.processingWg.Add(1)
+
 				handler(msg)
+
+				// Mark that we're done processing
+				c.processingWg.Done()
+				c.processingMux.Lock()
+				c.processingMessage = false
+				c.processingMux.Unlock()
 			}
 			c.handlersMux.RUnlock()
 		}
