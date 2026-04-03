@@ -21,7 +21,10 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
-const errUnsupportedProtoFmt = "unsupported protocol: %s"
+const (
+	errUnsupportedProtoFmt = "unsupported protocol: %s"
+	maxUDPPacketSize       = 65507
+)
 
 // Target represents a proxy target with its address and port
 type Target struct {
@@ -105,13 +108,9 @@ func classifyProxyError(err error) string {
 	if errors.Is(err, net.ErrClosed) {
 		return "closed"
 	}
-	if ne, ok := err.(net.Error); ok {
-		if ne.Timeout() {
-			return "timeout"
-		}
-		if ne.Temporary() {
-			return "temporary"
-		}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return "timeout"
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
@@ -437,14 +436,6 @@ func (pm *ProxyManager) Stop() error {
 		pm.udpConns = append(pm.udpConns[:i], pm.udpConns[i+1:]...)
 	}
 
-	// // Clear the target maps
-	// for k := range pm.tcpTargets {
-	// 	delete(pm.tcpTargets, k)
-	// }
-	// for k := range pm.udpTargets {
-	// 	delete(pm.udpTargets, k)
-	// }
-
 	// Give active connections a chance to close gracefully
 	time.Sleep(100 * time.Millisecond)
 
@@ -498,7 +489,7 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 			if !pm.running {
 				return
 			}
-			if ne, ok := err.(net.Error); ok && !ne.Temporary() {
+			if errors.Is(err, net.ErrClosed) {
 				logger.Info("TCP listener closed, stopping proxy handler for %v", listener.Addr())
 				return
 			}
@@ -564,7 +555,7 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 }
 
 func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
-	buffer := make([]byte, 65507) // Max UDP packet size
+	buffer := make([]byte, maxUDPPacketSize) // Max UDP packet size
 	clientConns := make(map[string]*net.UDPConn)
 	var clientsMutex sync.RWMutex
 
@@ -583,7 +574,7 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			}
 
 			// Check for connection closed conditions
-			if err == io.EOF || strings.Contains(err.Error(), "use of closed network connection") {
+			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 				logger.Info("UDP connection closed, stopping proxy handler")
 
 				// Clean up existing client connections
@@ -662,10 +653,14 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 					telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "udp", telemetry.ProxyConnectionClosed)
 				}()
 
-				buffer := make([]byte, 65507)
+				buffer := make([]byte, maxUDPPacketSize)
 				for {
 					n, _, err := targetConn.ReadFromUDP(buffer)
 					if err != nil {
+						// Connection closed is normal during cleanup
+						if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
+							return // defer will handle cleanup, result stays "success"
+						}
 						logger.Error("Error reading from target: %v", err)
 						result = "failure"
 						return // defer will handle cleanup
@@ -735,4 +730,29 @@ func (pm *ProxyManager) PrintTargets() {
 			logger.Info("UDP %s:%d -> %s", listenIP, port, targetAddr)
 		}
 	}
+}
+
+// GetTargets returns a copy of the current TCP and UDP targets
+// Returns map[listenIP]map[port]targetAddress for both TCP and UDP
+func (pm *ProxyManager) GetTargets() (tcpTargets map[string]map[int]string, udpTargets map[string]map[int]string) {
+	pm.mutex.RLock()
+	defer pm.mutex.RUnlock()
+
+	tcpTargets = make(map[string]map[int]string)
+	for listenIP, targets := range pm.tcpTargets {
+		tcpTargets[listenIP] = make(map[int]string)
+		for port, targetAddr := range targets {
+			tcpTargets[listenIP][port] = targetAddr
+		}
+	}
+
+	udpTargets = make(map[string]map[int]string)
+	for listenIP, targets := range pm.udpTargets {
+		udpTargets[listenIP] = make(map[int]string)
+		for port, targetAddr := range targets {
+			udpTargets[listenIP][port] = targetAddr
+		}
+	}
+
+	return tcpTargets, udpTargets
 }
