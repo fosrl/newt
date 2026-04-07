@@ -499,6 +499,13 @@ func classifyWSDisconnect(err error) (result, reason string) {
 }
 
 func (c *Client) connectWithRetry(ctx context.Context) {
+	var retryTimer *time.Timer
+	defer func() {
+		if retryTimer != nil {
+			retryTimer.Stop()
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -509,13 +516,15 @@ func (c *Client) connectWithRetry(ctx context.Context) {
 			err := c.establishConnection()
 			if err != nil {
 				logger.Error("Failed to connect: %v. Retrying in %v...", err, c.reconnectInterval)
-				retryTimer := time.NewTimer(c.reconnectInterval)
+				if retryTimer == nil {
+					retryTimer = time.NewTimer(c.reconnectInterval)
+				} else {
+					retryTimer.Reset(c.reconnectInterval)
+				}
 				select {
 				case <-ctx.Done():
-					retryTimer.Stop()
 					return
 				case <-c.done:
-					retryTimer.Stop()
 					return
 				case <-retryTimer.C:
 				}
