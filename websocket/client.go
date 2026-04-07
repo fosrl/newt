@@ -54,6 +54,7 @@ type Client struct {
 	processingMux     sync.RWMutex   // Protects processingMessage
 	processingWg      sync.WaitGroup // WaitGroup to wait for message processing to complete
 	justProvisioned   bool           // Set to true when provisionIfNeeded exchanges a key for permanent credentials
+	lifecycleCtx      context.Context
 }
 
 type ClientOption func(*Client)
@@ -192,7 +193,15 @@ func (c *Client) setConfigVersion(version int64) {
 
 // Connect establishes the WebSocket connection
 func (c *Client) Connect() error {
-	go c.connectWithRetry()
+	go c.connectWithRetry(context.Background())
+	return nil
+}
+
+// ConnectWithContext establishes the WebSocket connection and binds reconnect
+// behavior to the provided context lifecycle.
+func (c *Client) ConnectWithContext(ctx context.Context) error {
+	c.lifecycleCtx = ctx
+	go c.connectWithRetry(ctx)
 	return nil
 }
 
@@ -268,10 +277,17 @@ func (c *Client) SendMessageNoLog(messageType string, data interface{}) error {
 }
 
 func (c *Client) SendMessageInterval(messageType string, data interface{}, interval time.Duration) (stop func()) {
-	stopChan := make(chan struct{})
+	stopCtx, cancel := context.WithCancel(context.Background())
+	c.SendMessageIntervalCtx(stopCtx, messageType, data, interval)
+	return cancel
+}
+
+// SendMessageIntervalCtx sends a message repeatedly until ctx is cancelled.
+func (c *Client) SendMessageIntervalCtx(ctx context.Context, messageType string, data interface{}, interval time.Duration) {
 	go func() {
 		count := 0
-		maxAttempts := 10
+		currentInterval := interval
+		maxInterval := 60 * time.Second // Cap the maximum interval
 
 		err := c.SendMessage(messageType, data) // Send immediately
 		if err != nil {
@@ -279,28 +295,31 @@ func (c *Client) SendMessageInterval(messageType string, data interface{}, inter
 		}
 		count++
 
-		ticker := time.NewTicker(interval)
+		ticker := time.NewTicker(currentInterval)
 		defer ticker.Stop()
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case <-ticker.C:
-				if count >= maxAttempts {
-					logger.Info("SendMessageInterval timed out after %d attempts for message type: %s", maxAttempts, messageType)
-					return
-				}
 				err = c.SendMessage(messageType, data)
 				if err != nil {
 					logger.Error("Failed to send message: %v", err)
 				}
 				count++
-			case <-stopChan:
-				return
+
+				// Increase interval every 10 attempts up to maxInterval
+				if count%10 == 0 && currentInterval < maxInterval {
+					currentInterval = time.Duration(float64(currentInterval) * 1.5)
+					if currentInterval > maxInterval {
+						currentInterval = maxInterval
+					}
+					ticker.Reset(currentInterval)
+					logger.Debug("Increased message interval to %v after %d attempts for message type: %s", currentInterval, count, messageType)
+				}
 			}
 		}
 	}()
-	return func() {
-		close(stopChan)
-	}
 }
 
 // RegisterHandler registers a handler for a specific message type
@@ -479,16 +498,27 @@ func classifyWSDisconnect(err error) (result, reason string) {
 	}
 }
 
-func (c *Client) connectWithRetry() {
+func (c *Client) connectWithRetry(ctx context.Context) {
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-c.done:
 			return
 		default:
 			err := c.establishConnection()
 			if err != nil {
 				logger.Error("Failed to connect: %v. Retrying in %v...", err, c.reconnectInterval)
-				time.Sleep(c.reconnectInterval)
+				retryTimer := time.NewTimer(c.reconnectInterval)
+				select {
+				case <-ctx.Done():
+					retryTimer.Stop()
+					return
+				case <-c.done:
+					retryTimer.Stop()
+					return
+				case <-retryTimer.C:
+				}
 				continue
 			}
 			return
@@ -869,7 +899,11 @@ func (c *Client) reconnect() {
 	case <-c.done:
 		return
 	default:
-		go c.connectWithRetry()
+		ctx := c.lifecycleCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		go c.connectWithRetry(ctx)
 	}
 }
 

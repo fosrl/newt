@@ -33,6 +33,7 @@ import (
 	"github.com/fosrl/newt/internal/state"
 	"github.com/fosrl/newt/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"golang.org/x/sync/errgroup"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
@@ -130,8 +131,6 @@ var (
 	pingInterval                       time.Duration
 	pingTimeout                        time.Duration
 	publicKey                          wgtypes.Key
-	pingStopChan                       chan struct{}
-	stopFunc                           func()
 	pendingRegisterChainId             string
 	pendingPingChainId                 string
 	healthFile                         string
@@ -223,11 +222,16 @@ func main() {
 	defer stop()
 
 	// Run the main newt logic
-	runNewtMain(ctx)
+	if err := runNewtMain(ctx); err != nil {
+		logger.Error("Newt terminated with lifecycle error: %v", err)
+		os.Exit(1)
+	}
 }
 
 // runNewtMain contains the main newt logic, extracted for service support
-func runNewtMain(ctx context.Context) {
+func runNewtMain(ctx context.Context) error {
+	g, runCtx := errgroup.WithContext(ctx)
+
 	// if PANGOLIN_ENDPOINT, NEWT_ID, and NEWT_SECRET are set as environment variables, they will be used as default values
 	endpoint = os.Getenv("PANGOLIN_ENDPOINT")
 	id = os.Getenv("NEWT_ID")
@@ -503,9 +507,12 @@ func runNewtMain(ctx context.Context) {
 
 	// Start auth daemon if enabled
 	if authDaemonEnabled {
-		if err := startAuthDaemon(ctx); err != nil {
-			logger.Fatal("Failed to start auth daemon: %v", err)
-		}
+		g.Go(func() error {
+			if err := startAuthDaemon(runCtx); err != nil {
+				return fmt.Errorf("auth daemon failed: %w", err)
+			}
+			return nil
+		})
 	}
 	logger.GetLogger().SetLevel(loggerLevel)
 
@@ -523,7 +530,7 @@ func runNewtMain(ctx context.Context) {
 	tcfg.BuildVersion = newtVersion
 	tcfg.BuildCommit = os.Getenv("NEWT_COMMIT")
 
-	tel, telErr := telemetry.Init(ctx, tcfg)
+	tel, telErr := telemetry.Init(runCtx, tcfg)
 	if telErr != nil {
 		logger.Warn("Telemetry init failed: %v", telErr)
 	}
@@ -551,11 +558,12 @@ func runNewtMain(ctx context.Context) {
 			ReadHeaderTimeout: 5 * time.Second,
 			IdleTimeout:       30 * time.Second,
 		}
-		go func() {
+		g.Go(func() error {
 			if err := admin.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				logger.Warn("admin http error: %v", err)
+				return fmt.Errorf("admin http error: %w", err)
 			}
-		}()
+			return nil
+		})
 		defer func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -571,7 +579,7 @@ func runNewtMain(ctx context.Context) {
 	// parse the mtu string into an int
 	mtuInt, err = strconv.Atoi(mtu)
 	if err != nil {
-		logger.Fatal("Failed to parse MTU: %v", err)
+		return fmt.Errorf("failed to parse MTU: %w", err)
 	}
 
 	// parse if we want to enforce container network validation
@@ -583,7 +591,7 @@ func runNewtMain(ctx context.Context) {
 
 	// Add TLS configuration validation
 	if err := validateTLSConfig(); err != nil {
-		logger.Fatal("TLS configuration error: %v", err)
+		return fmt.Errorf("TLS configuration error: %w", err)
 	}
 
 	// Show deprecation warning if using PKCS12
@@ -593,7 +601,7 @@ func runNewtMain(ctx context.Context) {
 
 	privateKey, err = wgtypes.GeneratePrivateKey()
 	if err != nil {
-		logger.Fatal("Failed to generate private key: %v", err)
+		return fmt.Errorf("failed to generate private key: %w", err)
 	}
 
 	// Create client option based on TLS configuration
@@ -628,7 +636,7 @@ func runNewtMain(ctx context.Context) {
 		websocket.WithConfigFile(configFile),
 	)
 	if err != nil {
-		logger.Fatal("Failed to create client: %v", err)
+		return fmt.Errorf("failed to create client: %w", err)
 	}
 	// If a provisioning key was supplied via CLI / env and the config file did
 	// not already carry one, inject it now so provisionIfNeeded() can use it.
@@ -717,13 +725,53 @@ func runNewtMain(ctx context.Context) {
 		}
 	}, enforceHealthcheckCert)
 
-	var pingWithRetryStopChan chan struct{}
+	var intervalSendCancel context.CancelFunc
+	var tunnelCtx context.Context
+	var tunnelCancel context.CancelFunc
+
+	stopIntervalSend := func() {
+		if intervalSendCancel != nil {
+			intervalSendCancel()
+			intervalSendCancel = nil
+		}
+	}
+
+	startIntervalSend := func(messageType string, data map[string]interface{}, interval time.Duration) {
+		stopIntervalSend()
+		var intervalCtx context.Context
+		intervalCtx, intervalSendCancel = context.WithCancel(runCtx)
+		client.SendMessageIntervalCtx(intervalCtx, messageType, data, interval)
+	}
+
+	restartTunnelWorkers := func(serverIP string, tunnelID string) {
+		if tunnelCancel != nil {
+			tunnelCancel()
+			tunnelCancel = nil
+		}
+		tunnelCtx, tunnelCancel = context.WithCancel(runCtx)
+		_ = pingWithRetry(tunnelCtx, tnet, serverIP, pingTimeout)
+		startPingCheck(tunnelCtx, tnet, serverIP, tunnelID, func() {
+			pingChainID := generateChainId()
+			pendingPingChainId = pingChainID
+			startIntervalSend("newt/ping/request", map[string]interface{}{
+				"chainId": pingChainID,
+			}, 3*time.Second)
+			bcChainId := generateChainId()
+			pendingRegisterChainId = bcChainId
+			if sendErr := client.SendMessage("newt/wg/register", map[string]interface{}{
+				"publicKey":           publicKey.String(),
+				"backwardsCompatible": true,
+				"chainId":             bcChainId,
+			}); sendErr != nil {
+				logger.Error("Failed to send registration message: %v", sendErr)
+			}
+		})
+	}
 
 	closeWgTunnel := func() {
-		if pingStopChan != nil {
-			// Stop the ping check
-			close(pingStopChan)
-			pingStopChan = nil
+		if tunnelCancel != nil {
+			tunnelCancel()
+			tunnelCancel = nil
 		}
 
 		// Stop proxy manager if running
@@ -773,10 +821,7 @@ func runNewtMain(ctx context.Context) {
 			pendingRegisterChainId = "" // consume – further duplicates with this id are rejected
 		}
 
-		if stopFunc != nil {
-			stopFunc()     // stop the ws from sending more requests
-			stopFunc = nil // reset stopFunc to nil to avoid double stopping
-		}
+		stopIntervalSend()
 
 		if connected {
 			// Mark as disconnected
@@ -865,17 +910,11 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 		logger.Debug("WireGuard device created. Lets ping the server now...")
 
-		// Even if pingWithRetry returns an error, it will continue trying in the background
-		if pingWithRetryStopChan != nil {
-			// Stop the previous pingWithRetry if it exists
-			close(pingWithRetryStopChan)
-			pingWithRetryStopChan = nil
-		}
 		// Use reliable ping for initial connection test
 		logger.Debug("Testing initial connection with reliable ping...")
 		lat, err := reliablePing(tnet, wgData.ServerIP, pingTimeout, 5)
 		if err == nil && wgData.PublicKey != "" {
-			telemetry.ObserveTunnelLatency(ctx, wgData.PublicKey, "wireguard", lat.Seconds())
+			telemetry.ObserveTunnelLatency(runCtx, wgData.PublicKey, "wireguard", lat.Seconds())
 		}
 		if err != nil {
 			logger.Warn("Initial reliable ping failed, but continuing: %v", err)
@@ -884,14 +923,8 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			logger.Debug("Initial connection test successful")
 		}
 
-		pingWithRetryStopChan, _ = pingWithRetry(tnet, wgData.ServerIP, pingTimeout)
-
-		// Always mark as connected and start the proxy manager regardless of initial ping result
-		// as the pings will continue in the background
-		if !connected {
-			logger.Debug("Starting ping check")
-			pingStopChan = startPingCheck(tnet, wgData.ServerIP, client, wgData.PublicKey)
-		}
+		// Always mark as connected and start tunnel workers regardless of initial ping result.
+		restartTunnelWorkers(wgData.ServerIP, wgData.PublicKey)
 
 		// Create proxy manager
 		pm = proxy.NewProxyManager(tnet)
@@ -951,15 +984,12 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		// Mark as disconnected
 		connected = false
 
-		if stopFunc != nil {
-			stopFunc()     // stop the ws from sending more requests
-			stopFunc = nil // reset stopFunc to nil to avoid double stopping
-		}
+		stopIntervalSend()
 
 		// Request exit nodes from the server
 		pingChainId := generateChainId()
 		pendingPingChainId = pingChainId
-		stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{
+		startIntervalSend("newt/ping/request", map[string]interface{}{
 			"noCloud": noCloud,
 			"chainId": pingChainId,
 		}, 3*time.Second)
@@ -977,10 +1007,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		closeWgTunnel()
 		closeClients()
 
-		if stopFunc != nil {
-			stopFunc()     // stop the ws from sending more requests
-			stopFunc = nil // reset stopFunc to nil to avoid double stopping
-		}
+		stopIntervalSend()
 
 		// Mark as disconnected
 		connected = false
@@ -991,10 +1018,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 	client.RegisterHandler("newt/ping/exitNodes", func(msg websocket.WSMessage) {
 		logger.Debug("Received ping message")
 
-		if stopFunc != nil {
-			stopFunc()     // stop the ws from sending more requests
-			stopFunc = nil // reset stopFunc to nil to avoid double stopping
-		}
+		stopIntervalSend()
 
 		// Parse the incoming list of exit nodes
 		var exitNodeData ExitNodeData
@@ -1052,7 +1076,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 			chainId := generateChainId()
 			pendingRegisterChainId = chainId
-			stopFunc = client.SendMessageInterval(topicWGRegister, map[string]interface{}{
+			startIntervalSend(topicWGRegister, map[string]interface{}{
 				"publicKey":   publicKey.String(),
 				"pingResults": pingResults,
 				"newtVersion": newtVersion,
@@ -1158,7 +1182,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		// Send the ping results to the cloud for selection
 		chainId := generateChainId()
 		pendingRegisterChainId = chainId
-		stopFunc = client.SendMessageInterval(topicWGRegister, map[string]interface{}{
+		startIntervalSend(topicWGRegister, map[string]interface{}{
 			"publicKey":   publicKey.String(),
 			"pingResults": pingResults,
 			"newtVersion": newtVersion,
@@ -1807,14 +1831,12 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		logger.Info("Websocket connected")
 
 		if !connected {
-			// make sure the stop function is called
-			if stopFunc != nil {
-				stopFunc()
-			}
+			// cancel previous periodic requests first
+			stopIntervalSend()
 			// request from the server the list of nodes to ping
 			pingChainId := generateChainId()
 			pendingPingChainId = pingChainId
-			stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{
+			startIntervalSend("newt/ping/request", map[string]interface{}{
 				"noCloud": noCloud,
 				"chainId": pingChainId,
 			}, 3*time.Second)
@@ -1874,10 +1896,10 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 	})
 
 	// Connect to the WebSocket server
-	if err := client.Connect(); err != nil {
-		logger.Fatal("Failed to connect to server: %v", err)
+	if err := client.ConnectWithContext(runCtx); err != nil {
+		return fmt.Errorf("failed to connect to server: %w", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Initialize Docker event monitoring if Docker socket is available and monitoring is enabled
 	if dockerSocket != "" {
@@ -1903,12 +1925,16 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				logger.Error("Failed to start Docker event monitoring: %v", err)
 			} else {
 				logger.Debug("Docker event monitoring started successfully")
+				g.Go(func() error {
+					<-runCtx.Done()
+					dockerEventMonitor.Stop()
+					return nil
+				})
 			}
 		}
 	}
 
-	// Wait for context cancellation (from signal or service stop)
-	<-ctx.Done()
+	groupErr := g.Wait()
 
 	// Close clients first (including WGTester)
 	closeClients()
@@ -1935,6 +1961,10 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		client.Close()
 	}
 	logger.Info("Exiting...")
+	if groupErr != nil && !errors.Is(groupErr, context.Canceled) {
+		return groupErr
+	}
+	return nil
 }
 
 // runNewtMainWithArgs is used by the Windows service to run newt with specific arguments
@@ -1948,7 +1978,9 @@ func runNewtMainWithArgs(ctx context.Context, args []string) {
 	setupWindowsEventLog()
 
 	// Run the main newt logic
-	runNewtMain(ctx)
+	if err := runNewtMain(ctx); err != nil {
+		logger.Error("Service run failed: %v", err)
+	}
 }
 
 // validateTLSConfig validates the TLS configuration

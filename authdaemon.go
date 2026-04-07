@@ -22,9 +22,9 @@ var (
 	authDaemonServer        *authdaemon.Server // Global auth daemon server instance
 )
 
-// startAuthDaemon initializes and starts the auth daemon in the background.
-// It validates requirements (Linux, root, preshared key) and starts the server
-// in a goroutine so it runs alongside normal newt operation.
+// startAuthDaemon initializes and starts the auth daemon.
+// It validates requirements (Linux, root, preshared key) and runs the server
+// until the provided context is cancelled.
 func startAuthDaemon(ctx context.Context) error {
 	// Validation
 	if runtime.GOOS != "linux" {
@@ -61,15 +61,11 @@ func startAuthDaemon(ctx context.Context) error {
 
 	authDaemonServer = srv
 
-	// Start the auth daemon in a goroutine so it runs alongside newt
-	go func() {
-		logger.Info("Auth daemon starting (native mode, no HTTP server)")
-		if err := srv.Run(ctx); err != nil {
-			logger.Error("Auth daemon error: %v", err)
-		}
-		logger.Info("Auth daemon stopped")
-	}()
-
+	logger.Info("Auth daemon starting (native mode, no HTTP server)")
+	if err := srv.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("auth daemon error: %w", err)
+	}
+	logger.Info("Auth daemon stopped")
 	return nil
 }
 
