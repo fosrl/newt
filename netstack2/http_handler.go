@@ -28,7 +28,7 @@ import (
 type HTTPTarget struct {
 	DestAddr string `json:"destAddr"` // IP address or hostname of the downstream service
 	DestPort uint16 `json:"destPort"` // TCP port of the downstream service
-	UseHTTPS bool   `json:"useHttps"` // When true the outbound leg uses HTTPS
+	Scheme string   `json:"scheme"` // When true the outbound leg uses HTTPS
 }
 
 // ---------------------------------------------------------------------------
@@ -257,10 +257,7 @@ func (h *HTTPHandler) getTLSConfig(rule *SubnetRule) (*tls.Config, error) {
 // creating one on first use. Reusing the proxy preserves its http.Transport
 // connection pool, avoiding repeated TCP/TLS handshakes to the downstream.
 func (h *HTTPHandler) getProxy(target HTTPTarget) *httputil.ReverseProxy {
-	scheme := "http"
-	if target.UseHTTPS {
-		scheme = "https"
-	}
+	scheme := target.Scheme
 	cacheKey := fmt.Sprintf("%s://%s:%d", scheme, target.DestAddr, target.DestPort)
 
 	if v, ok := h.proxyCache.Load(cacheKey); ok {
@@ -273,7 +270,7 @@ func (h *HTTPHandler) getProxy(target HTTPTarget) *httputil.ReverseProxy {
 	}
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
-	if target.UseHTTPS {
+	if target.Scheme == "https" {
 		// Allow self-signed certificates on downstream HTTPS targets.
 		proxy.Transport = &http.Transport{
 			TLSClientConfig: &tls.Config{
@@ -307,10 +304,7 @@ func (h *HTTPHandler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	target := rule.HTTPTargets[0]
-	scheme := "http"
-	if target.UseHTTPS {
-		scheme = "https"
-	}
+	scheme := target.Scheme
 	logger.Info("HTTP handler: %s %s -> %s://%s:%d",
 		r.Method, r.URL.RequestURI(), scheme, target.DestAddr, target.DestPort)
 
