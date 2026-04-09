@@ -6,6 +6,7 @@
 package netstack2
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -19,63 +20,52 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Hardcoded test configuration
+// HTTPTarget
 // ---------------------------------------------------------------------------
 
-// testHTTPServeHTTPS controls whether the proxy presents HTTP or HTTPS to
-// incoming connections. Flip to true and supply valid cert/key paths to test
-// TLS termination.
-const testHTTPServeHTTPS = false
-
-// testHTTPCertFile / testHTTPKeyFile are paths to a self-signed certificate
-// used when testHTTPServeHTTPS == true.
-const testHTTPCertFile = "/tmp/test-cert.pem"
-const testHTTPKeyFile = "/tmp/test-key.pem"
-
-// testHTTPListenPort is the destination port the handler intercepts from the
-// netstack TCP forwarder (e.g. 80 for plain HTTP, 443 for HTTPS termination).
-const testHTTPListenPort uint16 = 80
-
-// testHTTPTargets is the hardcoded list of downstream services used for
-// testing. DestAddr / DestPort describe where the real HTTP(S) server lives;
-// UseHTTPS controls whether the outbound leg uses TLS.
-var testHTTPTargets = []HTTPTarget{
-	{DestAddr: "127.0.0.1", DestPort: 8080, UseHTTPS: false},
-}
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-// HTTPTarget describes a single downstream HTTP or HTTPS service.
+// HTTPTarget describes a single downstream HTTP or HTTPS service that the
+// proxy should forward requests to.
 type HTTPTarget struct {
 	DestAddr string // IP address or hostname of the downstream service
 	DestPort uint16 // TCP port of the downstream service
 	UseHTTPS bool   // When true the outbound leg uses HTTPS
 }
 
-// HTTPHandler intercepts TCP connections from the netstack forwarder and
-// services them as HTTP or HTTPS, reverse-proxying each request to one of the
-// configured downstream HTTPTarget services.
+// ---------------------------------------------------------------------------
+// HTTPHandler
+// ---------------------------------------------------------------------------
+
+// HTTPHandler intercepts TCP connections from the netstack forwarder on ports
+// 80 and 443 and services them as HTTP or HTTPS, reverse-proxying each request
+// to downstream targets specified by the matching SubnetRule.
 //
-// It is intentionally separate from TCPHandler: there is no overlap between
-// raw-TCP connections and HTTP-aware connections on the same destination port.
+// HTTP and raw TCP are fully separate: a connection is only routed here when
+// its SubnetRule has Protocol set ("http" or "https"). All other connections
+// on those ports fall through to the normal raw-TCP path.
+//
+// Incoming TLS termination (Protocol == "https") is performed per-connection
+// using the certificate and key stored in the rule, so different subnet rules
+// can present different certificates without sharing any state.
+//
+// Outbound connections to downstream targets honour HTTPTarget.UseHTTPS
+// independently of the incoming protocol.
 type HTTPHandler struct {
 	stack        *stack.Stack
 	proxyHandler *ProxyHandler
 
-	// Configuration (populated from hardcoded test values by NewHTTPHandler).
-	targets    []HTTPTarget
-	listenPort uint16 // Port this handler claims; used for routing by TCPHandler
-	serveHTTPS bool   // Present TLS to the incoming (client) side
-	certFile   string // PEM certificate for the incoming TLS listener
-	keyFile    string // PEM private key for the incoming TLS listener
-
-	// Runtime state – initialised by Start().
 	listener *chanListener
 	server   *http.Server
-	// One pre-built reverse proxy per target entry.
-	proxies []*httputil.ReverseProxy
+
+	// proxyCache holds pre-built *httputil.ReverseProxy values keyed by the
+	// canonical target URL string ("scheme://host:port"). Building a proxy is
+	// cheap, but reusing one preserves the underlying http.Transport connection
+	// pool, which matters for throughput.
+	proxyCache sync.Map // map[string]*httputil.ReverseProxy
+
+	// tlsCache holds pre-parsed *tls.Config values keyed by the concatenation
+	// of the PEM certificate and key. Parsing a keypair is relatively expensive
+	// and the same cert is likely reused across many connections.
+	tlsCache sync.Map // map[string]*tls.Config
 }
 
 // ---------------------------------------------------------------------------
@@ -123,7 +113,7 @@ func (l *chanListener) Addr() net.Addr {
 }
 
 // send delivers conn to the listener. Returns false if the listener is already
-// closed, in which case the caller should close conn itself.
+// closed, in which case the caller is responsible for closing conn.
 func (l *chanListener) send(conn net.Conn) bool {
 	select {
 	case l.connCh <- conn:
@@ -134,113 +124,96 @@ func (l *chanListener) send(conn net.Conn) bool {
 }
 
 // ---------------------------------------------------------------------------
-// HTTPHandler constructor and lifecycle
+// httpConnCtx – conn wrapper that carries a SubnetRule through the listener
 // ---------------------------------------------------------------------------
 
-// NewHTTPHandler creates an HTTPHandler wired to the given stack and
-// ProxyHandler, using the hardcoded test configuration defined at the top of
-// this file.
+// httpConnCtx wraps a net.Conn so the matching SubnetRule can be passed
+// through the chanListener into the http.Server's ConnContext callback,
+// making it available to request handlers via the request context.
+type httpConnCtx struct {
+	net.Conn
+	rule *SubnetRule
+}
+
+// connCtxKey is the unexported context key used to store a *SubnetRule on the
+// per-connection context created by http.Server.ConnContext.
+type connCtxKey struct{}
+
+// ---------------------------------------------------------------------------
+// Constructor and lifecycle
+// ---------------------------------------------------------------------------
+
+// NewHTTPHandler creates an HTTPHandler attached to the given stack and
+// ProxyHandler. Call Start to begin serving connections.
 func NewHTTPHandler(s *stack.Stack, ph *ProxyHandler) *HTTPHandler {
 	return &HTTPHandler{
 		stack:        s,
 		proxyHandler: ph,
-		targets:      testHTTPTargets,
-		listenPort:   testHTTPListenPort,
-		serveHTTPS:   testHTTPServeHTTPS,
-		certFile:     testHTTPCertFile,
-		keyFile:      testHTTPKeyFile,
 	}
 }
 
-// Start builds the per-target reverse proxies and launches the HTTP(S) server
-// that will service connections delivered via HandleConn.
+// Start launches the internal http.Server that services connections delivered
+// via HandleConn. The server runs for the lifetime of the HTTPHandler; call
+// Close to stop it.
 func (h *HTTPHandler) Start() error {
-	// Build one ReverseProxy per target.
-	h.proxies = make([]*httputil.ReverseProxy, 0, len(h.targets))
-	for i, t := range h.targets {
-		scheme := "http"
-		if t.UseHTTPS {
-			scheme = "https"
-		}
-		targetURL := &url.URL{
-			Scheme: scheme,
-			Host:   fmt.Sprintf("%s:%d", t.DestAddr, t.DestPort),
-		}
-
-		proxy := httputil.NewSingleHostReverseProxy(targetURL)
-
-		// For HTTPS downstream, allow self-signed certificates during testing.
-		if t.UseHTTPS {
-			proxy.Transport = &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true, //nolint:gosec // intentional for test targets
-				},
-			}
-		}
-
-		idx := i // capture for closure
-		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-			logger.Error("HTTP handler: upstream error (target %d, %s %s): %v",
-				idx, r.Method, r.URL.RequestURI(), err)
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
-		}
-
-		h.proxies = append(h.proxies, proxy)
-	}
-
 	h.listener = newChanListener()
 
 	h.server = &http.Server{
 		Handler: http.HandlerFunc(h.handleRequest),
+		// ConnContext runs once per accepted connection and attaches the
+		// SubnetRule carried by httpConnCtx to the connection's context so
+		// that handleRequest can retrieve it without any global state.
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			if cc, ok := c.(*httpConnCtx); ok {
+				return context.WithValue(ctx, connCtxKey{}, cc.rule)
+			}
+			return ctx
+		},
 	}
 
-	if h.serveHTTPS {
-		cert, err := tls.LoadX509KeyPair(h.certFile, h.keyFile)
-		if err != nil {
-			return fmt.Errorf("HTTP handler: failed to load TLS keypair (%s, %s): %w",
-				h.certFile, h.keyFile, err)
+	go func() {
+		if err := h.server.Serve(h.listener); err != nil && err != http.ErrServerClosed {
+			logger.Error("HTTP handler: server exited unexpectedly: %v", err)
 		}
-		tlsCfg := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-		}
-		tlsListener := tls.NewListener(h.listener, tlsCfg)
-		go func() {
-			if err := h.server.Serve(tlsListener); err != nil && err != http.ErrServerClosed {
-				logger.Error("HTTP handler: HTTPS server exited: %v", err)
-			}
-		}()
-		logger.Info("HTTP handler: listening (HTTPS) on port %d, %d downstream target(s)",
-			h.listenPort, len(h.targets))
-	} else {
-		go func() {
-			if err := h.server.Serve(h.listener); err != nil && err != http.ErrServerClosed {
-				logger.Error("HTTP handler: HTTP server exited: %v", err)
-			}
-		}()
-		logger.Info("HTTP handler: listening (HTTP) on port %d, %d downstream target(s)",
-			h.listenPort, len(h.targets))
-	}
+	}()
 
+	logger.Info("HTTP handler: ready — routing determined per SubnetRule on ports 80/443")
 	return nil
 }
 
-// HandleConn accepts a TCP connection from the netstack forwarder and delivers
-// it to the running HTTP(S) server. The HTTP handler takes full ownership of
-// the connection's lifecycle; the caller must NOT close conn after this call.
-func (h *HTTPHandler) HandleConn(conn net.Conn) {
-	if !h.listener.send(conn) {
-		// Listener already closed – clean up the orphaned connection.
-		conn.Close()
+// HandleConn accepts a TCP connection from the netstack forwarder together
+// with the SubnetRule that matched it. The HTTP handler takes full ownership
+// of the connection's lifecycle; the caller must NOT close conn after this call.
+//
+// When rule.Protocol is "https", TLS termination is performed on conn using
+// the certificate and key stored in rule.TLSCert and rule.TLSKey before the
+// connection is passed to the HTTP server. The HTTP server itself is always
+// plain-HTTP; TLS is fully unwrapped at this layer.
+func (h *HTTPHandler) HandleConn(conn net.Conn, rule *SubnetRule) {
+	var effectiveConn net.Conn = conn
+
+	if rule.Protocol == "https" {
+		tlsCfg, err := h.getTLSConfig(rule)
+		if err != nil {
+			logger.Error("HTTP handler: cannot build TLS config for connection from %s: %v",
+				conn.RemoteAddr(), err)
+			conn.Close()
+			return
+		}
+		// tls.Server wraps the raw conn; the TLS handshake is deferred until
+		// the first Read, which the http.Server will trigger naturally.
+		effectiveConn = tls.Server(conn, tlsCfg)
+	}
+
+	wrapped := &httpConnCtx{Conn: effectiveConn, rule: rule}
+	if !h.listener.send(wrapped) {
+		// Listener is already closed — clean up the orphaned connection.
+		effectiveConn.Close()
 	}
 }
 
-// HandlesPort reports whether this handler is responsible for connections
-// arriving on the given destination port.
-func (h *HTTPHandler) HandlesPort(port uint16) bool {
-	return port == h.listenPort
-}
-
-// Close shuts down the underlying HTTP server and the channel listener.
+// Close gracefully shuts down the HTTP server and the underlying channel
+// listener, causing the goroutine started in Start to exit.
 func (h *HTTPHandler) Close() error {
 	if h.server != nil {
 		if err := h.server.Close(); err != nil {
@@ -254,23 +227,86 @@ func (h *HTTPHandler) Close() error {
 }
 
 // ---------------------------------------------------------------------------
-// Request routing
+// Internal helpers
 // ---------------------------------------------------------------------------
 
-// handleRequest proxies an incoming HTTP request to the appropriate downstream
-// target. Currently always routes to the first (and, in the hardcoded test
-// setup, only) configured target.
+// getTLSConfig returns a *tls.Config for the cert/key pair in rule, using a
+// cache to avoid re-parsing the same keypair on every connection.
+// The cache key is the concatenation of the PEM cert and key strings, so
+// different rules that happen to share the same material hit the same entry.
+func (h *HTTPHandler) getTLSConfig(rule *SubnetRule) (*tls.Config, error) {
+	cacheKey := rule.TLSCert + "|" + rule.TLSKey
+	if v, ok := h.tlsCache.Load(cacheKey); ok {
+		return v.(*tls.Config), nil
+	}
+
+	cert, err := tls.X509KeyPair([]byte(rule.TLSCert), []byte(rule.TLSKey))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse TLS keypair: %w", err)
+	}
+	cfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+	// LoadOrStore is safe under concurrent calls: if two goroutines race here
+	// both will produce a valid config; the loser's work is discarded.
+	actual, _ := h.tlsCache.LoadOrStore(cacheKey, cfg)
+	return actual.(*tls.Config), nil
+}
+
+// getProxy returns a cached *httputil.ReverseProxy for the given target,
+// creating one on first use. Reusing the proxy preserves its http.Transport
+// connection pool, avoiding repeated TCP/TLS handshakes to the downstream.
+func (h *HTTPHandler) getProxy(target HTTPTarget) *httputil.ReverseProxy {
+	scheme := "http"
+	if target.UseHTTPS {
+		scheme = "https"
+	}
+	cacheKey := fmt.Sprintf("%s://%s:%d", scheme, target.DestAddr, target.DestPort)
+
+	if v, ok := h.proxyCache.Load(cacheKey); ok {
+		return v.(*httputil.ReverseProxy)
+	}
+
+	targetURL := &url.URL{
+		Scheme: scheme,
+		Host:   fmt.Sprintf("%s:%d", target.DestAddr, target.DestPort),
+	}
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+
+	if target.UseHTTPS {
+		// Allow self-signed certificates on downstream HTTPS targets.
+		proxy.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, //nolint:gosec // downstream self-signed certs are a supported configuration
+			},
+		}
+	}
+
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		logger.Error("HTTP handler: upstream error (%s %s -> %s): %v",
+			r.Method, r.URL.RequestURI(), cacheKey, err)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+	}
+
+	actual, _ := h.proxyCache.LoadOrStore(cacheKey, proxy)
+	return actual.(*httputil.ReverseProxy)
+}
+
+// handleRequest is the http.Handler entry point. It retrieves the SubnetRule
+// attached to the connection by ConnContext, selects the first configured
+// downstream target, and forwards the request via the cached ReverseProxy.
+//
+// TODO: add host/path-based routing across multiple HTTPTargets once the
+// configuration model evolves beyond a single target per rule.
 func (h *HTTPHandler) handleRequest(w http.ResponseWriter, r *http.Request) {
-	if len(h.proxies) == 0 {
-		logger.Error("HTTP handler: no downstream targets configured")
+	rule, _ := r.Context().Value(connCtxKey{}).(*SubnetRule)
+	if rule == nil || len(rule.HTTPTargets) == 0 {
+		logger.Error("HTTP handler: no downstream targets for request %s %s", r.Method, r.URL.RequestURI())
 		http.Error(w, "no targets configured", http.StatusBadGateway)
 		return
 	}
 
-	// TODO: add host/path-based routing when moving beyond hardcoded test config.
-	proxy := h.proxies[0]
-	target := h.targets[0]
-
+	target := rule.HTTPTargets[0]
 	scheme := "http"
 	if target.UseHTTPS {
 		scheme = "https"
@@ -278,5 +314,5 @@ func (h *HTTPHandler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	logger.Info("HTTP handler: %s %s -> %s://%s:%d",
 		r.Method, r.URL.RequestURI(), scheme, target.DestAddr, target.DestPort)
 
-	proxy.ServeHTTP(w, r)
+	h.getProxy(target).ServeHTTP(w, r)
 }

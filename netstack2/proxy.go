@@ -53,6 +53,14 @@ type SubnetRule struct {
 	RewriteTo    string       // Optional rewrite address for DNAT - can be IP/CIDR or domain name
 	PortRanges   []PortRange  // empty slice means all ports allowed
 	ResourceId   int          // Optional resource ID from the server for access logging
+
+	// HTTP proxy configuration (optional).
+	// When Protocol is non-empty the TCP connection is handled by HTTPHandler
+	// instead of the raw TCP forwarder.
+	Protocol    string       // "", "http", or "https" — controls the incoming (client-facing) protocol
+	HTTPTargets []HTTPTarget // downstream services to proxy requests to
+	TLSCert     string       // PEM-encoded certificate for incoming HTTPS termination
+	TLSKey      string       // PEM-encoded private key for incoming HTTPS termination
 }
 
 // GetAllRules returns a copy of all subnet rules
@@ -132,13 +140,12 @@ type ProxyHandlerOptions struct {
 	EnableTCP  bool
 	EnableUDP  bool
 	EnableICMP bool
-	EnableHTTP bool
 	MTU        int
 }
 
 // NewProxyHandler creates a new proxy handler for promiscuous mode
 func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
-	if !options.EnableTCP && !options.EnableUDP && !options.EnableICMP && !options.EnableHTTP {
+	if !options.EnableTCP && !options.EnableUDP && !options.EnableICMP {
 		return nil, nil // No proxy needed
 	}
 
@@ -166,12 +173,21 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 		}),
 	}
 
-	// Initialize TCP handler if enabled
+	// Initialize TCP handler if enabled. The HTTP handler piggybacks on the
+	// TCP forwarder — TCPHandler.handleTCPConn checks the subnet rule for
+	// ports 80/443 and routes matching connections to the HTTP handler, so
+	// the HTTP handler is always initialised alongside TCP.
 	if options.EnableTCP {
 		handler.tcpHandler = NewTCPHandler(handler.proxyStack, handler)
 		if err := handler.tcpHandler.InstallTCPHandler(); err != nil {
 			return nil, fmt.Errorf("failed to install TCP handler: %v", err)
 		}
+
+		handler.httpHandler = NewHTTPHandler(handler.proxyStack, handler)
+		if err := handler.httpHandler.Start(); err != nil {
+			return nil, fmt.Errorf("failed to start HTTP handler: %v", err)
+		}
+		logger.Debug("ProxyHandler: HTTP handler enabled")
 	}
 
 	// Initialize UDP handler if enabled
@@ -189,17 +205,6 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 			return nil, fmt.Errorf("failed to install ICMP handler: %v", err)
 		}
 		logger.Debug("ProxyHandler: ICMP handler enabled")
-	}
-
-	// Initialize HTTP handler if enabled. The HTTP handler piggybacks on the
-	// TCP forwarder: TCPHandler.handleTCPConn checks HandlesPort() and routes
-	// matching connections here instead of doing raw byte forwarding.
-	if options.EnableHTTP {
-		handler.httpHandler = NewHTTPHandler(handler.proxyStack, handler)
-		if err := handler.httpHandler.Start(); err != nil {
-			return nil, fmt.Errorf("failed to start HTTP handler: %v", err)
-		}
-		logger.Debug("ProxyHandler: HTTP handler enabled")
 	}
 
 	// // Example 1: Add a rule with no port restrictions (all ports allowed)
@@ -221,16 +226,14 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 	return handler, nil
 }
 
-// AddSubnetRule adds a subnet with optional port restrictions to the proxy handler
-// sourcePrefix: The IP prefix of the peer sending the data
-// destPrefix: The IP prefix of the destination
-// rewriteTo: Optional address to rewrite destination to - can be IP/CIDR or domain name
-// If portRanges is nil or empty, all ports are allowed for this subnet
-func (p *ProxyHandler) AddSubnetRule(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool, resourceId int) {
+// AddSubnetRule adds a subnet rule to the proxy handler.
+// HTTP proxy behaviour is configured via rule.Protocol, rule.HTTPTargets,
+// rule.TLSCert, and rule.TLSKey; leave Protocol empty for raw TCP/UDP.
+func (p *ProxyHandler) AddSubnetRule(rule SubnetRule) {
 	if p == nil || !p.enabled {
 		return
 	}
-	p.subnetLookup.AddSubnet(sourcePrefix, destPrefix, rewriteTo, portRanges, disableIcmp, resourceId)
+	p.subnetLookup.AddSubnet(rule)
 }
 
 // RemoveSubnetRule removes a subnet from the proxy handler
