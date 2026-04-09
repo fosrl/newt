@@ -23,8 +23,29 @@ import (
 
 const (
 	errUnsupportedProtoFmt = "unsupported protocol: %s"
-	maxUDPPacketSize       = 65507
+	maxUDPPacketSize       = 65507 // Maximum UDP packet size
 )
+
+// udpBufferPool provides reusable buffers for UDP packet handling.
+// This reduces GC pressure from frequent large allocations.
+var udpBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, maxUDPPacketSize)
+		return &buf
+	},
+}
+
+// getUDPBuffer retrieves a buffer from the pool.
+func getUDPBuffer() *[]byte {
+	return udpBufferPool.Get().(*[]byte)
+}
+
+// putUDPBuffer clears and returns a buffer to the pool.
+func putUDPBuffer(buf *[]byte) {
+	// Clear the buffer to prevent data leakage
+	clear(*buf)
+	udpBufferPool.Put(buf)
+}
 
 // Target represents a proxy target with its address and port
 type Target struct {
@@ -555,7 +576,9 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 }
 
 func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
-	buffer := make([]byte, maxUDPPacketSize) // Max UDP packet size
+	bufPtr := getUDPBuffer()
+	defer putUDPBuffer(bufPtr)
+	buffer := *bufPtr
 	clientConns := make(map[string]*net.UDPConn)
 	var clientsMutex sync.RWMutex
 
@@ -638,7 +661,10 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			go func(clientKey string, targetConn *net.UDPConn, remoteAddr net.Addr, tunnelID string) {
 				start := time.Now()
 				result := "success"
+				bufPtr := getUDPBuffer()
 				defer func() {
+					// Return buffer to pool first
+					putUDPBuffer(bufPtr)
 					// Always clean up when this goroutine exits
 					clientsMutex.Lock()
 					if storedConn, exists := clientConns[clientKey]; exists && storedConn == targetConn {
@@ -653,7 +679,7 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 					telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "udp", telemetry.ProxyConnectionClosed)
 				}()
 
-				buffer := make([]byte, maxUDPPacketSize)
+				buffer := *bufPtr
 				for {
 					n, _, err := targetConn.ReadFromUDP(buffer)
 					if err != nil {
