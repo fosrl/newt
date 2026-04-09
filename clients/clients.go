@@ -74,18 +74,18 @@ type PeerReading struct {
 }
 
 type WireGuardService struct {
-	interfaceName string
-	mtu           int
-	client        *websocket.Client
-	config        WgConfig
-	key           wgtypes.Key
-	newtId        string
-	lastReadings  map[string]PeerReading
-	mu            sync.Mutex
-	Port          uint16
-	host          string
-	serverPubKey  string
-	token         string
+	interfaceName        string
+	mtu                  int
+	client               *websocket.Client
+	config               WgConfig
+	key                  wgtypes.Key
+	newtId               string
+	lastReadings         map[string]PeerReading
+	mu                   sync.Mutex
+	Port                 uint16
+	host                 string
+	serverPubKey         string
+	token                string
 	stopGetConfig        func()
 	pendingConfigChainId string
 	// Netstack fields
@@ -697,7 +697,14 @@ func (s *WireGuardService) syncTargets(desiredTargets []Target) error {
 				})
 			}
 
-			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp, target.ResourceId)
+			s.tnet.AddProxySubnetRule(netstack2.SubnetRule{
+				SourcePrefix: sourcePrefix,
+				DestPrefix:   destPrefix,
+				RewriteTo:    target.RewriteTo,
+				PortRanges:   portRanges,
+				DisableIcmp:  target.DisableIcmp,
+				ResourceId:   target.ResourceId,
+			})
 			logger.Info("Added target %s -> %s during sync", target.SourcePrefix, target.DestPrefix)
 		}
 	}
@@ -819,7 +826,6 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 			EnableTCPProxy:  true,
 			EnableUDPProxy:  true,
 			EnableICMPProxy: true,
-			EnableHTTPProxy:  true,
 		},
 	)
 	if err != nil {
@@ -956,7 +962,14 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 			if err != nil {
 				return fmt.Errorf("invalid CIDR %s: %v", sp, err)
 			}
-			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp, target.ResourceId)
+			s.tnet.AddProxySubnetRule(netstack2.SubnetRule{
+				SourcePrefix: sourcePrefix,
+				DestPrefix:   destPrefix,
+				RewriteTo:    target.RewriteTo,
+				PortRanges:   portRanges,
+				DisableIcmp:  target.DisableIcmp,
+				ResourceId:   target.ResourceId,
+			})
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}
 	}
@@ -1349,7 +1362,14 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 				logger.Info("Invalid CIDR %s: %v", sp, err)
 				continue
 			}
-			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp, target.ResourceId)
+			s.tnet.AddProxySubnetRule(netstack2.SubnetRule{
+				SourcePrefix: sourcePrefix,
+				DestPrefix:   destPrefix,
+				RewriteTo:    target.RewriteTo,
+				PortRanges:   portRanges,
+				DisableIcmp:  target.DisableIcmp,
+				ResourceId:   target.ResourceId,
+			})
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}
 	}
@@ -1467,7 +1487,14 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 				logger.Info("Invalid CIDR %s: %v", sp, err)
 				continue
 			}
-			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp, target.ResourceId)
+			s.tnet.AddProxySubnetRule(netstack2.SubnetRule{
+				SourcePrefix: sourcePrefix,
+				DestPrefix:   destPrefix,
+				RewriteTo:    target.RewriteTo,
+				PortRanges:   portRanges,
+				DisableIcmp:  target.DisableIcmp,
+				ResourceId:   target.ResourceId,
+			})
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}
 	}
