@@ -177,23 +177,28 @@ var (
 	configFile string
 )
 
-// maxContainersPerChunk is the maximum number of containers to send in a single WebSocket message.
-// Large container lists (>20) can cause messages to be dropped by intermediary proxies.
+// maxContainersPerChunk is the maximum number of containers per WebSocket message.
+// Each container with full metadata (labels, ports, networks) can be 1-5KB of JSON.
+// 15 containers ≈ 15-75KB which is well within typical proxy frame limits.
 const maxContainersPerChunk = 15
 
 // sendContainerList sends a list of Docker containers to the server, chunking if necessary
 // to avoid exceeding WebSocket message size limits that can cause data loss through proxies.
+// Each chunked batch includes a unique batchId so the server can distinguish interleaved sends
+// (e.g., a manual fetch and a Docker event firing concurrently).
 func sendContainerList(client *websocket.Client, containers []docker.Container) error {
 	if len(containers) <= maxContainersPerChunk {
-		// Small list — send in a single message (backward compatible)
+		// Small list — send in a single non-chunked message (backward compatible)
 		return client.SendMessage("newt/socket/containers", map[string]interface{}{
 			"containers": containers,
 		})
 	}
 
-	// Large list — split into chunks
+	// Generate a unique batch ID so the server can handle concurrent chunk streams
+	batchId := generateChainId()
+
 	totalChunks := (len(containers) + maxContainersPerChunk - 1) / maxContainersPerChunk
-	logger.Info("Sending %d containers in %d chunks", len(containers), totalChunks)
+	logger.Info("Sending %d containers in %d chunks (batch=%s)", len(containers), totalChunks, batchId)
 
 	for i := 0; i < len(containers); i += maxContainersPerChunk {
 		end := i + maxContainersPerChunk
@@ -203,14 +208,15 @@ func sendContainerList(client *websocket.Client, containers []docker.Container) 
 		chunkIndex := i / maxContainersPerChunk
 
 		err := client.SendMessage("newt/socket/containers", map[string]interface{}{
-			"containers": containers[i:end],
-			"chunkIndex": chunkIndex,
+			"containers":  containers[i:end],
+			"chunkIndex":  chunkIndex,
 			"totalChunks": totalChunks,
+			"batchId":     batchId,
 		})
 		if err != nil {
-			return fmt.Errorf("failed to send chunk %d/%d: %w", chunkIndex+1, totalChunks, err)
+			return fmt.Errorf("failed to send chunk %d/%d (batch=%s): %w", chunkIndex+1, totalChunks, batchId, err)
 		}
-		logger.Debug("Sent chunk %d/%d (%d containers)", chunkIndex+1, totalChunks, end-i)
+		logger.Debug("Sent chunk %d/%d (%d containers, batch=%s)", chunkIndex+1, totalChunks, end-i, batchId)
 	}
 
 	return nil
