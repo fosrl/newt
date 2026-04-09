@@ -26,9 +26,9 @@ import (
 // HTTPTarget describes a single downstream HTTP or HTTPS service that the
 // proxy should forward requests to.
 type HTTPTarget struct {
-	DestAddr string // IP address or hostname of the downstream service
-	DestPort uint16 // TCP port of the downstream service
-	UseHTTPS bool   // When true the outbound leg uses HTTPS
+	DestAddr string `json:"destAddr"` // IP address or hostname of the downstream service
+	DestPort uint16 `json:"destPort"` // TCP port of the downstream service
+	UseHTTPS bool   `json:"useHttps"` // When true the outbound leg uses HTTPS
 }
 
 // ---------------------------------------------------------------------------

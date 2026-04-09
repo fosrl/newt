@@ -40,13 +40,17 @@ type WgConfig struct {
 }
 
 type Target struct {
-	SourcePrefix   string      `json:"sourcePrefix"`
-	SourcePrefixes []string    `json:"sourcePrefixes"`
-	DestPrefix     string      `json:"destPrefix"`
-	RewriteTo      string      `json:"rewriteTo,omitempty"`
-	DisableIcmp    bool        `json:"disableIcmp,omitempty"`
-	PortRange      []PortRange `json:"portRange,omitempty"`
-	ResourceId     int         `json:"resourceId,omitempty"`
+	SourcePrefix   string                 `json:"sourcePrefix"`
+	SourcePrefixes []string               `json:"sourcePrefixes"`
+	DestPrefix     string                 `json:"destPrefix"`
+	RewriteTo      string                 `json:"rewriteTo,omitempty"`
+	DisableIcmp    bool                   `json:"disableIcmp,omitempty"`
+	PortRange      []PortRange            `json:"portRange,omitempty"`
+	ResourceId     int                    `json:"resourceId,omitempty"`
+	Protocol       string                 `json:"protocol,omitempty"`    // for now practicably either http or https
+	HTTPTargets    []netstack2.HTTPTarget `json:"httpTargets,omitempty"` // for http protocol, list of downstream services to load balance across
+	TLSCert        string                 `json:"tlsCert,omitempty"`     // PEM-encoded certificate for incoming HTTPS termination
+	TLSKey         string                 `json:"tlsKey,omitempty"`      // PEM-encoded private key for incoming HTTPS termination
 }
 
 type PortRange struct {
@@ -704,6 +708,10 @@ func (s *WireGuardService) syncTargets(desiredTargets []Target) error {
 				PortRanges:   portRanges,
 				DisableIcmp:  target.DisableIcmp,
 				ResourceId:   target.ResourceId,
+				Protocol:     target.Protocol,
+				HTTPTargets:  target.HTTPTargets,
+				TLSCert:      target.TLSCert,
+				TLSKey:       target.TLSKey,
 			})
 			logger.Info("Added target %s -> %s during sync", target.SourcePrefix, target.DestPrefix)
 		}
@@ -969,6 +977,10 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 				PortRanges:   portRanges,
 				DisableIcmp:  target.DisableIcmp,
 				ResourceId:   target.ResourceId,
+				Protocol:     target.Protocol,
+				HTTPTargets:  target.HTTPTargets,
+				TLSCert:      target.TLSCert,
+				TLSKey:       target.TLSKey,
 			})
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}
@@ -1369,6 +1381,10 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 				PortRanges:   portRanges,
 				DisableIcmp:  target.DisableIcmp,
 				ResourceId:   target.ResourceId,
+				Protocol:     target.Protocol,
+				HTTPTargets:  target.HTTPTargets,
+				TLSCert:      target.TLSCert,
+				TLSKey:       target.TLSKey,
 			})
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}
@@ -1494,6 +1510,10 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 				PortRanges:   portRanges,
 				DisableIcmp:  target.DisableIcmp,
 				ResourceId:   target.ResourceId,
+				Protocol:     target.Protocol,
+				HTTPTargets:  target.HTTPTargets,
+				TLSCert:      target.TLSCert,
+				TLSKey:       target.TLSKey,
 			})
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}
