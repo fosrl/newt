@@ -71,6 +71,11 @@ func (c *Client) loadConfig() error {
 		}
 		return err
 	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		logger.Info("Config file at %s is empty, will initialize it with provided values", configPath)
+		c.configNeedsSave = true
+		return nil
+	}
 
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
