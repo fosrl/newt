@@ -177,6 +177,45 @@ var (
 	configFile string
 )
 
+// maxContainersPerChunk is the maximum number of containers to send in a single WebSocket message.
+// Large container lists (>20) can cause messages to be dropped by intermediary proxies.
+const maxContainersPerChunk = 15
+
+// sendContainerList sends a list of Docker containers to the server, chunking if necessary
+// to avoid exceeding WebSocket message size limits that can cause data loss through proxies.
+func sendContainerList(client *websocket.Client, containers []docker.Container) error {
+	if len(containers) <= maxContainersPerChunk {
+		// Small list — send in a single message (backward compatible)
+		return client.SendMessage("newt/socket/containers", map[string]interface{}{
+			"containers": containers,
+		})
+	}
+
+	// Large list — split into chunks
+	totalChunks := (len(containers) + maxContainersPerChunk - 1) / maxContainersPerChunk
+	logger.Info("Sending %d containers in %d chunks", len(containers), totalChunks)
+
+	for i := 0; i < len(containers); i += maxContainersPerChunk {
+		end := i + maxContainersPerChunk
+		if end > len(containers) {
+			end = len(containers)
+		}
+		chunkIndex := i / maxContainersPerChunk
+
+		err := client.SendMessage("newt/socket/containers", map[string]interface{}{
+			"containers": containers[i:end],
+			"chunkIndex": chunkIndex,
+			"totalChunks": totalChunks,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to send chunk %d/%d: %w", chunkIndex+1, totalChunks, err)
+		}
+		logger.Debug("Sent chunk %d/%d (%d containers)", chunkIndex+1, totalChunks, end-i)
+	}
+
+	return nil
+}
+
 // generateChainId generates a random chain ID for deduplicating round-trip messages.
 func generateChainId() string {
 	b := make([]byte, 8)
@@ -1462,15 +1501,8 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			return
 		}
 
-		// Send container list back to server
-		err = client.SendMessage("newt/socket/containers", map[string]interface{}{
-			"containers": containers,
-		})
-		if err != nil {
-			logger.Error("Failed to send registration message: %v", err)
-		}
-
-		if err != nil {
+		// Send container list back to server (chunked for large lists)
+		if err := sendContainerList(client, containers); err != nil {
 			logger.Error("Failed to send Docker container list: %v", err)
 		} else {
 			logger.Debug("Docker container list sent, count: %d", len(containers))
@@ -1883,12 +1915,9 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 	if dockerSocket != "" {
 		logger.Debug("Initializing Docker event monitoring")
 		dockerEventMonitor, err = docker.NewEventMonitor(dockerSocket, dockerEnforceNetworkValidationBool, func(containers []docker.Container) {
-			// Send updated container list via websocket when Docker events occur
+			// Send updated container list via websocket when Docker events occur (chunked for large lists)
 			logger.Debug("Docker event detected, sending updated container list (%d containers)", len(containers))
-			err := client.SendMessage("newt/socket/containers", map[string]interface{}{
-				"containers": containers,
-			})
-			if err != nil {
+			if err := sendContainerList(client, containers); err != nil {
 				logger.Error("Failed to send updated container list after Docker event: %v", err)
 			} else {
 				logger.Debug("Updated container list sent successfully")
