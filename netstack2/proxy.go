@@ -114,6 +114,7 @@ type ProxyHandler struct {
 	tcpHandler        *TCPHandler
 	udpHandler        *UDPHandler
 	icmpHandler       *ICMPHandler
+	httpHandler       *HTTPHandler
 	subnetLookup      *SubnetLookup
 	natTable          map[connKey]*natState
 	reverseNatTable   map[reverseConnKey]*natState // Reverse lookup map for O(1) reply packet NAT
@@ -131,12 +132,13 @@ type ProxyHandlerOptions struct {
 	EnableTCP  bool
 	EnableUDP  bool
 	EnableICMP bool
+	EnableHTTP bool
 	MTU        int
 }
 
 // NewProxyHandler creates a new proxy handler for promiscuous mode
 func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
-	if !options.EnableTCP && !options.EnableUDP && !options.EnableICMP {
+	if !options.EnableTCP && !options.EnableUDP && !options.EnableICMP && !options.EnableHTTP {
 		return nil, nil // No proxy needed
 	}
 
@@ -187,6 +189,17 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 			return nil, fmt.Errorf("failed to install ICMP handler: %v", err)
 		}
 		logger.Debug("ProxyHandler: ICMP handler enabled")
+	}
+
+	// Initialize HTTP handler if enabled. The HTTP handler piggybacks on the
+	// TCP forwarder: TCPHandler.handleTCPConn checks HandlesPort() and routes
+	// matching connections here instead of doing raw byte forwarding.
+	if options.EnableHTTP {
+		handler.httpHandler = NewHTTPHandler(handler.proxyStack, handler)
+		if err := handler.httpHandler.Start(); err != nil {
+			return nil, fmt.Errorf("failed to start HTTP handler: %v", err)
+		}
+		logger.Debug("ProxyHandler: HTTP handler enabled")
 	}
 
 	// // Example 1: Add a rule with no port restrictions (all ports allowed)
@@ -792,6 +805,11 @@ func (p *ProxyHandler) Close() error {
 	// Shut down access logger
 	if p.accessLogger != nil {
 		p.accessLogger.Close()
+	}
+
+	// Shut down HTTP handler
+	if p.httpHandler != nil {
+		p.httpHandler.Close()
 	}
 
 	// Close ICMP replies channel

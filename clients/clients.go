@@ -819,6 +819,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 			EnableTCPProxy:  true,
 			EnableUDPProxy:  true,
 			EnableICMPProxy: true,
+			EnableHTTPProxy:  true,
 		},
 	)
 	if err != nil {

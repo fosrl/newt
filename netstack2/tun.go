@@ -59,6 +59,7 @@ type NetTunOptions struct {
 	EnableTCPProxy  bool
 	EnableUDPProxy  bool
 	EnableICMPProxy bool
+	EnableHTTPProxy bool
 }
 
 // CreateNetTUN creates a new TUN device with netstack without proxying
@@ -67,6 +68,7 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 		EnableTCPProxy:  true,
 		EnableUDPProxy:  true,
 		EnableICMPProxy: true,
+		EnableHTTPProxy: true,
 	})
 }
 
@@ -93,6 +95,7 @@ func CreateNetTUNWithOptions(localAddresses, dnsServers []netip.Addr, mtu int, o
 			EnableTCP:  options.EnableTCPProxy,
 			EnableUDP:  options.EnableUDPProxy,
 			EnableICMP: options.EnableICMPProxy,
+			EnableHTTP: options.EnableHTTPProxy,
 			MTU:        mtu,
 		})
 		if err != nil {

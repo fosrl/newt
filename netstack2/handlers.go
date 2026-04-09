@@ -137,13 +137,25 @@ func (h *TCPHandler) InstallTCPHandler() error {
 
 // handleTCPConn handles a TCP connection by proxying it to the actual target
 func (h *TCPHandler) handleTCPConn(netstackConn *gonet.TCPConn, id stack.TransportEndpointID) {
-	defer netstackConn.Close()
-
-	// Extract source and target address from the connection ID
+	// Extract source and target address from the connection ID first so they
+	// are available for HTTP routing before any defer is set up.
 	srcIP := id.RemoteAddress.String()
 	srcPort := id.RemotePort
 	dstIP := id.LocalAddress.String()
 	dstPort := id.LocalPort
+
+	// Route to the HTTP handler when the destination port belongs to it.
+	// The HTTP handler takes full ownership of the connection lifecycle, so we
+	// must NOT install the defer close before handing the conn off.
+	if h.proxyHandler != nil && h.proxyHandler.httpHandler != nil {
+		if h.proxyHandler.httpHandler.HandlesPort(dstPort) {
+			logger.Info("+++++++++++++++++++++++TCP Forwarder: Routing %s:%d -> %s:%d to HTTP handler", srcIP, srcPort, dstIP, dstPort)
+			h.proxyHandler.httpHandler.HandleConn(netstackConn)
+			return
+		}
+	}
+
+	defer netstackConn.Close()
 
 	logger.Info("TCP Forwarder: Handling connection %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
 
