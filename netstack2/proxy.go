@@ -133,6 +133,7 @@ type ProxyHandler struct {
 	icmpReplies       chan []byte          // Channel for ICMP reply packets to be sent back through the tunnel
 	notifiable        channel.Notification // Notification handler for triggering reads
 	accessLogger      *AccessLogger        // Access logger for tracking sessions
+	httpRequestLogger *HTTPRequestLogger   // HTTP request logger for proxied HTTP/HTTPS requests
 }
 
 // ProxyHandlerOptions configures the proxy handler
@@ -187,6 +188,9 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 		if err := handler.httpHandler.Start(); err != nil {
 			return nil, fmt.Errorf("failed to start HTTP handler: %v", err)
 		}
+
+		handler.httpRequestLogger = NewHTTPRequestLogger()
+		handler.httpHandler.SetRequestLogger(handler.httpRequestLogger)
 		logger.Debug("ProxyHandler: HTTP handler enabled")
 	}
 
@@ -287,6 +291,24 @@ func (p *ProxyHandler) SetAccessLogSender(fn SendFunc) {
 		return
 	}
 	p.accessLogger.SetSendFunc(fn)
+}
+
+// GetHTTPRequestLogger returns the HTTP request logger.
+func (p *ProxyHandler) GetHTTPRequestLogger() *HTTPRequestLogger {
+	if p == nil {
+		return nil
+	}
+	return p.httpRequestLogger
+}
+
+// SetHTTPRequestLogSender configures the function used to send compressed HTTP
+// request log batches to the server. This should be called once the websocket
+// client is available.
+func (p *ProxyHandler) SetHTTPRequestLogSender(fn SendFunc) {
+	if p == nil || !p.enabled || p.httpRequestLogger == nil {
+		return
+	}
+	p.httpRequestLogger.SetSendFunc(fn)
 }
 
 // LookupDestinationRewrite looks up the rewritten destination for a connection
@@ -808,6 +830,11 @@ func (p *ProxyHandler) Close() error {
 	// Shut down access logger
 	if p.accessLogger != nil {
 		p.accessLogger.Close()
+	}
+
+	// Shut down HTTP request logger
+	if p.httpRequestLogger != nil {
+		p.httpRequestLogger.Close()
 	}
 
 	// Shut down HTTP handler

@@ -14,6 +14,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"sync"
+	"time"
 
 	"github.com/fosrl/newt/logger"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -50,8 +51,9 @@ type HTTPTarget struct {
 // Outbound connections to downstream targets honour HTTPTarget.UseHTTPS
 // independently of the incoming protocol.
 type HTTPHandler struct {
-	stack        *stack.Stack
-	proxyHandler *ProxyHandler
+	stack         *stack.Stack
+	proxyHandler  *ProxyHandler
+	requestLogger *HTTPRequestLogger
 
 	listener *chanListener
 	server   *http.Server
@@ -150,6 +152,12 @@ func NewHTTPHandler(s *stack.Stack, ph *ProxyHandler) *HTTPHandler {
 		stack:        s,
 		proxyHandler: ph,
 	}
+}
+
+// SetRequestLogger attaches an HTTPRequestLogger so that every proxied request
+// is recorded and periodically shipped to the server.
+func (h *HTTPHandler) SetRequestLogger(rl *HTTPRequestLogger) {
+	h.requestLogger = rl
 }
 
 // Start launches the internal http.Server that services connections delivered
@@ -289,6 +297,19 @@ func (h *HTTPHandler) getProxy(target HTTPTarget) *httputil.ReverseProxy {
 	return actual.(*httputil.ReverseProxy)
 }
 
+// statusCapture wraps an http.ResponseWriter and records the HTTP status code
+// written by the upstream handler. If WriteHeader is never called the status
+// defaults to 200 (http.StatusOK), matching net/http semantics.
+type statusCapture struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sc *statusCapture) WriteHeader(code int) {
+	sc.status = code
+	sc.ResponseWriter.WriteHeader(code)
+}
+
 // handleRequest is the http.Handler entry point. It retrieves the SubnetRule
 // attached to the connection by ConnContext, selects the first configured
 // downstream target, and forwards the request via the cached ReverseProxy.
@@ -308,5 +329,23 @@ func (h *HTTPHandler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	logger.Info("HTTP handler: %s %s -> %s://%s:%d",
 		r.Method, r.URL.RequestURI(), scheme, target.DestAddr, target.DestPort)
 
-	h.getProxy(target).ServeHTTP(w, r)
+	timestamp := time.Now()
+	sc := &statusCapture{ResponseWriter: w, status: http.StatusOK}
+
+	h.getProxy(target).ServeHTTP(sc, r)
+
+	if h.requestLogger != nil && rule.ResourceId != 0 {
+		h.requestLogger.LogRequest(HTTPRequestLog{
+			ResourceID: rule.ResourceId,
+			Timestamp:  timestamp,
+			Method:     r.Method,
+			Scheme:     rule.Protocol,
+			Host:       r.Host,
+			Path:       r.URL.Path,
+			RawQuery:   r.URL.RawQuery,
+			UserAgent:  r.UserAgent(),
+			SourceAddr: r.RemoteAddr,
+			TLS:        rule.Protocol == "https",
+		})
+	}
 }
