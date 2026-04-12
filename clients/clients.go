@@ -850,6 +850,13 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		})
 	})
 
+	// Configure the HTTP request log sender to ship compressed request logs via websocket
+	s.tnet.SetHTTPRequestLogSender(func(data string) error {
+		return s.client.SendMessageNoLog("newt/request-log", map[string]interface{}{
+			"compressed": data,
+		})
+	})
+
 	// Create WireGuard device using the shared bind
 	s.device = device.NewDevice(s.tun, s.sharedBind, device.NewLogger(
 		device.LogLevelSilent, // Use silent logging by default - could be made configurable

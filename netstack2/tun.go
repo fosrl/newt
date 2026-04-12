@@ -394,6 +394,16 @@ func (net *Net) SetAccessLogSender(fn SendFunc) {
 	}
 }
 
+// SetHTTPRequestLogSender configures the function used to send compressed HTTP
+// request log batches to the server. This should be called once the websocket
+// client is available.
+func (net *Net) SetHTTPRequestLogSender(fn SendFunc) {
+	tun := (*netTun)(net)
+	if tun.proxyHandler != nil {
+		tun.proxyHandler.SetHTTPRequestLogSender(fn)
+	}
+}
+
 type PingConn struct {
 	laddr    PingAddr
 	raddr    PingAddr
