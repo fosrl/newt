@@ -129,6 +129,7 @@ var (
 	dockerEnforceNetworkValidationBool bool
 	pingInterval                       time.Duration
 	pingTimeout                        time.Duration
+	udpProxyIdleTimeout                time.Duration
 	publicKey                          wgtypes.Key
 	pingStopChan                       chan struct{}
 	stopFunc                           func()
@@ -261,6 +262,7 @@ func runNewtMain(ctx context.Context) {
 	dockerSocket = os.Getenv("DOCKER_SOCKET")
 	pingIntervalStr := os.Getenv("PING_INTERVAL")
 	pingTimeoutStr := os.Getenv("PING_TIMEOUT")
+	udpProxyIdleTimeoutStr := os.Getenv("NEWT_UDP_PROXY_IDLE_TIMEOUT")
 	dockerEnforceNetworkValidation = os.Getenv("DOCKER_ENFORCE_NETWORK_VALIDATION")
 	healthFile = os.Getenv("HEALTH_FILE")
 	// authorizedKeysFile = os.Getenv("AUTHORIZED_KEYS_FILE")
@@ -337,6 +339,9 @@ func runNewtMain(ctx context.Context) {
 	if pingTimeoutStr == "" {
 		flag.StringVar(&pingTimeoutStr, "ping-timeout", "7s", "	Timeout for each ping (default 7s)")
 	}
+	if udpProxyIdleTimeoutStr == "" {
+		flag.StringVar(&udpProxyIdleTimeoutStr, "udp-proxy-idle-timeout", "90s", "Idle timeout for UDP proxied client flows before cleanup")
+	}
 	// load the prefer endpoint just as a flag
 	flag.StringVar(&preferEndpoint, "prefer-endpoint", "", "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
 	if provisioningKey == "" {
@@ -384,6 +389,16 @@ func runNewtMain(ctx context.Context) {
 		}
 	} else {
 		pingTimeout = 7 * time.Second
+	}
+
+	if udpProxyIdleTimeoutStr != "" {
+		udpProxyIdleTimeout, err = time.ParseDuration(udpProxyIdleTimeoutStr)
+		if err != nil || udpProxyIdleTimeout <= 0 {
+			fmt.Printf("Invalid NEWT_UDP_PROXY_IDLE_TIMEOUT/--udp-proxy-idle-timeout value: %s, using default 90 seconds\n", udpProxyIdleTimeoutStr)
+			udpProxyIdleTimeout = 90 * time.Second
+		}
+	} else {
+		udpProxyIdleTimeout = 90 * time.Second
 	}
 
 	if dockerEnforceNetworkValidation == "" {
@@ -896,6 +911,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		// Create proxy manager
 		pm = proxy.NewProxyManager(tnet)
 		pm.SetAsyncBytes(metricsAsyncBytes)
+		pm.SetUDPIdleTimeout(udpProxyIdleTimeout)
 		// Set tunnel_id for metrics (WireGuard peer public key)
 		pm.SetTunnelID(wgData.PublicKey)
 

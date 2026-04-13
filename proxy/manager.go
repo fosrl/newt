@@ -24,6 +24,7 @@ import (
 const (
 	errUnsupportedProtoFmt = "unsupported protocol: %s"
 	maxUDPPacketSize       = 65507 // Maximum UDP packet size
+	defaultUDPIdleTimeout  = 90 * time.Second
 )
 
 // udpBufferPool provides reusable buffers for UDP packet handling.
@@ -68,6 +69,7 @@ type ProxyManager struct {
 	tunnels         map[string]*tunnelEntry
 	asyncBytes      bool
 	flushStop       chan struct{}
+	udpIdleTimeout  time.Duration
 }
 
 // tunnelEntry holds per-tunnel attributes and (optional) async counters.
@@ -153,6 +155,7 @@ func NewProxyManager(tnet *netstack.Net) *ProxyManager {
 		listeners:  make([]*gonet.TCPListener, 0),
 		udpConns:   make([]*gonet.UDPConn, 0),
 		tunnels:    make(map[string]*tunnelEntry),
+		udpIdleTimeout: defaultUDPIdleTimeout,
 	}
 }
 
@@ -230,6 +233,7 @@ func NewProxyManagerWithoutTNet() *ProxyManager {
 		udpTargets: make(map[string]map[int]string),
 		listeners:  make([]*gonet.TCPListener, 0),
 		udpConns:   make([]*gonet.UDPConn, 0),
+		udpIdleTimeout: defaultUDPIdleTimeout,
 	}
 }
 
@@ -365,6 +369,17 @@ func (pm *ProxyManager) SetAsyncBytes(b bool) {
 		pm.flushStop = make(chan struct{})
 		go pm.flushLoop()
 	}
+}
+
+// SetUDPIdleTimeout configures when idle UDP client flows are reclaimed.
+func (pm *ProxyManager) SetUDPIdleTimeout(d time.Duration) {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+	if d <= 0 {
+		pm.udpIdleTimeout = defaultUDPIdleTimeout
+		return
+	}
+	pm.udpIdleTimeout = d
 }
 func (pm *ProxyManager) flushLoop() {
 	flushInterval := 2 * time.Second
@@ -646,6 +661,9 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 				telemetry.IncProxyAccept(context.Background(), pm.currentTunnelID, "udp", "failure", classifyProxyError(err))
 				continue
 			}
+			// Prevent idle UDP client goroutines from living forever and
+			// retaining large per-connection buffers.
+			_ = targetConn.SetReadDeadline(time.Now().Add(pm.udpIdleTimeout))
 			tunnelID := pm.currentTunnelID
 			telemetry.IncProxyAccept(context.Background(), tunnelID, "udp", "success", "")
 			telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "udp", telemetry.ProxyConnectionOpened)
@@ -683,6 +701,10 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 				for {
 					n, _, err := targetConn.ReadFromUDP(buffer)
 					if err != nil {
+						var netErr net.Error
+						if errors.As(err, &netErr) && netErr.Timeout() {
+							return
+						}
 						// Connection closed is normal during cleanup
 						if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
 							return // defer will handle cleanup, result stays "success"
@@ -725,6 +747,8 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			delete(clientConns, clientKey)
 			clientsMutex.Unlock()
 		} else if pm.currentTunnelID != "" && written > 0 {
+			// Extend idle timeout whenever client traffic is observed.
+			_ = targetConn.SetReadDeadline(time.Now().Add(pm.udpIdleTimeout))
 			if pm.asyncBytes {
 				if e := pm.getEntry(pm.currentTunnelID); e != nil {
 					e.bytesInUDP.Add(uint64(written))
