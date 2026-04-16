@@ -202,6 +202,14 @@ func (m *Monitor) addTargetUnsafe(config Config) error {
 		ctx:    ctx,
 		cancel: cancel,
 		client: &http.Client{
+			CheckRedirect: func() func(*http.Request, []*http.Request) error {
+				if !config.FollowRedirects {
+					return func(req *http.Request, via []*http.Request) error {
+						return http.ErrUseLastResponse
+					}
+				}
+				return nil
+			}(),
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{
 					// Configure TLS settings based on certificate enforcement
