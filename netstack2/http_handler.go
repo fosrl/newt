@@ -276,15 +276,27 @@ func (h *HTTPHandler) getProxy(target HTTPTarget) *httputil.ReverseProxy {
 		Scheme: scheme,
 		Host:   fmt.Sprintf("%s:%d", target.DestAddr, target.DestPort),
 	}
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-
+	insecureTransport := (*http.Transport)(nil)
 	if target.Scheme == "https" {
 		// Allow self-signed certificates on downstream HTTPS targets.
-		proxy.Transport = &http.Transport{
+		insecureTransport = &http.Transport{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true, //nolint:gosec // downstream self-signed certs are a supported configuration
 			},
 		}
+	}
+
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(targetURL)
+			// SetXForwarded sets X-Forwarded-For from the inbound request's
+			// RemoteAddr (the WireGuard/netstack client address), along with
+			// X-Forwarded-Host and X-Forwarded-Proto. Using Rewrite instead of
+			// Director means the proxy does not append its own automatic
+			// X-Forwarded-For entry, so the header is set exactly once.
+			pr.SetXForwarded()
+		},
+		Transport: insecureTransport,
 	}
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
