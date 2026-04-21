@@ -40,13 +40,17 @@ type WgConfig struct {
 }
 
 type Target struct {
-	SourcePrefix   string      `json:"sourcePrefix"`
-	SourcePrefixes []string    `json:"sourcePrefixes"`
-	DestPrefix     string      `json:"destPrefix"`
-	RewriteTo      string      `json:"rewriteTo,omitempty"`
-	DisableIcmp    bool        `json:"disableIcmp,omitempty"`
-	PortRange      []PortRange `json:"portRange,omitempty"`
-	ResourceId     int         `json:"resourceId,omitempty"`
+	SourcePrefix   string                 `json:"sourcePrefix"`
+	SourcePrefixes []string               `json:"sourcePrefixes"`
+	DestPrefix     string                 `json:"destPrefix"`
+	RewriteTo      string                 `json:"rewriteTo,omitempty"`
+	DisableIcmp    bool                   `json:"disableIcmp,omitempty"`
+	PortRange      []PortRange            `json:"portRange,omitempty"`
+	ResourceId     int                    `json:"resourceId,omitempty"`
+	Protocol       string                 `json:"protocol,omitempty"`    // for now practicably either http or https
+	HTTPTargets    []netstack2.HTTPTarget `json:"httpTargets,omitempty"` // for http protocol, list of downstream services to load balance across
+	TLSCert        string                 `json:"tlsCert,omitempty"`     // PEM-encoded certificate for incoming HTTPS termination
+	TLSKey         string                 `json:"tlsKey,omitempty"`      // PEM-encoded private key for incoming HTTPS termination
 }
 
 type PortRange struct {
@@ -74,18 +78,18 @@ type PeerReading struct {
 }
 
 type WireGuardService struct {
-	interfaceName string
-	mtu           int
-	client        *websocket.Client
-	config        WgConfig
-	key           wgtypes.Key
-	newtId        string
-	lastReadings  map[string]PeerReading
-	mu            sync.Mutex
-	Port          uint16
-	host          string
-	serverPubKey  string
-	token         string
+	interfaceName        string
+	mtu                  int
+	client               *websocket.Client
+	config               WgConfig
+	key                  wgtypes.Key
+	newtId               string
+	lastReadings         map[string]PeerReading
+	mu                   sync.Mutex
+	Port                 uint16
+	host                 string
+	serverPubKey         string
+	token                string
 	stopGetConfig        func()
 	pendingConfigChainId string
 	// Netstack fields
@@ -697,7 +701,18 @@ func (s *WireGuardService) syncTargets(desiredTargets []Target) error {
 				})
 			}
 
-			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp, target.ResourceId)
+			s.tnet.AddProxySubnetRule(netstack2.SubnetRule{
+				SourcePrefix: sourcePrefix,
+				DestPrefix:   destPrefix,
+				RewriteTo:    target.RewriteTo,
+				PortRanges:   portRanges,
+				DisableIcmp:  target.DisableIcmp,
+				ResourceId:   target.ResourceId,
+				Protocol:     target.Protocol,
+				HTTPTargets:  target.HTTPTargets,
+				TLSCert:      target.TLSCert,
+				TLSKey:       target.TLSKey,
+			})
 			logger.Info("Added target %s -> %s during sync", target.SourcePrefix, target.DestPrefix)
 		}
 	}
@@ -835,6 +850,13 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		})
 	})
 
+	// Configure the HTTP request log sender to ship compressed request logs via websocket
+	s.tnet.SetHTTPRequestLogSender(func(data string) error {
+		return s.client.SendMessageNoLog("newt/request-log", map[string]interface{}{
+			"compressed": data,
+		})
+	})
+
 	// Create WireGuard device using the shared bind
 	s.device = device.NewDevice(s.tun, s.sharedBind, device.NewLogger(
 		device.LogLevelSilent, // Use silent logging by default - could be made configurable
@@ -955,7 +977,18 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 			if err != nil {
 				return fmt.Errorf("invalid CIDR %s: %v", sp, err)
 			}
-			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp, target.ResourceId)
+			s.tnet.AddProxySubnetRule(netstack2.SubnetRule{
+				SourcePrefix: sourcePrefix,
+				DestPrefix:   destPrefix,
+				RewriteTo:    target.RewriteTo,
+				PortRanges:   portRanges,
+				DisableIcmp:  target.DisableIcmp,
+				ResourceId:   target.ResourceId,
+				Protocol:     target.Protocol,
+				HTTPTargets:  target.HTTPTargets,
+				TLSCert:      target.TLSCert,
+				TLSKey:       target.TLSKey,
+			})
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}
 	}
@@ -1348,7 +1381,18 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 				logger.Info("Invalid CIDR %s: %v", sp, err)
 				continue
 			}
-			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp, target.ResourceId)
+			s.tnet.AddProxySubnetRule(netstack2.SubnetRule{
+				SourcePrefix: sourcePrefix,
+				DestPrefix:   destPrefix,
+				RewriteTo:    target.RewriteTo,
+				PortRanges:   portRanges,
+				DisableIcmp:  target.DisableIcmp,
+				ResourceId:   target.ResourceId,
+				Protocol:     target.Protocol,
+				HTTPTargets:  target.HTTPTargets,
+				TLSCert:      target.TLSCert,
+				TLSKey:       target.TLSKey,
+			})
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}
 	}
@@ -1466,7 +1510,18 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 				logger.Info("Invalid CIDR %s: %v", sp, err)
 				continue
 			}
-			s.tnet.AddProxySubnetRule(sourcePrefix, destPrefix, target.RewriteTo, portRanges, target.DisableIcmp, target.ResourceId)
+			s.tnet.AddProxySubnetRule(netstack2.SubnetRule{
+				SourcePrefix: sourcePrefix,
+				DestPrefix:   destPrefix,
+				RewriteTo:    target.RewriteTo,
+				PortRanges:   portRanges,
+				DisableIcmp:  target.DisableIcmp,
+				ResourceId:   target.ResourceId,
+				Protocol:     target.Protocol,
+				HTTPTargets:  target.HTTPTargets,
+				TLSCert:      target.TLSCert,
+				TLSKey:       target.TLSKey,
+			})
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}
 	}

@@ -6,7 +6,7 @@ VERSION ?= dev
 LDFLAGS = -X main.newtVersion=$(VERSION)
 
 local:
-	CGO_ENABLED=0 go build -o ./bin/newt
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o ./bin/newt
 
 docker-build:
 	docker build -t fosrl/newt:latest .
