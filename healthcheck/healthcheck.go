@@ -38,7 +38,6 @@ func (s Health) String() string {
 // Config holds the health check configuration for a target
 type Config struct {
 	ID                 int               `json:"id"`
-	HcID               int               `json:"hcId"` // the id of the health check table not the target
 	Enabled            bool              `json:"hcEnabled"`
 	Path               string            `json:"hcPath"`
 	Scheme             string            `json:"hcScheme"`
