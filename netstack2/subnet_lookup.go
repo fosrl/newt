@@ -44,24 +44,18 @@ func prefixEqual(a, b netip.Prefix) bool {
 	return a.Masked() == b.Masked()
 }
 
-// AddSubnet adds a subnet rule with source and destination prefixes and optional port restrictions
-// If portRanges is nil or empty, all ports are allowed for this subnet
-// rewriteTo can be either an IP/CIDR (e.g., "192.168.1.1/32") or a domain name (e.g., "example.com")
-func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool, resourceId int) {
+// AddSubnet adds a subnet rule to the lookup table.
+// If rule.PortRanges is nil or empty, all ports are allowed.
+// rule.RewriteTo can be either an IP/CIDR (e.g., "192.168.1.1/32") or a domain name (e.g., "example.com").
+// HTTP proxy behaviour is driven by rule.Protocol, rule.HTTPTargets, rule.TLSCert, and rule.TLSKey.
+func (sl *SubnetLookup) AddSubnet(rule SubnetRule) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
-	rule := &SubnetRule{
-		SourcePrefix: sourcePrefix,
-		DestPrefix:   destPrefix,
-		DisableIcmp:  disableIcmp,
-		RewriteTo:    rewriteTo,
-		PortRanges:   portRanges,
-		ResourceId:   resourceId,
-	}
+	rulePtr := &rule
 
 	// Canonicalize source prefix to handle host bits correctly
-	canonicalSourcePrefix := sourcePrefix.Masked()
+	canonicalSourcePrefix := rule.SourcePrefix.Masked()
 
 	// Get or create destination trie for this source prefix
 	destTriePtr, exists := sl.sourceTrie.Get(canonicalSourcePrefix)
@@ -76,12 +70,12 @@ func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, rewrite
 
 	// Canonicalize destination prefix to handle host bits correctly
 	// BART masks prefixes internally, so we need to match that behavior in our bookkeeping
-	canonicalDestPrefix := destPrefix.Masked()
+	canonicalDestPrefix := rule.DestPrefix.Masked()
 
 	// Add rule to destination trie
 	// Original behavior: overwrite if same (sourcePrefix, destPrefix) exists
 	// Store as single-element slice to match original overwrite behavior
-	destTriePtr.trie.Insert(canonicalDestPrefix, []*SubnetRule{rule})
+	destTriePtr.trie.Insert(canonicalDestPrefix, []*SubnetRule{rulePtr})
 
 	// Update destTriePtr.rules - remove old rule with same canonical prefix if exists, then add new one
 	// Use canonical comparison to handle cases like 10.0.0.5/24 vs 10.0.0.0/24
@@ -91,7 +85,7 @@ func (sl *SubnetLookup) AddSubnet(sourcePrefix, destPrefix netip.Prefix, rewrite
 			newRules = append(newRules, r)
 		}
 	}
-	newRules = append(newRules, rule)
+	newRules = append(newRules, rulePtr)
 	destTriePtr.rules = newRules
 }
 
