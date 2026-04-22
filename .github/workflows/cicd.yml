@@ -110,15 +110,6 @@ jobs:
             exit 1
           fi
 
-      - name: Update version in flake.nix
-        shell: bash
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          sed -i "s/version = \"[0-9]*\.[0-9]*\.[0-9]*\(-rc\.[0-9]*\)\?\"/version = \"$VERSION\"/" flake.nix
-          echo "Updated flake.nix version to $VERSION"
-
       - name: Create and push tag
         shell: bash
         env:
