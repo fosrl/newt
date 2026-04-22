@@ -707,6 +707,10 @@ func (c *Client) sendPing() {
 	}
 
 	c.writeMux.Lock()
+	if c.conn == nil {
+		c.writeMux.Unlock()
+		return
+	}
 	err := c.conn.WriteJSON(pingMsg)
 	if err == nil {
 		telemetry.IncWSMessage(c.metricsContext(), "out", "ping")
@@ -859,10 +863,12 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time) {
 func (c *Client) reconnect() {
 	c.setConnected(false)
 	telemetry.SetWSConnectionState(false)
+	c.writeMux.Lock()
 	if c.conn != nil {
 		c.conn.Close()
 		c.conn = nil
 	}
+	c.writeMux.Unlock()
 
 	// Only reconnect if we're not shutting down
 	select {
