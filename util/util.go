@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 
 	mathrand "math/rand/v2"
@@ -131,9 +132,9 @@ func ResolveDomain(domain string) (string, error) {
 	// For IPv6, the host from SplitHostPort will already have brackets stripped
 	// but if there was no port, we need to handle bracketed IPv6 addresses
 	cleanHost := strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
-	if ip := net.ParseIP(cleanHost); ip != nil {
+	if addr, err := netip.ParseAddr(cleanHost); err == nil {
 		// It's already an IP address, no need to resolve
-		ipAddr := ip.String()
+		ipAddr := addr.String()
 		if port != "" {
 			return net.JoinHostPort(ipAddr, port), nil
 		}
@@ -153,15 +154,19 @@ func ResolveDomain(domain string) (string, error) {
 	// Get the first IPv4 address if available
 	var ipAddr string
 	for _, ip := range ips {
-		if ipv4 := ip.To4(); ipv4 != nil {
-			ipAddr = ipv4.String()
+		if addr, ok := netip.AddrFromSlice(ip); ok && addr.Is4() {
+			ipAddr = addr.String()
 			break
 		}
 	}
 
 	// If no IPv4 found, use the first IP (might be IPv6)
 	if ipAddr == "" {
-		ipAddr = ips[0].String()
+		if addr, ok := netip.AddrFromSlice(ips[0]); ok {
+			ipAddr = addr.String()
+		} else {
+			ipAddr = ips[0].String()
+		}
 	}
 
 	// Add port back if it existed
@@ -216,11 +221,8 @@ func FindAvailableUDPPort(minPort, maxPort uint16) (uint16, error) {
 	// Try each port in the randomized order
 	for _, port := range portRange {
 		// Check if port is available
-		addr1 := &net.UDPAddr{
-			IP:   net.ParseIP("127.0.0.1"),
-			Port: int(port),
-		}
-		conn1, err1 := net.ListenUDP("udp", addr1)
+		addrPort := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port)
+		conn1, err1 := net.ListenUDP("udp", net.UDPAddrFromAddrPort(addrPort))
 		if err1 != nil {
 			continue // Port is in use or there was an error, try next port
 		}

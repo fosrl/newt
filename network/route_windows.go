@@ -17,28 +17,11 @@ func WindowsAddRoute(destination string, gateway string, interfaceName string) e
 		return nil
 	}
 
-	// Parse destination CIDR
-	_, ipNet, err := net.ParseCIDR(destination)
+	// Parse destination CIDR using netip
+	prefix, err := netip.ParsePrefix(destination)
 	if err != nil {
 		return fmt.Errorf("invalid destination address: %v", err)
 	}
-
-	// Convert to netip.Prefix
-	maskBits, _ := ipNet.Mask.Size()
-
-	// Ensure we convert to the correct IP version (IPv4 vs IPv6)
-	var addr netip.Addr
-	if ip4 := ipNet.IP.To4(); ip4 != nil {
-		// IPv4 address
-		addr, _ = netip.AddrFromSlice(ip4)
-	} else {
-		// IPv6 address
-		addr, _ = netip.AddrFromSlice(ipNet.IP)
-	}
-	if !addr.IsValid() {
-		return fmt.Errorf("failed to convert destination IP")
-	}
-	prefix := netip.PrefixFrom(addr, maskBits)
 
 	var luid winipcfg.LUID
 	var nextHop netip.Addr
@@ -57,24 +40,16 @@ func WindowsAddRoute(destination string, gateway string, interfaceName string) e
 	}
 
 	if gateway != "" {
-		// Route with specific gateway
-		gwIP := net.ParseIP(gateway)
-		if gwIP == nil {
+		// Route with specific gateway using netip
+		gwAddr, err := netip.ParseAddr(gateway)
+		if err != nil {
 			return fmt.Errorf("invalid gateway address: %s", gateway)
 		}
-		// Convert to correct IP version
-		if ip4 := gwIP.To4(); ip4 != nil {
-			nextHop, _ = netip.AddrFromSlice(ip4)
-		} else {
-			nextHop, _ = netip.AddrFromSlice(gwIP)
-		}
-		if !nextHop.IsValid() {
-			return fmt.Errorf("failed to convert gateway IP")
-		}
+		nextHop = gwAddr
 		logger.Info("Adding route to %s via gateway %s on interface %s", destination, gateway, interfaceName)
 	} else if interfaceName != "" {
 		// Route via interface only
-		if addr.Is4() {
+		if prefix.Addr().Is4() {
 			nextHop = netip.IPv4Unspecified()
 		} else {
 			nextHop = netip.IPv6Unspecified()
@@ -94,33 +69,16 @@ func WindowsAddRoute(destination string, gateway string, interfaceName string) e
 }
 
 func WindowsRemoveRoute(destination string) error {
-	// Parse destination CIDR
-	_, ipNet, err := net.ParseCIDR(destination)
+	// Parse destination CIDR using netip
+	prefix, err := netip.ParsePrefix(destination)
 	if err != nil {
 		return fmt.Errorf("invalid destination address: %v", err)
 	}
 
-	// Convert to netip.Prefix
-	maskBits, _ := ipNet.Mask.Size()
-
-	// Ensure we convert to the correct IP version (IPv4 vs IPv6)
-	var addr netip.Addr
-	if ip4 := ipNet.IP.To4(); ip4 != nil {
-		// IPv4 address
-		addr, _ = netip.AddrFromSlice(ip4)
-	} else {
-		// IPv6 address
-		addr, _ = netip.AddrFromSlice(ipNet.IP)
-	}
-	if !addr.IsValid() {
-		return fmt.Errorf("failed to convert destination IP")
-	}
-	prefix := netip.PrefixFrom(addr, maskBits)
-
 	// Get all routes and find the one to delete
 	// We need to get the LUID from the existing route
 	var family winipcfg.AddressFamily
-	if addr.Is4() {
+	if prefix.Addr().Is4() {
 		family = 2 // AF_INET
 	} else {
 		family = 23 // AF_INET6

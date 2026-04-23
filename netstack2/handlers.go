@@ -613,7 +613,12 @@ func (h *ICMPHandler) sendAndReceiveICMP(conn *icmp.PacketConn, actualDstIP stri
 	var writeErr error
 	if isUnprivileged {
 		// For unprivileged ICMP, use UDP-style addressing
-		udpAddr := &net.UDPAddr{IP: net.ParseIP(actualDstIP)}
+		dstAddr, err := netip.ParseAddr(actualDstIP)
+		if err != nil {
+			logger.Debug("ICMP Handler: Failed to parse destination %s: %v", actualDstIP, err)
+			return false
+		}
+		udpAddr := net.UDPAddrFromAddrPort(netip.AddrPortFrom(dstAddr, 0))
 		logger.Debug("ICMP Handler: Sending ping to %s (unprivileged)", udpAddr.String())
 		conn.SetDeadline(time.Now().Add(icmpTimeout))
 		_, writeErr = conn.WriteTo(msgBytes, udpAddr)

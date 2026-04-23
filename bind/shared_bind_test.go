@@ -15,7 +15,7 @@ import (
 // TestSharedBindCreation tests basic creation and initialization
 func TestSharedBindCreation(t *testing.T) {
 	// Create a UDP connection
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	udpConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create UDP connection: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestSharedBindCreation(t *testing.T) {
 
 // TestSharedBindReferenceCount tests reference counting
 func TestSharedBindReferenceCount(t *testing.T) {
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	udpConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create UDP connection: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestSharedBindReferenceCount(t *testing.T) {
 // TestSharedBindWriteToUDP tests the WriteToUDP functionality
 func TestSharedBindWriteToUDP(t *testing.T) {
 	// Create sender
-	senderConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	senderConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create sender UDP connection: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestSharedBindWriteToUDP(t *testing.T) {
 	defer senderBind.Close()
 
 	// Create receiver
-	receiverConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	receiverConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create receiver UDP connection: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestSharedBindWriteToUDP(t *testing.T) {
 // TestSharedBindConcurrentWrites tests thread-safety
 func TestSharedBindConcurrentWrites(t *testing.T) {
 	// Create sender
-	senderConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	senderConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create sender UDP connection: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestSharedBindConcurrentWrites(t *testing.T) {
 	defer senderBind.Close()
 
 	// Create receiver
-	receiverConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	receiverConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create receiver UDP connection: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestSharedBindConcurrentWrites(t *testing.T) {
 
 // TestSharedBindWireGuardInterface tests WireGuard Bind interface implementation
 func TestSharedBindWireGuardInterface(t *testing.T) {
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	udpConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create UDP connection: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestSharedBindWireGuardInterface(t *testing.T) {
 // TestSharedBindSend tests the Send method with WireGuard endpoints
 func TestSharedBindSend(t *testing.T) {
 	// Create sender
-	senderConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	senderConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create sender UDP connection: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestSharedBindSend(t *testing.T) {
 	defer senderBind.Close()
 
 	// Create receiver
-	receiverConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	receiverConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create receiver UDP connection: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestSharedBindSend(t *testing.T) {
 // TestSharedBindMultipleUsers simulates WireGuard and hole punch using the same bind
 func TestSharedBindMultipleUsers(t *testing.T) {
 	// Create shared bind
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	udpConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create UDP connection: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestSharedBindMultipleUsers(t *testing.T) {
 	sharedBind.AddRef()
 
 	// Create receiver
-	receiverConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	receiverConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create receiver UDP connection: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestEndpoint(t *testing.T) {
 
 // TestParseEndpoint tests the ParseEndpoint method
 func TestParseEndpoint(t *testing.T) {
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	udpConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create UDP connection: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestParseEndpoint(t *testing.T) {
 // TestNetstackRouting tests that packets from netstack endpoints are routed back through netstack
 func TestNetstackRouting(t *testing.T) {
 	// Create the SharedBind with a physical UDP socket
-	physicalConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	physicalConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create physical UDP connection: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestNetstackRouting(t *testing.T) {
 	defer sharedBind.Close()
 
 	// Create a mock "netstack" connection (just another UDP socket for testing)
-	netstackConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	netstackConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create netstack UDP connection: %v", err)
 	}
@@ -448,7 +448,7 @@ func TestNetstackRouting(t *testing.T) {
 	sharedBind.SetNetstackConn(netstackConn)
 
 	// Create a "client" that would receive packets
-	clientConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	clientConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create client UDP connection: %v", err)
 	}
@@ -494,7 +494,7 @@ func TestNetstackRouting(t *testing.T) {
 // TestSocketRouting tests that packets from socket endpoints are routed through socket
 func TestSocketRouting(t *testing.T) {
 	// Create the SharedBind with a physical UDP socket
-	physicalConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	physicalConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create physical UDP connection: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestSocketRouting(t *testing.T) {
 	defer sharedBind.Close()
 
 	// Create a mock "netstack" connection
-	netstackConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	netstackConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create netstack UDP connection: %v", err)
 	}
@@ -516,7 +516,7 @@ func TestSocketRouting(t *testing.T) {
 	sharedBind.SetNetstackConn(netstackConn)
 
 	// Create a "client" that would receive packets (this simulates a hole-punched client)
-	clientConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	clientConn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv4Unspecified(), 0)))
 	if err != nil {
 		t.Fatalf("Failed to create client UDP connection: %v", err)
 	}

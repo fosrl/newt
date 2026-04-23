@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -75,13 +76,11 @@ func (s *Server) Start() error {
 		return nil
 	}
 
-	//create the address to listen on
-	addr := net.JoinHostPort(s.serverAddr, fmt.Sprintf("%d", s.serverPort))
-
 	if s.useNetstack && s.tnet != nil {
 		// Use WireGuard netstack
 		tnet := s.tnet.(*netstack2.Net)
-		udpAddr := &net.UDPAddr{Port: int(s.serverPort)}
+		addrPort := netip.AddrPortFrom(netip.IPv4Unspecified(), s.serverPort)
+		udpAddr := net.UDPAddrFromAddrPort(addrPort)
 		netstackConn, err := tnet.ListenUDP(udpAddr)
 		if err != nil {
 			return err
@@ -89,11 +88,21 @@ func (s *Server) Start() error {
 		s.netstackConn = netstackConn
 		s.conn = netstackConn
 	} else {
-		// Use regular UDP socket
-		udpAddr, err := net.ResolveUDPAddr("udp", addr)
+		// Use regular UDP socket - parse address with netip, fallback to resolve for hostnames (match upstream)
+		serverAddr, err := netip.ParseAddr(s.serverAddr)
 		if err != nil {
-			return err
+			// Not a literal IP; try resolving as hostname (same as upstream ResolveUDPAddr)
+			addr, resolveErr := net.ResolveUDPAddr("udp", net.JoinHostPort(s.serverAddr, fmt.Sprintf("%d", s.serverPort)))
+			if resolveErr != nil {
+				serverAddr = netip.IPv4Unspecified()
+			} else if a, ok := netip.AddrFromSlice(addr.IP); ok && a.IsValid() {
+				serverAddr = a
+			} else {
+				serverAddr = netip.IPv4Unspecified()
+			}
 		}
+		addrPort := netip.AddrPortFrom(serverAddr, s.serverPort)
+		udpAddr := net.UDPAddrFromAddrPort(addrPort)
 
 		udpConn, err := net.ListenUDP("udp", udpAddr)
 		if err != nil {
