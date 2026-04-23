@@ -276,10 +276,10 @@ func (h *HTTPHandler) getProxy(target HTTPTarget) *httputil.ReverseProxy {
 		Scheme: scheme,
 		Host:   fmt.Sprintf("%s:%d", target.DestAddr, target.DestPort),
 	}
-	insecureTransport := (*http.Transport)(nil)
+	var transport http.RoundTripper = http.DefaultTransport
 	if target.Scheme == "https" {
 		// Allow self-signed certificates on downstream HTTPS targets.
-		insecureTransport = &http.Transport{
+		transport = &http.Transport{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true, //nolint:gosec // downstream self-signed certs are a supported configuration
 			},
@@ -296,7 +296,7 @@ func (h *HTTPHandler) getProxy(target HTTPTarget) *httputil.ReverseProxy {
 			// X-Forwarded-For entry, so the header is set exactly once.
 			pr.SetXForwarded()
 		},
-		Transport: insecureTransport,
+		Transport: transport,
 	}
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
