@@ -120,7 +120,7 @@ func configureDarwin(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
 	prefix, _ := ipNet.Mask.Size()
 	ipStr := fmt.Sprintf("%s/%d", ip.String(), prefix)
 
-	cmd := exec.Command("ifconfig", interfaceName, "inet", ipStr, ip.String(), "alias")
+	cmd := exec.Command("/sbin/ifconfig", interfaceName, "inet", ipStr, ip.String(), "alias")
 	logger.Info("Running command: %v", cmd)
 
 	out, err := cmd.CombinedOutput()
@@ -129,7 +129,7 @@ func configureDarwin(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
 	}
 
 	// Bring up the interface
-	cmd = exec.Command("ifconfig", interfaceName, "up")
+	cmd = exec.Command("/sbin/ifconfig", interfaceName, "up")
 	logger.Info("Running command: %v", cmd)
 
 	out, err = cmd.CombinedOutput()
