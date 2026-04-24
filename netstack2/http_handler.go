@@ -276,10 +276,10 @@ func (h *HTTPHandler) getProxy(target HTTPTarget) *httputil.ReverseProxy {
 		Scheme: scheme,
 		Host:   fmt.Sprintf("%s:%d", target.DestAddr, target.DestPort),
 	}
-	insecureTransport := (*http.Transport)(nil)
+	var transport http.RoundTripper = http.DefaultTransport
 	if target.Scheme == "https" {
 		// Allow self-signed certificates on downstream HTTPS targets.
-		insecureTransport = &http.Transport{
+		transport = &http.Transport{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true, //nolint:gosec // downstream self-signed certs are a supported configuration
 			},
@@ -296,7 +296,7 @@ func (h *HTTPHandler) getProxy(target HTTPTarget) *httputil.ReverseProxy {
 			// X-Forwarded-For entry, so the header is set exactly once.
 			pr.SetXForwarded()
 		},
-		Transport: insecureTransport,
+		Transport: transport,
 	}
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -333,6 +333,19 @@ func (h *HTTPHandler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if rule == nil || len(rule.HTTPTargets) == 0 {
 		logger.Error("HTTP handler: no downstream targets for request %s %s", r.Method, r.URL.RequestURI())
 		http.Error(w, "no targets configured", http.StatusBadGateway)
+		return
+	}
+
+	// If the rule is plain HTTP but has a TLS certificate configured, redirect
+	// the client to the HTTPS equivalent of the requested URL.
+	if rule.Protocol == "http" && rule.TLSCert != "" && rule.TLSKey != "" {
+		host := r.Host
+		if host == "" {
+			host = r.URL.Host
+		}
+		httpsURL := "https://" + host + r.RequestURI
+		logger.Info("HTTP handler: redirecting %s %s -> %s (TLS cert present)", r.Method, r.URL.RequestURI(), httpsURL)
+		http.Redirect(w, r, httpsURL, http.StatusMovedPermanently)
 		return
 	}
 
