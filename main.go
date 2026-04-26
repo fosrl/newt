@@ -1296,7 +1296,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 		// Define the sync data structure
 		type SyncData struct {
-			Targets            TargetsByType        `json:"targets"`
+			Targets            TargetsByType        `json:"proxyTargets"`
 			HealthCheckTargets []healthcheck.Config `json:"healthCheckTargets"`
 		}
 
@@ -1421,12 +1421,12 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		// 	}
 		// }
 
-		// // Sync health check targets
-		// if err := healthMonitor.SyncTargets(syncData.HealthCheckTargets); err != nil {
-		// 	logger.Error("Failed to sync health check targets: %v", err)
-		// } else {
-		// 	logger.Info("Successfully synced health check targets")
-		// }
+		// Sync health check targets
+		if err := healthMonitor.SyncTargets(syncData.HealthCheckTargets); err != nil {
+			logger.Error("Failed to sync health check targets: %v", err)
+		} else {
+			logger.Info("Successfully synced health check targets")
+		}
 
 		logger.Info("Sync complete")
 	})
