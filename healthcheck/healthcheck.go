@@ -250,7 +250,7 @@ func (m *Monitor) RemoveTarget(id int) error {
 
 	// Notify callback of status change
 	if m.callback != nil {
-		go m.callback(m.GetTargets())
+		go m.callback(m.getAllTargetsUnsafe())
 	}
 
 	logger.Info("Successfully removed target %d", id)
@@ -283,7 +283,7 @@ func (m *Monitor) RemoveTargets(ids []int) error {
 
 	// Notify callback of status change if any targets were removed
 	if len(notFound) != len(ids) && m.callback != nil {
-		go m.callback(m.GetTargets())
+		go m.callback(m.getAllTargetsUnsafe())
 	}
 
 	if len(notFound) > 0 {
@@ -583,7 +583,7 @@ func (m *Monitor) DisableTarget(id int) error {
 
 		// Notify callback of status change
 		if m.callback != nil {
-			go m.callback(m.GetTargets())
+			go m.callback(m.getAllTargetsUnsafe())
 		}
 	} else {
 		logger.Debug("Target %d is already disabled", id)
