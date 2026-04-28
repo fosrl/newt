@@ -152,20 +152,14 @@ func (h *TCPHandler) handleTCPConn(netstackConn *gonet.TCPConn, id stack.Transpo
 		srcAddr, _ := netip.ParseAddr(srcIP)
 		dstAddr, _ := netip.ParseAddr(dstIP)
 		rule := h.proxyHandler.subnetLookup.Match(srcAddr, dstAddr, dstPort, tcp.ProtocolNumber)
-		if rule != nil {
-			if rule.Protocol != "" {
-				logger.Info("TCP Forwarder: Routing %s:%d -> %s:%d to HTTP handler (%s)",
-					srcIP, srcPort, dstIP, dstPort, rule.Protocol)
-				h.proxyHandler.httpHandler.HandleConn(netstackConn, rule)
-			} else {
-				// A matching HTTP rule exists but has no protocol configured —
-				// do not fall through to the raw TCP handler; drop the connection.
-				logger.Info("TCP Forwarder: Dropping %s:%d -> %s:%d (HTTP rule matched but no protocol set)",
-					srcIP, srcPort, dstIP, dstPort)
-				netstackConn.Close()
-			}
+		if rule != nil && rule.Protocol != "" && len(rule.HTTPTargets) > 0 {
+			logger.Info("TCP Forwarder: Routing %s:%d -> %s:%d to HTTP handler (%s)",
+				srcIP, srcPort, dstIP, dstPort, rule.Protocol)
+			h.proxyHandler.httpHandler.HandleConn(netstackConn, rule)
 			return
 		}
+		// Otherwise fall through to raw TCP forwarding (e.g. CIDR resources
+		// that happen to use port 80/443 without HTTP configuration).
 	}
 
 	defer netstackConn.Close()
