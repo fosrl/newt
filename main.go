@@ -542,7 +542,7 @@ func runNewtMain(ctx context.Context) {
 	if telErr != nil {
 		logger.Warn("Telemetry init failed: %v", telErr)
 	}
-	if tel != nil {
+	if tel != nil && (metricsEnabled || pprofEnabled) {
 		// Admin HTTP server (exposes /metrics when Prometheus exporter is enabled)
 		logger.Debug("Starting metrics server on %s", tcfg.AdminAddr)
 		mux := http.NewServeMux()
