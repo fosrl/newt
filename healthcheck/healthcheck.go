@@ -47,7 +47,7 @@ type Config struct {
 	Interval           int               `json:"hcInterval"`          // in seconds
 	UnhealthyInterval  int               `json:"hcUnhealthyInterval"` // in seconds
 	Timeout            int               `json:"hcTimeout"`           // in seconds
-	FollowRedirects    bool              `json:"hcFollowRedirects"`
+	FollowRedirects    *bool             `json:"hcFollowRedirects"`
 	Headers            map[string]string `json:"hcHeaders"`
 	Method             string            `json:"hcMethod"`
 	Status             int               `json:"hcStatus"` // HTTP status code
@@ -202,7 +202,9 @@ func (m *Monitor) addTargetUnsafe(config Config) error {
 		cancel: cancel,
 		client: &http.Client{
 			CheckRedirect: func() func(*http.Request, []*http.Request) error {
-				if !config.FollowRedirects {
+				// Default to following redirects if not explicitly configured
+				followRedirects := config.FollowRedirects == nil || *config.FollowRedirects
+				if !followRedirects {
 					return func(req *http.Request, via []*http.Request) error {
 						return http.ErrUseLastResponse
 					}
