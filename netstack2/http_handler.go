@@ -185,7 +185,7 @@ func (h *HTTPHandler) Start() error {
 		}
 	}()
 
-	logger.Info("HTTP handler: ready — routing determined per SubnetRule on ports 80/443")
+	logger.Debug("HTTP handler: ready — routing determined per SubnetRule on ports 80/443")
 	return nil
 }
 
