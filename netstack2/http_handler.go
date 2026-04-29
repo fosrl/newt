@@ -6,8 +6,10 @@
 package netstack2
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -29,7 +31,7 @@ import (
 type HTTPTarget struct {
 	DestAddr string `json:"destAddr"` // IP address or hostname of the downstream service
 	DestPort uint16 `json:"destPort"` // TCP port of the downstream service
-	Scheme string   `json:"scheme"` // When true the outbound leg uses HTTPS
+	Scheme   string `json:"scheme"`   // When true the outbound leg uses HTTPS
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +322,24 @@ type statusCapture struct {
 func (sc *statusCapture) WriteHeader(code int) {
 	sc.status = code
 	sc.ResponseWriter.WriteHeader(code)
+}
+
+func (sc *statusCapture) Unwrap() http.ResponseWriter {
+	return sc.ResponseWriter
+}
+
+func (sc *statusCapture) Flush() {
+	if flusher, ok := sc.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (sc *statusCapture) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := sc.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("underlying response writer does not support hijacking")
+	}
+	return hijacker.Hijack()
 }
 
 // handleRequest is the http.Handler entry point. It retrieves the SubnetRule
