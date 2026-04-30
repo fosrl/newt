@@ -356,9 +356,9 @@ func (h *HTTPHandler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If the rule is plain HTTP but has a TLS certificate configured, redirect
-	// the client to the HTTPS equivalent of the requested URL.
-	if rule.Protocol == "http" && rule.TLSCert != "" && rule.TLSKey != "" {
+	// If the rule is HTTPS and a TLS certificate is configured, but the
+	// incoming request arrived over plain HTTP, redirect to HTTPS.
+	if rule.Protocol == "https" && rule.TLSCert != "" && rule.TLSKey != "" && r.TLS == nil {
 		host := r.Host
 		if host == "" {
 			host = r.URL.Host
