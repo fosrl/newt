@@ -365,7 +365,7 @@ func (h *HTTPHandler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		httpsURL := "https://" + host + r.RequestURI
 		logger.Info("HTTP handler: redirecting %s %s -> %s (TLS cert present)", r.Method, r.URL.RequestURI(), httpsURL)
-		http.Redirect(w, r, httpsURL, http.StatusMovedPermanently)
+		http.Redirect(w, r, httpsURL, http.StatusPermanentRedirect)
 		return
 	}
 
