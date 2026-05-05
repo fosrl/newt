@@ -279,7 +279,7 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 
 					// More lenient threshold for declaring connection lost under load
 					failureThreshold := 4
-					if consecutiveFailures >= failureThreshold && currentInterval < maxInterval {
+					if consecutiveFailures >= failureThreshold {
 						if !connectionLost {
 							connectionLost = true
 							logger.Warn("Connection to server lost after %d failures. Continuous reconnection attempts will be made.", consecutiveFailures)
@@ -309,12 +309,14 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 								}
 							}
 						}
-						currentInterval = time.Duration(float64(currentInterval) * 1.3) // Slower increase
-						if currentInterval > maxInterval {
-							currentInterval = maxInterval
+						if currentInterval < maxInterval {
+							currentInterval = time.Duration(float64(currentInterval) * 1.3) // Slower increase
+							if currentInterval > maxInterval {
+								currentInterval = maxInterval
+							}
+							ticker.Reset(currentInterval)
+							logger.Debug("Increased ping check interval to %v due to consecutive failures", currentInterval)
 						}
-						ticker.Reset(currentInterval)
-						logger.Debug("Increased ping check interval to %v due to consecutive failures", currentInterval)
 					}
 				} else {
 					// Track recent latencies
