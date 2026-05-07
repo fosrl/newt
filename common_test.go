@@ -210,3 +210,42 @@ func TestParseTargetStringNetDialCompatibility(t *testing.T) {
 		})
 	}
 }
+
+// TestShouldFireRecovery is the regression guard for the broken trigger gate
+// that prevented data-plane recovery from ever firing under default settings
+// (fosrl/newt#284, #310, pangolin#1004). The pre-fix condition was
+//
+//	consecutiveFailures >= failureThreshold && currentInterval < maxInterval
+//
+// which became permanently false once pingInterval's default was bumped from
+// 3s to 15s in commit 8161fa6 — currentInterval starts at pingInterval=15s,
+// maxInterval stayed at 6s, so 15<6 is false and the recovery branch never
+// executed.
+//
+// The fix is to drop currentInterval from the trigger condition entirely;
+// backoff is a separate concern computed in the caller. The cases below
+// exercise the documented contract.
+func TestShouldFireRecovery(t *testing.T) {
+	const threshold = 4
+	cases := []struct {
+		name           string
+		failures       int
+		connectionLost bool
+		want           bool
+	}{
+		{"below threshold, fresh", 3, false, false},
+		{"below threshold, already lost", 3, true, false},
+		{"at threshold, fresh — recovery must fire", threshold, false, true},
+		{"at threshold, already lost — gate prevents re-fire", threshold, true, false},
+		{"far above threshold, fresh", 100, false, true},
+		{"far above threshold, already lost", 100, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := shouldFireRecovery(c.failures, threshold, c.connectionLost); got != c.want {
+				t.Errorf("shouldFireRecovery(failures=%d, threshold=%d, lost=%v) = %v, want %v",
+					c.failures, threshold, c.connectionLost, got, c.want)
+			}
+		})
+	}
+}
