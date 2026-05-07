@@ -270,29 +270,25 @@ func (c *Client) SendMessageNoLog(messageType string, data interface{}) error {
 func (c *Client) SendMessageInterval(messageType string, data interface{}, interval time.Duration) (stop func()) {
 	stopChan := make(chan struct{})
 	go func() {
-		count := 0
-		maxAttempts := 10
-
-		err := c.SendMessage(messageType, data) // Send immediately
-		if err != nil {
+		// Send the first message immediately, then keep firing on the
+		// interval until the caller closes stopChan. Used by the
+		// data-plane recovery path (newt/ping/request) where giving up
+		// after a fixed number of attempts can leave the WireGuard
+		// tunnel permanently dead if the server's reply is delayed or
+		// lost. All call sites already wire up a stop function, so
+		// unbounded retries here are safe.
+		if err := c.SendMessage(messageType, data); err != nil {
 			logger.Error("Failed to send initial message: %v", err)
 		}
-		count++
 
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				if count >= maxAttempts {
-					logger.Info("SendMessageInterval timed out after %d attempts for message type: %s", maxAttempts, messageType)
-					return
-				}
-				err = c.SendMessage(messageType, data)
-				if err != nil {
+				if err := c.SendMessage(messageType, data); err != nil {
 					logger.Error("Failed to send message: %v", err)
 				}
-				count++
 			case <-stopChan:
 				return
 			}
