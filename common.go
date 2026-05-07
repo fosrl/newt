@@ -208,6 +208,7 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 							logger.Warn(msgHealthFileWriteFailed, err)
 						}
 					}
+					return
 				}
 			case <-pingStopChan:
 				// Stop the goroutine when signaled
