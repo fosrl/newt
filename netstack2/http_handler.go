@@ -131,32 +131,22 @@ func (l *chanListener) send(conn net.Conn) bool {
 // httpConnCtx – conn wrapper that carries a SubnetRule through the listener
 // ---------------------------------------------------------------------------
 
-// httpConnCtx wraps a net.Conn so the matching SubnetRule can be passed
-// through the chanListener into the http.Server's ConnContext callback,
-// making it available to request handlers via the request context.
+// httpConnCtx wraps a net.Conn so the matching SubnetRule and TLS state can
+// be passed through the chanListener into the http.Server's ConnContext
+// callback, making them available to request handlers via the request context.
 type httpConnCtx struct {
 	net.Conn
-	rule *SubnetRule
-}
-
-// ConnectionState allows net/http.Server to populate Request.TLS when the
-// underlying connection is TLS (e.g. *tls.Conn from tls.Server). Without this,
-// the connection is not *tls.Conn and does not expose ConnectionState through
-// the net.Conn interface field, so tlsState stays nil and the HTTPS redirect
-// in handleRequest runs on every request.
-func (c *httpConnCtx) ConnectionState() tls.ConnectionState {
-	type tlsConn interface {
-		ConnectionState() tls.ConnectionState
-	}
-	if tc, ok := c.Conn.(tlsConn); ok {
-		return tc.ConnectionState()
-	}
-	return tls.ConnectionState{}
+	rule  *SubnetRule
+	isTLS bool // true when the conn was wrapped with tls.Server
 }
 
 // connCtxKey is the unexported context key used to store a *SubnetRule on the
 // per-connection context created by http.Server.ConnContext.
 type connCtxKey struct{}
+
+// connTLSKey is the unexported context key used to store the isTLS flag on
+// the per-connection context created by http.Server.ConnContext.
+type connTLSKey struct{}
 
 // ---------------------------------------------------------------------------
 // Constructor and lifecycle
@@ -190,7 +180,8 @@ func (h *HTTPHandler) Start() error {
 		// that handleRequest can retrieve it without any global state.
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
 			if cc, ok := c.(*httpConnCtx); ok {
-				return context.WithValue(ctx, connCtxKey{}, cc.rule)
+				ctx = context.WithValue(ctx, connCtxKey{}, cc.rule)
+				ctx = context.WithValue(ctx, connTLSKey{}, cc.isTLS)
 			}
 			return ctx
 		},
@@ -218,19 +209,28 @@ func (h *HTTPHandler) HandleConn(conn net.Conn, rule *SubnetRule) {
 	var effectiveConn net.Conn = conn
 
 	if rule.Protocol == "https" {
-		tlsCfg, err := h.getTLSConfig(rule)
-		if err != nil {
-			logger.Error("HTTP handler: cannot build TLS config for connection from %s: %v",
-				conn.RemoteAddr(), err)
-			conn.Close()
-			return
+		// Only perform TLS termination for connections arriving on port 443.
+		// Connections on port 80 are passed through as plain HTTP so that
+		// handleRequest can issue the HTTP→HTTPS redirect.
+		doTLS := false
+		if tcpAddr, ok := conn.LocalAddr().(*net.TCPAddr); ok {
+			doTLS = tcpAddr.Port == 443
 		}
-		// tls.Server wraps the raw conn; the TLS handshake is deferred until
-		// the first Read, which the http.Server will trigger naturally.
-		effectiveConn = tls.Server(conn, tlsCfg)
+		if doTLS {
+			tlsCfg, err := h.getTLSConfig(rule)
+			if err != nil {
+				logger.Error("HTTP handler: cannot build TLS config for connection from %s: %v",
+					conn.RemoteAddr(), err)
+				conn.Close()
+				return
+			}
+			// tls.Server wraps the raw conn; the TLS handshake is deferred until
+			// the first Read, which the http.Server will trigger naturally.
+			effectiveConn = tls.Server(conn, tlsCfg)
+		}
 	}
 
-	wrapped := &httpConnCtx{Conn: effectiveConn, rule: rule}
+	wrapped := &httpConnCtx{Conn: effectiveConn, rule: rule, isTLS: effectiveConn != conn}
 	if !h.listener.send(wrapped) {
 		// Listener is already closed — clean up the orphaned connection.
 		effectiveConn.Close()
@@ -374,9 +374,13 @@ func (h *HTTPHandler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If the rule is HTTPS and a TLS certificate is configured, but the
-	// incoming request arrived over plain HTTP, redirect to HTTPS.
-	if rule.Protocol == "https" && rule.TLSCert != "" && rule.TLSKey != "" && r.TLS == nil {
+	// If the rule is HTTPS but the incoming request arrived over plain HTTP
+	// (port 80), redirect to HTTPS. We use the isTLS flag stored on the
+	// connection context rather than r.TLS, because Go's http.Server calls
+	// ConnectionState() before the TLS handshake completes, so r.TLS.Version
+	// is 0 even for genuine TLS connections at that point.
+	isTLS, _ := r.Context().Value(connTLSKey{}).(bool)
+	if rule.Protocol == "https" && !isTLS {
 		host := r.Host
 		if host == "" {
 			host = r.URL.Host
