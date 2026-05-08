@@ -572,6 +572,18 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 
 				// Store destination rewrite for handler lookups
 				p.destRewriteTable[dKey] = newDst
+
+				// Also store the resource ID under the rewritten destination key so that
+				// TCP/UDP handlers can find it after DNAT (they see the post-NAT dst IP).
+				if matchedRule.ResourceId != 0 {
+					rewrittenKey := destKey{
+						srcIP:   srcAddr.String(),
+						dstIP:   newDst.String(),
+						dstPort: dstPort,
+						proto:   uint8(protocol),
+					}
+					p.resourceTable[rewrittenKey] = matchedRule.ResourceId
+				}
 				p.natMu.Unlock()
 				logger.Debug("New NAT entry for connection: %s -> %s", dstAddr, newDst)
 			}
