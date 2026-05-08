@@ -291,6 +291,9 @@ func (h *HTTPHandler) getProxy(target HTTPTarget) *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(targetURL)
+			if host := pr.In.Host; host != "" {
+				pr.Out.Host = host
+			}
 			// SetXForwarded sets X-Forwarded-For from the inbound request's
 			// RemoteAddr (the WireGuard/netstack client address), along with
 			// X-Forwarded-Host and X-Forwarded-Proto. Using Rewrite instead of
