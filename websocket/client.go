@@ -48,7 +48,7 @@ type Client struct {
 	metricsCtx        context.Context
 	configNeedsSave   bool // Flag to track if config needs to be saved
 	serverVersion     string
-	configVersion     int64        // Latest config version received from server
+	configVersion     int64 // Latest config version received from server
 	configVersionMux  sync.RWMutex
 	processingMessage bool           // Flag to track if a message is currently being processed
 	processingMux     sync.RWMutex   // Protects processingMessage
@@ -271,7 +271,7 @@ func (c *Client) SendMessageInterval(messageType string, data interface{}, inter
 	stopChan := make(chan struct{})
 	go func() {
 		count := 0
-		maxAttempts := 10
+		maxAttempts := 16
 
 		err := c.SendMessage(messageType, data) // Send immediately
 		if err != nil {
@@ -836,7 +836,7 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time) {
 				logger.Error("WebSocket failed to parse message: %v", err)
 				continue
 			}
-			
+
 			c.setConfigVersion(msg.ConfigVersion)
 
 			c.handlersMux.RLock()
