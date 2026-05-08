@@ -273,11 +273,15 @@ func (c *Client) SendMessageInterval(messageType string, data interface{}, inter
 		count := 0
 		maxAttempts := 16
 
+		c.reconnectMux.RLock()
+		connected := c.isConnected
+		c.reconnectMux.RUnlock()
 		err := c.SendMessage(messageType, data) // Send immediately
 		if err != nil {
 			logger.Error("Failed to send initial message: %v", err)
+		} else if connected {
+			count++
 		}
-		count++
 
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -288,11 +292,15 @@ func (c *Client) SendMessageInterval(messageType string, data interface{}, inter
 					logger.Info("SendMessageInterval timed out after %d attempts for message type: %s", maxAttempts, messageType)
 					return
 				}
+				c.reconnectMux.RLock()
+				connected = c.isConnected
+				c.reconnectMux.RUnlock()
 				err = c.SendMessage(messageType, data)
 				if err != nil {
 					logger.Error("Failed to send message: %v", err)
+				} else if connected {
+					count++
 				}
-				count++
 			case <-stopChan:
 				return
 			}
