@@ -221,6 +221,25 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 	return stopChan, fmt.Errorf("initial ping attempts failed, continuing in background")
 }
 
+// shouldFireRecovery decides whether the data-plane recovery flow in
+// startPingCheck should run on this tick. Recovery fires once when the
+// consecutive-failure counter first crosses the threshold; the connectionLost
+// flag prevents re-firing until a successful ping resets the state.
+//
+// This condition was previously inlined into startPingCheck and AND-ed with
+// `currentInterval < maxInterval`, which silently broke recovery once
+// pingInterval's default was bumped to 15s while maxInterval stayed at 6s
+// (commit 8161fa6, March 2026): the gate became permanently false on default
+// settings, so the recovery code never executed and ping failures climbed
+// forever — the proximate cause of fosrl/newt#284, #310 and pangolin#1004.
+//
+// Recovery and backoff are independent concerns; the backoff ramp is now
+// computed separately in the caller. Do not re-introduce currentInterval
+// here.
+func shouldFireRecovery(consecutiveFailures, failureThreshold int, connectionLost bool) bool {
+	return consecutiveFailures >= failureThreshold && !connectionLost
+}
+
 func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Client, tunnelID string) chan struct{} {
 	maxInterval := 6 * time.Second
 	currentInterval := pingInterval
@@ -280,43 +299,43 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 
 					// More lenient threshold for declaring connection lost under load
 					failureThreshold := 4
-					if consecutiveFailures >= failureThreshold {
-						if !connectionLost {
-							connectionLost = true
-							logger.Warn("Connection to server lost after %d failures. Continuous reconnection attempts will be made.", consecutiveFailures)
-							if tunnelID != "" {
-								telemetry.IncReconnect(context.Background(), tunnelID, "client", telemetry.ReasonTimeout)
-							}
-							pingChainId := generateChainId()
-							pendingPingChainId = pingChainId
-							stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{
-								"chainId": pingChainId,
-							}, 3*time.Second)
-							// Send registration message to the server for backward compatibility
-							bcChainId := generateChainId()
-							pendingRegisterChainId = bcChainId
-							err := client.SendMessage("newt/wg/register", map[string]interface{}{
-								"publicKey":           publicKey.String(),
-								"backwardsCompatible": true,
-								"chainId":             bcChainId,
-							})
+					if shouldFireRecovery(consecutiveFailures, failureThreshold, connectionLost) {
+						connectionLost = true
+						logger.Warn("Connection to server lost after %d failures. Continuous reconnection attempts will be made.", consecutiveFailures)
+						if tunnelID != "" {
+							telemetry.IncReconnect(context.Background(), tunnelID, "client", telemetry.ReasonTimeout)
+						}
+						pingChainId := generateChainId()
+						pendingPingChainId = pingChainId
+						stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{
+							"chainId": pingChainId,
+						}, 3*time.Second)
+						// Send registration message to the server for backward compatibility
+						bcChainId := generateChainId()
+						pendingRegisterChainId = bcChainId
+						err := client.SendMessage("newt/wg/register", map[string]interface{}{
+							"publicKey":           publicKey.String(),
+							"backwardsCompatible": true,
+							"chainId":             bcChainId,
+						})
+						if err != nil {
+							logger.Error("Failed to send registration message: %v", err)
+						}
+						if healthFile != "" {
+							err = os.Remove(healthFile)
 							if err != nil {
-								logger.Error("Failed to send registration message: %v", err)
-							}
-							if healthFile != "" {
-								err = os.Remove(healthFile)
-								if err != nil {
-									logger.Error("Failed to remove health file: %v", err)
-								}
+								logger.Error("Failed to remove health file: %v", err)
 							}
 						}
-						if currentInterval < maxInterval {
-							currentInterval = time.Duration(float64(currentInterval) * 1.3) // Slower increase
-							if currentInterval > maxInterval {
-								currentInterval = maxInterval
-							}
-							ticker.Reset(currentInterval)
-							logger.Debug("Increased ping check interval to %v due to consecutive failures", currentInterval)
+					}
+					// Backoff: ramp the periodic-ping interval up while we are
+					// past the failure threshold, capped at maxInterval. Kept
+					// independent of the recovery trigger above so the trigger
+					// fires on every outage regardless of pingInterval.
+					if consecutiveFailures >= failureThreshold && currentInterval < maxInterval {
+						currentInterval = time.Duration(float64(currentInterval) * 1.3)
+						if currentInterval > maxInterval {
+							currentInterval = maxInterval
 						}
 					}
 				} else {
