@@ -139,6 +139,21 @@ type httpConnCtx struct {
 	rule *SubnetRule
 }
 
+// ConnectionState allows net/http.Server to populate Request.TLS when the
+// underlying connection is TLS (e.g. *tls.Conn from tls.Server). Without this,
+// the connection is not *tls.Conn and does not expose ConnectionState through
+// the net.Conn interface field, so tlsState stays nil and the HTTPS redirect
+// in handleRequest runs on every request.
+func (c *httpConnCtx) ConnectionState() tls.ConnectionState {
+	type tlsConn interface {
+		ConnectionState() tls.ConnectionState
+	}
+	if tc, ok := c.Conn.(tlsConn); ok {
+		return tc.ConnectionState()
+	}
+	return tls.ConnectionState{}
+}
+
 // connCtxKey is the unexported context key used to store a *SubnetRule on the
 // per-connection context created by http.Server.ConnContext.
 type connCtxKey struct{}
