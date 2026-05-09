@@ -269,7 +269,7 @@ jobs:
       # Build ONLY amd64 and push arch-specific tag suffixes used later for manifest creation.
       - name: Build and push (amd64 -> *:amd64-TAG)
         id: build_amd
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
           push: true
@@ -394,7 +394,7 @@ jobs:
       # Build ONLY arm64 and push arch-specific tag suffixes used later for manifest creation.
       - name: Build and push (arm64 -> *:arm64-TAG)
         id: build_arm
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
           push: true
@@ -511,7 +511,7 @@ jobs:
 
       - name: Build and push (arm/v7 -> *:armv7-TAG)
         id: build_armv7
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
           push: true
