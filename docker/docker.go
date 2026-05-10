@@ -9,10 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/events"
+	"github.com/moby/moby/client"
 	"github.com/fosrl/newt/logger"
 )
 
@@ -170,7 +169,7 @@ func ListContainers(socketPath string, enforceNetworkValidation bool) ([]Contain
 	}
 
 	// Used to filter down containers returned to Pangolin
-	containerFilters := filters.NewArgs()
+	containerFilters := make(client.Filters)
 
 	// Used to determine if we will send IP addresses or hostnames to Pangolin
 	useContainerIpAddresses := true
@@ -215,21 +214,28 @@ func ListContainers(socketPath string, enforceNetworkValidation bool) ([]Contain
 	}
 
 	// List containers
-	containers, err := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: containerFilters})
+	containerListResult, err := cli.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: containerFilters})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list containers: %v", err)
 	}
 
+	addrToString := func(addr interface{ IsValid() bool; String() string }) string {
+		if addr.IsValid() {
+			return addr.String()
+		}
+		return ""
+	}
+
 	var dockerContainers []Container
-	for _, c := range containers {
+	for _, c := range containerListResult.Items {
 		// Short ID like docker ps
 		shortId := c.ID[:12]
 
 		// Inspect container to get hostname
 		hostname := ""
-		containerInfo, err := cli.ContainerInspect(ctx, c.ID)
-		if err == nil && containerInfo.Config != nil {
-			hostname = containerInfo.Config.Hostname
+		containerInfo, err := cli.ContainerInspect(ctx, c.ID, client.ContainerInspectOptions{})
+		if err == nil && containerInfo.Container.Config != nil {
+			hostname = containerInfo.Container.Config.Hostname
 		}
 
 		// Skip host container if set
@@ -253,8 +259,8 @@ func ListContainers(socketPath string, enforceNetworkValidation bool) ([]Contain
 			if port.PublicPort != 0 {
 				dockerPort.PublicPort = int(port.PublicPort)
 			}
-			if port.IP != "" {
-				dockerPort.IP = port.IP
+			if port.IP.IsValid() {
+				dockerPort.IP = port.IP.String()
 			}
 			ports = append(ports, dockerPort)
 		}
@@ -268,19 +274,19 @@ func ListContainers(socketPath string, enforceNetworkValidation bool) ([]Contain
 				dockerNetwork := Network{
 					NetworkID:           endpoint.NetworkID,
 					EndpointID:          endpoint.EndpointID,
-					Gateway:             endpoint.Gateway,
+					Gateway:             addrToString(endpoint.Gateway),
 					IPPrefixLen:         endpoint.IPPrefixLen,
-					IPv6Gateway:         endpoint.IPv6Gateway,
-					GlobalIPv6Address:   endpoint.GlobalIPv6Address,
+					IPv6Gateway:         addrToString(endpoint.IPv6Gateway),
+					GlobalIPv6Address:   addrToString(endpoint.GlobalIPv6Address),
 					GlobalIPv6PrefixLen: endpoint.GlobalIPv6PrefixLen,
-					MacAddress:          endpoint.MacAddress,
+					MacAddress:          endpoint.MacAddress.String(),
 					Aliases:             endpoint.Aliases,
 					DNSNames:            endpoint.DNSNames,
 				}
 
 				// Use IPs over hostnames/containers as we're on the bridge network
 				if useContainerIpAddresses {
-					dockerNetwork.IPAddress = endpoint.IPAddress
+					dockerNetwork.IPAddress = addrToString(endpoint.IPAddress)
 				}
 
 				networks[networkName] = dockerNetwork
@@ -291,7 +297,7 @@ func ListContainers(socketPath string, enforceNetworkValidation bool) ([]Contain
 			ID:       shortId,
 			Name:     name,
 			Image:    c.Image,
-			State:    c.State,
+			State:    string(c.State),
 			Status:   c.Status,
 			Ports:    ports,
 			Labels:   c.Labels,
@@ -315,12 +321,12 @@ func getHostContainer(dockerContext context.Context, dockerClient *client.Client
 	}
 
 	// Get host container from the docker socket
-	hostContainer, err := dockerClient.ContainerInspect(dockerContext, hostContainerName)
+	hostContainer, err := dockerClient.ContainerInspect(dockerContext, hostContainerName, client.ContainerInspectOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to find host container")
 	}
 
-	return &hostContainer, nil
+	return &hostContainer.Container, nil
 }
 
 // EventCallback defines the function signature for handling Docker events
@@ -371,7 +377,7 @@ func (em *EventMonitor) Start() error {
 	logger.Debug("Starting Docker event monitoring")
 
 	// Filter for container events we care about
-	eventFilters := filters.NewArgs()
+	eventFilters := make(client.Filters)
 	eventFilters.Add("type", "container")
 	// eventFilters.Add("event", "create")
 	eventFilters.Add("event", "start")
@@ -382,9 +388,10 @@ func (em *EventMonitor) Start() error {
 	// eventFilters.Add("event", "unpause")
 
 	// Start listening for events
-	eventCh, errCh := em.client.Events(em.ctx, events.ListOptions{
+	eventsResult := em.client.Events(em.ctx, client.EventsListOptions{
 		Filters: eventFilters,
 	})
+	eventCh, errCh := eventsResult.Messages, eventsResult.Err
 
 	go func() {
 		defer func() {
@@ -408,9 +415,10 @@ func (em *EventMonitor) Start() error {
 					time.Sleep(5 * time.Second)
 					if em.ctx.Err() == nil {
 						logger.Info("Attempting to reconnect to Docker event stream")
-						eventCh, errCh = em.client.Events(em.ctx, events.ListOptions{
+						eventsResult = em.client.Events(em.ctx, client.EventsListOptions{
 							Filters: eventFilters,
 						})
+						eventCh, errCh = eventsResult.Messages, eventsResult.Err
 					}
 				}
 				return
