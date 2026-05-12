@@ -51,6 +51,7 @@ func New(cfg Config) *Gateway {
 func (g *Gateway) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/rdp", g.HandleRDP)
 	mux.HandleFunc("/ssh", g.HandleSSH)
+	mux.HandleFunc("/vnc", g.handleVNC)
 }
 
 // HandleRDP is an http.HandlerFunc for RDP-over-WebSocket connections.
