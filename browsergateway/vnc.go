@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/coder/websocket"
@@ -39,6 +40,11 @@ func (g *Gateway) handleVNC(w http.ResponseWriter, r *http.Request) {
 	}
 	if port == "" {
 		port = "5900"
+	}
+	vncPort, _ := strconv.Atoi(port)
+	if !g.isAllowed("vnc", host, vncPort) {
+		http.Error(w, "destination not allowed", http.StatusForbidden)
+		return
 	}
 	target := net.JoinHostPort(host, port)
 
