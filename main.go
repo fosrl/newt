@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/fosrl/newt/authdaemon"
+	"github.com/fosrl/newt/browsergateway"
 	"github.com/fosrl/newt/docker"
 	"github.com/fosrl/newt/healthcheck"
 	"github.com/fosrl/newt/logger"
@@ -40,15 +41,23 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
+type BrowserGatewayTarget struct {
+	ID              int    `json:"id"`
+	Type            string `json:"type"`
+	Destination     string `json:"destination"`
+	DestinationPort int    `json:"destinationPort"`
+}
+
 type WgData struct {
-	Endpoint           string               `json:"endpoint"`
-	RelayPort          uint16               `json:"relayPort"`
-	PublicKey          string               `json:"publicKey"`
-	ServerIP           string               `json:"serverIP"`
-	TunnelIP           string               `json:"tunnelIP"`
-	Targets            TargetsByType        `json:"targets"`
-	HealthCheckTargets []healthcheck.Config `json:"healthCheckTargets"`
-	ChainId            string               `json:"chainId"`
+	Endpoint              string                 `json:"endpoint"`
+	RelayPort             uint16                 `json:"relayPort"`
+	PublicKey             string                 `json:"publicKey"`
+	ServerIP              string                 `json:"serverIP"`
+	TunnelIP              string                 `json:"tunnelIP"`
+	Targets               TargetsByType          `json:"targets"`
+	HealthCheckTargets    []healthcheck.Config   `json:"healthCheckTargets"`
+	BrowserGatewayTargets []BrowserGatewayTarget `json:"browserGatewayTargets"`
+	ChainId               string                 `json:"chainId"`
 }
 
 type TargetsByType struct {
@@ -134,6 +143,8 @@ var (
 	pingStopChan                       chan struct{}
 	stopFunc                           func()
 	pendingRegisterChainId             string
+	browserGateway                     *browsergateway.Gateway
+	browserGatewayStop                 func()
 	pendingPingChainId                 string
 	healthFile                         string
 	useNativeInterface                 bool
@@ -150,15 +161,15 @@ var (
 	newtVersion = "version_replaceme"
 
 	// Observability/metrics flags
-	metricsEnabled    bool
-	otlpEnabled       bool
-	adminAddr         string
-	region            string
-	metricsAsyncBytes bool
-	pprofEnabled      bool
-	blueprintFile              string
-	provisioningBlueprintFile  string
-	noCloud                    bool
+	metricsEnabled            bool
+	otlpEnabled               bool
+	adminAddr                 string
+	region                    string
+	metricsAsyncBytes         bool
+	pprofEnabled              bool
+	blueprintFile             string
+	provisioningBlueprintFile string
+	noCloud                   bool
 
 	// New mTLS configuration variables
 	tlsClientCert string
@@ -741,6 +752,13 @@ func runNewtMain(ctx context.Context) {
 			pingStopChan = nil
 		}
 
+		// Shutdown browser gateway if running
+		if browserGatewayStop != nil {
+			browserGatewayStop()
+			browserGatewayStop = nil
+			browserGateway = nil
+		}
+
 		// Stop proxy manager if running
 		if pm != nil {
 			pm.Stop()
@@ -946,6 +964,43 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		err = pm.Start()
 		if err != nil {
 			logger.Error("Failed to start proxy manager: %v", err)
+		}
+
+		// Start browser gateway if targets are present
+		if len(wgData.BrowserGatewayTargets) > 0 {
+			// Shutdown any existing gateway first
+			if browserGatewayStop != nil {
+				browserGatewayStop()
+				browserGatewayStop = nil
+			}
+
+			bgTargets := make([]browsergateway.Target, 0, len(wgData.BrowserGatewayTargets))
+			for _, t := range wgData.BrowserGatewayTargets {
+				bgTargets = append(bgTargets, browsergateway.Target{
+					ID:              t.ID,
+					Type:            t.Type,
+					Destination:     t.Destination,
+					DestinationPort: t.DestinationPort,
+				})
+			}
+
+			browserGateway = browsergateway.New(browsergateway.Config{
+				AuthToken: browsergateway.HardcodedAuthToken,
+			})
+			browserGateway.SetTargets(bgTargets)
+
+			ln, bgErr := tnet.ListenTCP(&net.TCPAddr{Port: browsergateway.ListenPort})
+			if bgErr != nil {
+				logger.Error("Failed to start browser gateway listener: %v", bgErr)
+			} else {
+				browserGatewayStop = func() { _ = ln.Close() }
+				go func() {
+					logger.Info("Browser gateway started on port %d", browsergateway.ListenPort)
+					if startErr := browserGateway.Start(ln); startErr != nil {
+						logger.Error("Browser gateway stopped with error: %v", startErr)
+					}
+				}()
+			}
 		}
 	})
 
@@ -1841,7 +1896,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			} else {
 				logger.Warn("CLIENTS WILL NOT WORK ON THIS VERSION OF NEWT WITH THIS VERSION OF PANGOLIN, PLEASE UPDATE THE SERVER TO 1.13 OR HIGHER OR DOWNGRADE NEWT")
 			}
-			
+
 			sendBlueprint(client, blueprintFile)
 			if client.WasJustProvisioned() {
 				logger.Info("Provisioning detected – sending provisioning blueprint")

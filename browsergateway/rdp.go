@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/coder/websocket"
@@ -66,6 +67,13 @@ func (g *Gateway) serveSession(ctx context.Context, ws *websocket.Conn) error {
 	// Default port for RDP if not specified.
 	if _, _, splitErr := net.SplitHostPort(target); splitErr != nil {
 		target = net.JoinHostPort(target, "3389")
+	}
+
+	// Validate destination against the registered target allowlist.
+	rdpHost, rdpPortStr, _ := net.SplitHostPort(target)
+	rdpPort, _ := strconv.Atoi(rdpPortStr)
+	if !g.isAllowed("rdp", rdpHost, rdpPort) {
+		return fmt.Errorf("RDP destination %s is not in the allowed target list", target)
 	}
 
 	log.Printf("Connecting to RDP server %s", target)
