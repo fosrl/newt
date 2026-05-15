@@ -37,12 +37,7 @@ type sshServerMsg struct {
 func (g *Gateway) HandleSSH(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// -- Validate auth token from query parameter before upgrading --
 	token := r.URL.Query().Get("authToken")
-	if subtle.ConstantTimeCompare([]byte(token), []byte(g.authToken)) != 1 {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
 
 	// In proxy mode we also need host + username from query params.
 	var target, username string
@@ -58,11 +53,17 @@ func (g *Gateway) HandleSSH(w http.ResponseWriter, r *http.Request) {
 			port = "22"
 		}
 		sshPort, _ := strconv.Atoi(port)
-		if !g.isAllowed("ssh", host, sshPort) {
-			http.Error(w, "destination not allowed", http.StatusForbidden)
+		if !g.isAllowed("ssh", host, sshPort, token) {
+			http.Error(w, "destination not allowed or auth token mismatch", http.StatusForbidden)
 			return
 		}
 		target = net.JoinHostPort(host, port)
+	} else {
+		// Native SSH mode: validate against the global gateway token.
+		if subtle.ConstantTimeCompare([]byte(token), []byte(g.authToken)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{

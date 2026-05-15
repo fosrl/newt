@@ -46,6 +46,7 @@ type BrowserGatewayTarget struct {
 	Type            string `json:"type"`
 	Destination     string `json:"destination"`
 	DestinationPort int    `json:"destinationPort"`
+	AuthToken       string `json:"authToken"`
 }
 
 type WgData struct {
@@ -981,12 +982,11 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 					Type:            t.Type,
 					Destination:     t.Destination,
 					DestinationPort: t.DestinationPort,
+					AuthToken:       t.AuthToken,
 				})
 			}
 
-			browserGateway = browsergateway.New(browsergateway.Config{
-				AuthToken: browsergateway.HardcodedAuthToken,
-			})
+			browserGateway = browsergateway.New(browsergateway.Config{})
 			browserGateway.SetTargets(bgTargets)
 
 			ln, bgErr := tnet.ListenTCP(&net.TCPAddr{Port: browsergateway.ListenPort})

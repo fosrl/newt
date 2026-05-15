@@ -2,7 +2,6 @@ package browsergateway
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
@@ -58,22 +57,18 @@ func (g *Gateway) serveSession(ctx context.Context, ws *websocket.Conn) error {
 		return errors.New("RDCleanPath missing X224 connection PDU")
 	}
 
-	// Constant-time comparison to avoid leaking the expected token via timing.
-	if subtle.ConstantTimeCompare([]byte(pdu.ProxyAuth), []byte(g.authToken)) != 1 {
-		return errors.New("RDCleanPath ProxyAuth token mismatch")
-	}
-
 	target := pdu.Destination
 	// Default port for RDP if not specified.
 	if _, _, splitErr := net.SplitHostPort(target); splitErr != nil {
 		target = net.JoinHostPort(target, "3389")
 	}
 
-	// Validate destination against the registered target allowlist.
+	// Validate destination against the registered target allowlist,
+	// including per-target auth token.
 	rdpHost, rdpPortStr, _ := net.SplitHostPort(target)
 	rdpPort, _ := strconv.Atoi(rdpPortStr)
-	if !g.isAllowed("rdp", rdpHost, rdpPort) {
-		return fmt.Errorf("RDP destination %s is not in the allowed target list", target)
+	if !g.isAllowed("rdp", rdpHost, rdpPort, pdu.ProxyAuth) {
+		return fmt.Errorf("RDP destination %s is not in the allowed target list or auth token mismatch", target)
 	}
 
 	log.Printf("Connecting to RDP server %s", target)
