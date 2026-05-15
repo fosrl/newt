@@ -1872,6 +1872,94 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
 	})
 
+	// Register handler for adding browser gateway targets dynamically
+	client.RegisterHandler("newt/browsergateway/add", func(msg websocket.WSMessage) {
+		logger.Debug("Received browser gateway add message")
+
+		type BrowserGatewayAddData struct {
+			Targets []BrowserGatewayTarget `json:"targets"`
+		}
+
+		var addData BrowserGatewayAddData
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling browser gateway add data: %v", err)
+			return
+		}
+		if err := json.Unmarshal(jsonData, &addData); err != nil {
+			logger.Error("Error unmarshaling browser gateway add data: %v", err)
+			return
+		}
+
+		if len(addData.Targets) == 0 {
+			return
+		}
+
+		// If the gateway doesn't exist yet but we have a tunnel, start it
+		if browserGateway == nil && tnet != nil {
+			browserGateway = browsergateway.New(browsergateway.Config{})
+			ln, bgErr := tnet.ListenTCP(&net.TCPAddr{Port: browsergateway.ListenPort})
+			if bgErr != nil {
+				logger.Error("Failed to start browser gateway listener: %v", bgErr)
+				browserGateway = nil
+			} else {
+				browserGatewayStop = func() { _ = ln.Close() }
+				go func() {
+					logger.Info("Browser gateway started on port %d", browsergateway.ListenPort)
+					if startErr := browserGateway.Start(ln); startErr != nil {
+						logger.Error("Browser gateway stopped with error: %v", startErr)
+					}
+				}()
+			}
+		}
+
+		if browserGateway == nil {
+			logger.Warn("Browser gateway not available, cannot add targets")
+			return
+		}
+
+		for _, t := range addData.Targets {
+			browserGateway.AddTarget(browsergateway.Target{
+				ID:              t.ID,
+				Type:            t.Type,
+				Destination:     t.Destination,
+				DestinationPort: t.DestinationPort,
+				AuthToken:       t.AuthToken,
+			})
+			logger.Debug("Added browser gateway target %d", t.ID)
+		}
+	})
+
+	// Register handler for removing browser gateway targets dynamically
+	client.RegisterHandler("newt/browsergateway/remove", func(msg websocket.WSMessage) {
+		logger.Debug("Received browser gateway remove message")
+
+		type BrowserGatewayRemoveData struct {
+			IDs []int `json:"ids"`
+		}
+
+		var removeData BrowserGatewayRemoveData
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling browser gateway remove data: %v", err)
+			return
+		}
+		if err := json.Unmarshal(jsonData, &removeData); err != nil {
+			logger.Error("Error unmarshaling browser gateway remove data: %v", err)
+			return
+		}
+
+		if browserGateway == nil {
+			logger.Warn("Browser gateway not available, cannot remove targets")
+			return
+		}
+
+		for _, id := range removeData.IDs {
+			browserGateway.RemoveTarget(id)
+			logger.Debug("Removed browser gateway target %d", id)
+		}
+	})
+
 	client.OnConnect(func() error {
 		publicKey = privateKey.PublicKey()
 		logger.Debug("Public key: %s", publicKey)
