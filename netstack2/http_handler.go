@@ -140,6 +140,17 @@ type httpConnCtx struct {
 	isTLS bool // true when the conn was wrapped with tls.Server
 }
 
+// ConnectionState forwards TLS connection state when the wrapped connection
+// exposes it; plain TCP connections return the zero value.
+func (c *httpConnCtx) ConnectionState() tls.ConnectionState {
+	if cs, ok := c.Conn.(interface {
+		ConnectionState() tls.ConnectionState
+	}); ok {
+		return cs.ConnectionState()
+	}
+	return tls.ConnectionState{}
+}
+
 // connCtxKey is the unexported context key used to store a *SubnetRule on the
 // per-connection context created by http.Server.ConnContext.
 type connCtxKey struct{}
