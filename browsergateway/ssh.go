@@ -18,11 +18,12 @@ import (
 // sshClientMsg is a JSON message sent from the browser to the proxy.
 type sshClientMsg struct {
 	// type: "auth" | "data" | "resize"
-	Type     string `json:"type"`
-	Password string `json:"password,omitempty"` // used when type="auth"
-	Data     string `json:"data,omitempty"`     // used when type="data"
-	Cols     uint32 `json:"cols,omitempty"`     // used when type="resize"
-	Rows     uint32 `json:"rows,omitempty"`     // used when type="resize"
+	Type       string `json:"type"`
+	Password   string `json:"password,omitempty"`   // used when type="auth"
+	PrivateKey string `json:"privateKey,omitempty"` // used when type="auth"
+	Data       string `json:"data,omitempty"`       // used when type="data"
+	Cols       uint32 `json:"cols,omitempty"`       // used when type="resize"
+	Rows       uint32 `json:"rows,omitempty"`       // used when type="resize"
 }
 
 // sshServerMsg is a JSON message sent from the proxy back to the browser.
@@ -99,14 +100,29 @@ func serveSSHSession(ctx context.Context, ws *websocket.Conn, target, username, 
 		return fmt.Errorf("expected auth message, got: %s", authBytes)
 	}
 	password := authMsg.Password
+	privateKey := authMsg.PrivateKey
 
-	// -- Dial the SSH server --
+	// Build the list of auth methods. Private key takes priority when provided.
+	var authMethods []ssh.AuthMethod
+	if privateKey != "" {
+		signer, err := ssh.ParsePrivateKey([]byte(privateKey))
+		if err != nil {
+			sendSSHError(ctx, ws, fmt.Sprintf("Failed to parse private key: %v", err))
+			return fmt.Errorf("parse private key: %w", err)
+		}
+		authMethods = append(authMethods, ssh.PublicKeys(signer))
+	}
+	if password != "" {
+		authMethods = append(authMethods, ssh.Password(password))
+	}
+	if len(authMethods) == 0 {
+		sendSSHError(ctx, ws, "No authentication credentials provided")
+		return fmt.Errorf("no auth credentials")
+	}
 	log.Printf("SSH: connecting to %s as %s", target, username)
 	sshCfg := &ssh.ClientConfig{
 		User: username,
-		Auth: []ssh.AuthMethod{
-			ssh.Password(password),
-		},
+		Auth: authMethods,
 		// HostKeyCallback is intentionally InsecureIgnoreHostKey for this dev
 		// proxy. In production, verify against a known-hosts store.
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec
