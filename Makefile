@@ -1,4 +1,4 @@
-.PHONY: all local docker-build docker-build-release
+.PHONY: all local test docker-build docker-build-release
 
 all: local
 
@@ -7,6 +7,9 @@ LDFLAGS = -X main.newtVersion=$(VERSION)
 
 local:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o ./bin/newt
+
+test:
+	go test ./...
 
 docker-build:
 	docker build -t fosrl/newt:latest .
