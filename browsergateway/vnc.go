@@ -2,7 +2,6 @@ package browsergateway
 
 import (
 	"context"
-	"crypto/subtle"
 	"io"
 	"log"
 	"net"
@@ -28,10 +27,6 @@ const (
 //	host      – VNC backend hostname or IP
 //	port      – VNC backend port (default: 5900)
 func (g *Gateway) handleVNC(w http.ResponseWriter, r *http.Request) {
-	if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("authToken")), []byte(g.authToken)) != 1 {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
 	host := r.URL.Query().Get("host")
 	port := r.URL.Query().Get("port")
 	if host == "" {
@@ -42,8 +37,9 @@ func (g *Gateway) handleVNC(w http.ResponseWriter, r *http.Request) {
 		port = "5900"
 	}
 	vncPort, _ := strconv.Atoi(port)
-	if !g.isAllowed("vnc", host, vncPort) {
-		http.Error(w, "destination not allowed", http.StatusForbidden)
+	authToken := r.URL.Query().Get("authToken")
+	if !g.isAllowed("vnc", host, vncPort, authToken) {
+		http.Error(w, "destination not allowed or auth token mismatch", http.StatusForbidden)
 		return
 	}
 	target := net.JoinHostPort(host, port)
