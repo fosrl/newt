@@ -931,3 +931,19 @@ func loadClientCertificate(p12Path string) (*tls.Config, error) {
 		RootCAs:      rootCAs,
 	}, nil
 }
+
+// BuildTLSConfig creates a *tls.Config from the provided certificate files.
+// Pass empty strings / nil slice for fields that are not used.
+// Returns nil, nil when no TLS credentials are provided.
+func BuildTLSConfig(certFile, keyFile string, caFiles []string, pkcs12File string) (*tls.Config, error) {
+	c := &Client{
+		tlsConfig: TLSConfig{
+			ClientCertFile: certFile,
+			ClientKeyFile:  keyFile,
+			CAFiles:        caFiles,
+			PKCS12File:     pkcs12File,
+		},
+		config: &Config{},
+	}
+	return c.setupTLS()
+}

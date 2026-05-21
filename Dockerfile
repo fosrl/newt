@@ -27,6 +27,10 @@ RUN apk --no-cache add ca-certificates tzdata iputils
 COPY --from=builder /newt /usr/local/bin/
 COPY entrypoint.sh /
 
+# Marks this as an official Fossorial container image.
+# Auto-update is disabled in official images — update by pulling a new image tag.
+ENV NEWT_OFFICIAL_CONTAINER=true
+
 # Admin/metrics endpoint (Prometheus scrape)
 EXPOSE 2112
 
