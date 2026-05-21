@@ -176,6 +176,9 @@ var (
 
 	// Path to config file (overrides CONFIG_FILE env var and default location)
 	configFile string
+
+	// Auto-update flag
+	autoUpdate bool
 )
 
 // generateChainId generates a random chain ID for deduplicating round-trip messages.
@@ -489,6 +492,7 @@ func runNewtMain(ctx context.Context) {
 
 	// do a --version check
 	version := flag.Bool("version", false, "Print the version")
+	flag.BoolVar(&autoUpdate, "auto-update", false, "Check for a newer version on the server and self-update if one is available")
 
 	flag.Parse()
 
@@ -656,8 +660,30 @@ func runNewtMain(ctx context.Context) {
 
 	endpoint = client.GetConfig().Endpoint // Update endpoint from config
 	id = client.GetConfig().ID             // Update ID from config
+	secret = client.GetConfig().Secret     // Update secret from config
 	// Update site labels for metrics with the resolved ID
 	telemetry.UpdateSiteInfo(id, region)
+
+	// Auto-update: check for a new version, download and replace if available.
+	if autoUpdate {
+		var tlsCfg *tls.Config
+		if opt != nil {
+			// Reuse the TLS configuration already set up for the websocket client.
+			tlsCfg, _ = websocket.BuildTLSConfig(tlsClientCert, tlsClientKey, tlsClientCAs, tlsPrivateKey)
+		}
+		if err := updates.CheckAndSelfUpdate(updates.SelfUpdateConfig{
+			Endpoint:       endpoint,
+			NewtID:         id,
+			Secret:         secret,
+			CurrentVersion: newtVersion,
+			TLSConfig:      tlsCfg,
+		}); err != nil {
+			logger.Fatal("Auto-update failed: %v", err)
+		}
+		// CheckAndSelfUpdate re-execs on success, so we only reach here if
+		// newt is already up to date.
+		return
+	}
 
 	// output env var values if set
 	logger.Debug("Endpoint: %v", endpoint)
