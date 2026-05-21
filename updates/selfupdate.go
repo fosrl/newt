@@ -3,7 +3,9 @@ package updates
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,6 +28,10 @@ type SelfUpdateConfig struct {
 	Secret string
 	// CurrentVersion is the version of the currently running binary.
 	CurrentVersion string
+	// Platform is the OS+arch string embedded at build time via ldflags
+	// (e.g. "linux_amd64", "darwin_arm64").  When non-empty it is used
+	// directly; when empty the value is derived from runtime.GOOS/GOARCH.
+	Platform string
 	// TLSConfig is an optional TLS configuration for the HTTP client (may be nil).
 	TLSConfig *tls.Config
 }
@@ -33,9 +39,10 @@ type SelfUpdateConfig struct {
 // versionResponse mirrors the JSON returned by POST /api/v1/auth/newt/version
 type versionResponse struct {
 	Data struct {
-		LatestVersion  string `json:"latestVersion"`
+		LatestVersion   string `json:"latestVersion"`
 		CurrentIsLatest bool   `json:"currentIsLatest"`
-		DownloadUrl    string `json:"downloadUrl"`
+		DownloadUrl     string `json:"downloadUrl"`
+		Sha256          string `json:"sha256"`
 	} `json:"data"`
 	Success bool   `json:"success"`
 	Message string `json:"message"`
@@ -51,6 +58,7 @@ func isOfficialContainer() bool {
 
 // platform returns the OS+arch string used in the newt release binary names,
 // e.g. "linux_amd64", "darwin_arm64", "windows_amd64".
+// It is used as a fallback when no platform was embedded at build time.
 func platform() string {
 	goarch := runtime.GOARCH
 	goos := runtime.GOOS
@@ -69,6 +77,26 @@ func platform() string {
 	}
 
 	return fmt.Sprintf("%s_%s", goos, arch)
+}
+
+// verifySHA256 checks that the file at path has the expected SHA-256 hex digest.
+func verifySHA256(path, expected string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("failed to open file for hashing: %w", err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("failed to hash file: %w", err)
+	}
+
+	got := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(got, expected) {
+		return fmt.Errorf("sha256 mismatch: expected %s, got %s", expected, got)
+	}
+	return nil
 }
 
 // CheckAndSelfUpdate contacts the pangolin server, checks whether a newer
@@ -107,10 +135,14 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 	}
 
 	// --- Step 1: Ask the server for the latest version ---
+	plat := cfg.Platform
+	if plat == "" {
+		plat = platform()
+	}
 	reqBody, err := json.Marshal(map[string]string{
 		"newtId":   cfg.NewtID,
 		"secret":   cfg.Secret,
-		"platform": platform(),
+		"platform": plat,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal version request: %w", err)
@@ -159,6 +191,16 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 	fmt.Printf("Update available: %s → %s\n", cfg.CurrentVersion, verResp.Data.LatestVersion)
 	fmt.Printf("Downloading from: %s\n", verResp.Data.DownloadUrl)
 
+	// --- Pre-download: verify we can write to the binary's directory ---
+	// Do this before downloading so a permission failure doesn't waste bandwidth.
+	exeDir := filepath.Dir(exePath)
+	writeTestFile, err := os.CreateTemp(exeDir, ".newt-write-test-*")
+	if err != nil {
+		return fmt.Errorf("cannot write to %s (you may need to run as root or with elevated permissions): %w", exeDir, err)
+	}
+	writeTestFile.Close()
+	_ = os.Remove(writeTestFile.Name())
+
 	// --- Step 2: Download the new binary ---
 	dlCtx, dlCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer dlCancel()
@@ -180,11 +222,7 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 
 	// Write to a temp file in the same directory as the current binary so that
 	// an atomic rename works even across filesystem boundaries.
-	exeDir := filepath.Dir(exePath)
 	tmpFile, err := os.CreateTemp(exeDir, ".newt-update-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file for download: %w", err)
-	}
 	tmpPath := tmpFile.Name()
 
 	// Ensure the temp file is cleaned up on any error path.
@@ -198,6 +236,17 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 	}
 	if err := tmpFile.Close(); err != nil {
 		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// --- Verify SHA256 checksum if the server provided one ---
+	if verResp.Data.Sha256 != "" {
+		fmt.Println("Verifying SHA256 checksum...")
+		if err := verifySHA256(tmpPath, verResp.Data.Sha256); err != nil {
+			return fmt.Errorf("binary integrity check failed: %w", err)
+		}
+		fmt.Println("SHA256 checksum verified.")
+	} else {
+		fmt.Println("Warning: no SHA256 checksum provided by server, skipping verification.")
 	}
 
 	// Make the new binary executable.

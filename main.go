@@ -147,18 +147,19 @@ var (
 	authDaemonEnabled                  bool
 	authDaemonGenerateRandomPassword   bool
 	// Build/version (can be overridden via -ldflags "-X main.newtVersion=...")
-	newtVersion = "version_replaceme"
+	newtVersion  = "version_replaceme"
+	newtPlatform = "" // embedded at build time via -X main.newtPlatform=<os>_<arch>
 
 	// Observability/metrics flags
-	metricsEnabled    bool
-	otlpEnabled       bool
-	adminAddr         string
-	region            string
-	metricsAsyncBytes bool
-	pprofEnabled      bool
-	blueprintFile              string
-	provisioningBlueprintFile  string
-	noCloud                    bool
+	metricsEnabled            bool
+	otlpEnabled               bool
+	adminAddr                 string
+	region                    string
+	metricsAsyncBytes         bool
+	pprofEnabled              bool
+	blueprintFile             string
+	provisioningBlueprintFile string
+	noCloud                   bool
 
 	// New mTLS configuration variables
 	tlsClientCert string
@@ -676,6 +677,7 @@ func runNewtMain(ctx context.Context) {
 			NewtID:         id,
 			Secret:         secret,
 			CurrentVersion: newtVersion,
+			Platform:       newtPlatform,
 			TLSConfig:      tlsCfg,
 		}); err != nil {
 			logger.Fatal("Auto-update failed: %v", err)
@@ -1867,7 +1869,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			} else {
 				logger.Warn("CLIENTS WILL NOT WORK ON THIS VERSION OF NEWT WITH THIS VERSION OF PANGOLIN, PLEASE UPDATE THE SERVER TO 1.13 OR HIGHER OR DOWNGRADE NEWT")
 			}
-			
+
 			sendBlueprint(client, blueprintFile)
 			if client.WasJustProvisioned() {
 				logger.Info("Provisioning detected – sending provisioning blueprint")
