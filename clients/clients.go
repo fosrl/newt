@@ -19,6 +19,7 @@ import (
 	newtDevice "github.com/fosrl/newt/device"
 	"github.com/fosrl/newt/holepunch"
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/nativessh"
 	"github.com/fosrl/newt/netstack2"
 	"github.com/fosrl/newt/network"
 	"github.com/fosrl/newt/util"
@@ -108,6 +109,8 @@ type WireGuardService struct {
 	sharedBind         *bind.SharedBind
 	holePunchManager   *holepunch.Manager
 	useNativeInterface bool
+	// SSH server running on the clients' netstack
+	sshServer *sshServerHandle
 	// Direct UDP relay from main tunnel to clients' WireGuard
 	directRelayStop    chan struct{}
 	directRelayWg      sync.WaitGroup
@@ -209,6 +212,12 @@ func (s *WireGuardService) Close() {
 	if s.stopGetConfig != nil {
 		s.stopGetConfig()
 		s.stopGetConfig = nil
+	}
+
+	// Stop SSH server before tearing down the netstack
+	if s.sshServer != nil {
+		s.sshServer.stop()
+		s.sshServer = nil
 	}
 
 	// Flush access logs before tearing down the tunnel
@@ -890,6 +899,13 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		logger.Error("Failed to start WireGuard tester server: %v", err)
 	}
 
+	// Start the SSH server on the clients' netstack (port 22).
+	if h, sshErr := startSSHOnNetstack(s.tnet); sshErr != nil {
+		logger.Warn("nativessh: not starting SSH server on clients netstack: %v", sshErr)
+	} else {
+		s.sshServer = h
+	}
+
 	// Note: we already unlocked above, so don't use defer unlock
 	return nil
 }
@@ -1562,4 +1578,32 @@ func (s *WireGuardService) filterReadOnlyFields(config string) string {
 	}
 
 	return strings.Join(filteredLines, "\n")
+}
+
+// sshServerHandle holds the listener so the SSH server can be stopped by
+// closing it.
+type sshServerHandle struct {
+	ln net.Listener
+}
+
+func (h *sshServerHandle) stop() {
+	_ = h.ln.Close()
+}
+
+// startSSHOnNetstack creates a TCP listener on port 22 of the clients' netstack
+// and starts serving SSH connections on it in the background. The returned
+// handle can be used to stop the server by closing the listener.
+func startSSHOnNetstack(tnet *netstack2.Net) (*sshServerHandle, error) {
+	srv := nativessh.NewServer(nativessh.ServerConfig{})
+	ln, err := tnet.ListenTCP(&net.TCPAddr{Port: 22})
+	if err != nil {
+		return nil, fmt.Errorf("listen on netstack port 22: %w", err)
+	}
+	h := &sshServerHandle{ln: ln}
+	go func() {
+		if err := srv.Serve(ln); err != nil {
+			logger.Debug("nativessh: clients netstack server stopped: %v", err)
+		}
+	}()
+	return h, nil
 }
