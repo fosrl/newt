@@ -36,9 +36,6 @@ type Config struct {
 	// to match against). For all proxy targets (RDP/SSH/VNC), auth tokens are
 	// stored per-Target and validated by isAllowed.
 	AuthToken string
-	// NativeSSH, when non-nil, configures a local PTY/shell SSH mode instead
-	// of proxying to an external SSH server.
-	NativeSSH *NativeSSHConfig
 }
 
 // Gateway is a browser-based RDP/SSH/VNC WebSocket proxy.
@@ -46,7 +43,6 @@ type Config struct {
 // HandleRDP / HandleSSH / HandleVNC http.HandlerFunc methods.
 type Gateway struct {
 	authToken string
-	nativeSSH *NativeSSHConfig
 
 	mu      sync.RWMutex
 	targets map[int]Target // keyed by Target.ID
@@ -58,7 +54,6 @@ type Gateway struct {
 func New(cfg Config) *Gateway {
 	return &Gateway{
 		authToken: cfg.AuthToken,
-		nativeSSH: cfg.NativeSSH,
 		targets:   make(map[int]Target),
 	}
 }
