@@ -26,6 +26,7 @@ import (
 	"github.com/fosrl/newt/docker"
 	"github.com/fosrl/newt/healthcheck"
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/nativessh"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/updates"
 	"github.com/fosrl/newt/util"
@@ -534,6 +535,14 @@ func runNewtMain(ctx context.Context) {
 			logger.Fatal("Failed to start auth daemon: %v", err)
 		}
 	}
+
+	// Start native SSH server for testing (listens on :2222).
+	go func() {
+		srv := nativessh.NewServer(nativessh.ServerConfig{})
+		if err := srv.ListenAndServe(); err != nil {
+			logger.Error("Native SSH server error: %v", err)
+		}
+	}()
 	logger.GetLogger().SetLevel(loggerLevel)
 
 	// Initialize telemetry after flags are parsed (so flags override env)
