@@ -26,6 +26,7 @@ import (
 	"github.com/fosrl/newt/docker"
 	"github.com/fosrl/newt/healthcheck"
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/nativessh"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/updates"
 	"github.com/fosrl/newt/util"
@@ -714,8 +715,12 @@ func runNewtMain(ctx context.Context) {
 	var wgData WgData
 	var dockerEventMonitor *docker.EventMonitor
 
+	// In-memory SSH credentials shared with the native SSH server started in
+	// the clients netstack once the WireGuard interface is ready.
+	sshCredStore := nativessh.NewCredentialStore()
+
 	if !disableClients {
-		setupClients(client)
+		setupClients(client, sshCredStore)
 	}
 
 	// Initialize health check monitor with status change callback
@@ -1737,6 +1742,26 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 		if err := json.Unmarshal(jsonData, &certData); err != nil {
 			logger.Error("Error unmarshaling SSH cert data: %v", err)
+			return
+		}
+
+		var useNativeSSH = true
+
+		if useNativeSSH {
+			// Update in-memory credentials used by the native SSH server.
+			if err := sshCredStore.SetCAKey(certData.CACert); err != nil {
+				logger.Error("nativessh: failed to set CA key: %v", err)
+			}
+			sshCredStore.AddPrincipals(certData.Username, certData.NiceID)
+			logger.Info("nativessh: updated credentials for user %s (niceId=%s)", certData.Username, certData.NiceID)
+
+			// Acknowledge the PAM connection to the cloud.
+			if err := client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+				"messageId": certData.MessageId,
+				"complete":  true,
+			}); err != nil {
+				logger.Error("nativessh: failed to send round-trip complete: %v", err)
+			}
 			return
 		}
 

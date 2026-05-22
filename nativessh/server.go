@@ -1,38 +1,80 @@
 package nativessh
 
 import (
-	"bufio"
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"os"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/ssh"
 )
 
-const (
-	// DefaultCAKeyPath is the path to the SSH CA public key used to validate
-	// client certificates.
-	DefaultCAKeyPath = "/tmp/newt/ssh_ca.pub"
-	// DefaultPrincipalsPath is the path to a file listing allowed SSH
-	// certificate principals, one per line.
-	DefaultPrincipalsPath = "/tmp/newt/ssh_principals"
-)
+// CredentialStore holds in-memory SSH credentials that can be updated at runtime.
+// It is safe for concurrent use.
+type CredentialStore struct {
+	mu         sync.RWMutex
+	caKey      ssh.PublicKey
+	principals map[string]map[string]struct{} // username -> set of allowed principals
+}
+
+// NewCredentialStore returns an empty, ready-to-use CredentialStore.
+func NewCredentialStore() *CredentialStore {
+	return &CredentialStore{
+		principals: make(map[string]map[string]struct{}),
+	}
+}
+
+// SetCAKey parses and stores the CA public key from authorized_keys-format data.
+func (s *CredentialStore) SetCAKey(authorizedKeyData string) error {
+	key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(authorizedKeyData))
+	if err != nil {
+		return fmt.Errorf("parse CA key: %w", err)
+	}
+	s.mu.Lock()
+	s.caKey = key
+	s.mu.Unlock()
+	return nil
+}
+
+// AddPrincipals records username and niceId as allowed principals for username.
+// Both values are stored; either can appear in the certificate's ValidPrincipals
+// field to satisfy the standard cert-auth principal check.
+func (s *CredentialStore) AddPrincipals(username, niceId string) {
+	username = strings.TrimSpace(username)
+	niceId = strings.TrimSpace(niceId)
+	if username == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.principals[username] == nil {
+		s.principals[username] = make(map[string]struct{})
+	}
+	s.principals[username][username] = struct{}{}
+	if niceId != "" {
+		s.principals[username][niceId] = struct{}{}
+	}
+}
+
+// get returns the CA key and the principal set for username under a read lock.
+func (s *CredentialStore) get(username string) (ssh.PublicKey, map[string]struct{}) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.caKey, s.principals[username]
+}
 
 // ServerConfig holds configuration for the native SSH server.
 type ServerConfig struct {
 	// ListenAddr is the TCP address to listen on. Defaults to ":2222".
 	ListenAddr string
-	// CAKeyPath is the path to the CA public key file (authorized_keys format).
-	// Defaults to DefaultCAKeyPath.
-	CAKeyPath string
-	// PrincipalsPath is the path to a file of allowed principals, one per line.
-	// Defaults to DefaultPrincipalsPath.
-	PrincipalsPath string
+	// Credentials provides in-memory CA key and per-user principals.
+	// Updates to the store are reflected immediately for new connections.
+	// If nil or the store has no CA key set, all connections are rejected.
+	Credentials *CredentialStore
 }
 
 // Server is a simple SSH server that authenticates clients via SSH certificate
@@ -43,40 +85,22 @@ type Server struct {
 	cfg ServerConfig
 }
 
-// NewServer creates a new Server. Zero-value fields in cfg are replaced with
-// defaults.
+// NewServer creates a new Server. The ListenAddr defaults to ":2222" when empty.
 func NewServer(cfg ServerConfig) *Server {
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = ":2222"
 	}
-	if cfg.CAKeyPath == "" {
-		cfg.CAKeyPath = DefaultCAKeyPath
-	}
-	if cfg.PrincipalsPath == "" {
-		cfg.PrincipalsPath = DefaultPrincipalsPath
-	}
 	return &Server{cfg: cfg}
 }
 
-// buildSSHConfig loads keys/principals and builds the ssh.ServerConfig.
+// buildSSHConfig builds the ssh.ServerConfig backed by the in-memory CredentialStore.
 func (s *Server) buildSSHConfig() (*ssh.ServerConfig, error) {
-	caKey, err := loadCAPublicKey(s.cfg.CAKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("load CA public key from %s: %w", s.cfg.CAKeyPath, err)
-	}
-
-	principals, err := loadPrincipals(s.cfg.PrincipalsPath)
-	if err != nil {
-		return nil, fmt.Errorf("load principals from %s: %w", s.cfg.PrincipalsPath, err)
-	}
-
 	hostSigner, err := generateHostKey()
 	if err != nil {
 		return nil, fmt.Errorf("host key: %w", err)
 	}
-
 	cfg := &ssh.ServerConfig{
-		PublicKeyCallback: makeCertAuthCallback(caKey, principals),
+		PublicKeyCallback: makeCredentialStoreCallback(s.cfg.Credentials),
 	}
 	cfg.AddHostKey(hostSigner)
 	return cfg, nil
@@ -216,23 +240,25 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request) {
 	}
 }
 
-// makeCertAuthCallback returns an ssh.PublicKeyCallback that accepts only
-// SSH user certificates that are:
-//  1. Signed by caKey.
-//  2. Listing the connecting username in ValidPrincipals (standard cert auth).
-//  3. Whose connecting username is also in the local allowedPrincipals set.
-func makeCertAuthCallback(caKey ssh.PublicKey, allowedPrincipals map[string]struct{}) func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
-	checker := &ssh.CertChecker{
-		IsUserAuthority: func(auth ssh.PublicKey) bool {
-			return ssh.FingerprintSHA256(auth) == ssh.FingerprintSHA256(caKey)
-		},
-	}
+// makeCredentialStoreCallback returns an ssh.PublicKeyCallback that reads
+// the CA key and per-user principals from store on every auth attempt, so
+// credentials updated via AddPrincipals/SetCAKey are applied immediately.
+func makeCredentialStoreCallback(store *CredentialStore) func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
 	return func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+		caKey, userPrincipals := store.get(meta.User())
+		if caKey == nil {
+			return nil, fmt.Errorf("no CA key configured")
+		}
+		checker := &ssh.CertChecker{
+			IsUserAuthority: func(auth ssh.PublicKey) bool {
+				return ssh.FingerprintSHA256(auth) == ssh.FingerprintSHA256(caKey)
+			},
+		}
 		perms, err := checker.Authenticate(meta, key)
 		if err != nil {
 			return nil, err
 		}
-		if _, ok := allowedPrincipals[meta.User()]; !ok {
+		if len(userPrincipals) == 0 {
 			return nil, fmt.Errorf("user %q not in allowed principals list", meta.User())
 		}
 		return perms, nil
@@ -248,35 +274,6 @@ func generateHostKey() (ssh.Signer, error) {
 	}
 	log.Printf("nativessh: generated ephemeral Ed25519 host key")
 	return ssh.NewSignerFromKey(priv)
-}
-
-func loadCAPublicKey(path string) (ssh.PublicKey, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	key, _, _, _, err := ssh.ParseAuthorizedKey(data)
-	if err != nil {
-		return nil, err
-	}
-	return key, nil
-}
-
-func loadPrincipals(path string) (map[string]struct{}, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	principals := make(map[string]struct{})
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" && !strings.HasPrefix(line, "#") {
-			principals[line] = struct{}{}
-		}
-	}
-	return principals, scanner.Err()
 }
 
 // ptyRequestMsg mirrors the SSH wire format for pty-req (RFC 4254 §6.2).

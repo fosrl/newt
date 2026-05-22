@@ -111,6 +111,7 @@ type WireGuardService struct {
 	useNativeInterface bool
 	// SSH server running on the clients' netstack
 	sshServer *sshServerHandle
+	credStore *nativessh.CredentialStore
 	// Direct UDP relay from main tunnel to clients' WireGuard
 	directRelayStop    chan struct{}
 	directRelayWg      sync.WaitGroup
@@ -194,6 +195,13 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 	wsClient.RegisterHandler("newt/wg/sync", service.handleSyncConfig)
 
 	return service, nil
+}
+
+// SetCredentialStore sets the in-memory SSH credential store used by the
+// native SSH server. It must be called before the netstack is configured
+// (i.e. before the first newt/wg/receive-config message is processed).
+func (s *WireGuardService) SetCredentialStore(store *nativessh.CredentialStore) {
+	s.credStore = store
 }
 
 // ReportRTT allows reporting native RTTs to telemetry, rate-limited externally.
@@ -900,7 +908,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 	}
 
 	// Start the SSH server on the clients' netstack (port 22).
-	if h, sshErr := startSSHOnNetstack(s.tnet); sshErr != nil {
+	if h, sshErr := startSSHOnNetstack(s.tnet, s.credStore); sshErr != nil {
 		logger.Warn("nativessh: not starting SSH server on clients netstack: %v", sshErr)
 	} else {
 		s.sshServer = h
@@ -1593,8 +1601,10 @@ func (h *sshServerHandle) stop() {
 // startSSHOnNetstack creates a TCP listener on port 22 of the clients' netstack
 // and starts serving SSH connections on it in the background. The returned
 // handle can be used to stop the server by closing the listener.
-func startSSHOnNetstack(tnet *netstack2.Net) (*sshServerHandle, error) {
-	srv := nativessh.NewServer(nativessh.ServerConfig{})
+func startSSHOnNetstack(tnet *netstack2.Net, creds *nativessh.CredentialStore) (*sshServerHandle, error) {
+	srv := nativessh.NewServer(nativessh.ServerConfig{
+		Credentials: creds,
+	})
 	ln, err := tnet.ListenTCP(&net.TCPAddr{Port: 22})
 	if err != nil {
 		return nil, fmt.Errorf("listen on netstack port 22: %w", err)
