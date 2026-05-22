@@ -177,8 +177,18 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request) {
 			// PTY output → SSH channel.
 			go func() {
 				_, _ = io.Copy(ch, sess)
+				// Notify the client of the shell's exit status so it can
+				// disconnect cleanly instead of requiring a manual disconnect.
+				exitCode := sess.ExitCode()
+				exitStatusPayload := ssh.Marshal(struct{ Status uint32 }{uint32(exitCode)})
+				_, _ = ch.SendRequest("exit-status", false, exitStatusPayload)
 				_ = ch.CloseWrite()
 				sess.Close() //nolint:errcheck
+				// Close the channel so the ssh library closes the requests
+				// channel, which unblocks the for-range loop in handleSession
+				// and allows the deferred ch.Close() to run. Without this,
+				// handleSession blocks forever waiting for requests to drain.
+				_ = ch.Close()
 			}()
 			// SSH channel input → PTY stdin.
 			go func() {
