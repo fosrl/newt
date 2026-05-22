@@ -1,9 +1,11 @@
 package nativessh
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"sync"
 
 	"github.com/creack/pty"
 )
@@ -11,8 +13,10 @@ import (
 // PTYSession is a running shell process attached to a PTY.
 // It implements io.ReadWriteCloser so it can be bridged to any transport.
 type PTYSession struct {
-	ptmx *os.File
-	cmd  *exec.Cmd
+	ptmx     *os.File
+	cmd      *exec.Cmd
+	waitOnce sync.Once
+	exitCode int
 }
 
 // findShell returns the path to the best available interactive shell by
@@ -54,9 +58,32 @@ func (p *PTYSession) Resize(cols, rows uint16) error {
 	return pty.Setsize(p.ptmx, &pty.Winsize{Cols: cols, Rows: rows})
 }
 
+// wait waits for the child process to exit exactly once and records its exit
+// code. Safe to call concurrently or multiple times.
+func (p *PTYSession) wait() {
+	p.waitOnce.Do(func() {
+		err := p.cmd.Wait()
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				p.exitCode = exitErr.ExitCode()
+				return
+			}
+			p.exitCode = 1
+		}
+	})
+}
+
+// ExitCode waits for the shell process to exit and returns its exit code.
+// It is safe to call before or after Close.
+func (p *PTYSession) ExitCode() int {
+	p.wait()
+	return p.exitCode
+}
+
 // Close closes the PTY and waits for the child process to exit.
 func (p *PTYSession) Close() error {
 	err := p.ptmx.Close()
-	_ = p.cmd.Wait()
+	p.wait()
 	return err
 }
