@@ -62,9 +62,14 @@ func (g *Gateway) HandleSSH(w http.ResponseWriter, r *http.Request) {
 		}
 		target = net.JoinHostPort(host, port)
 	} else {
-		// Native SSH mode: validate against the global gateway token.
+		// Native SSH mode: validate the gateway token then read the target username.
 		if subtle.ConstantTimeCompare([]byte(token), []byte(g.authToken)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		username = r.URL.Query().Get("username")
+		if username == "" {
+			http.Error(w, "missing username", http.StatusBadRequest)
 			return
 		}
 	}
@@ -81,7 +86,7 @@ func (g *Gateway) HandleSSH(w http.ResponseWriter, r *http.Request) {
 	defer ws.CloseNow() //nolint:errcheck
 
 	if nativeSSH {
-		if err := serveNativeSSHSession(ctx, ws); err != nil {
+		if err := serveNativeSSHSession(ctx, ws, username); err != nil {
 			log.Printf("SSH native session error: %v", err)
 		}
 	} else {

@@ -10,13 +10,15 @@ import (
 	"github.com/fosrl/newt/nativessh"
 )
 
-// serveNativeSSHSession handles a WebSocket SSH session by spawning a local
-// PTY+shell instead of proxying to an external SSH server. The auth token has
-// already been validated at the WebSocket upgrade level, so this function only
-// reads (and discards) the initial "auth" frame for protocol compatibility with
-// the browser client before starting the shell.
-func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn) error {
-	// Read and discard the auth frame (token already validated at HTTP layer).
+// serveNativeSSHSession handles a WebSocket SSH session by authenticating the
+// user against the host OS (authorized_keys then PAM password) and then
+// spawning a PTY+shell running as that user.
+//
+// The auth frame from the browser must be a JSON sshClientMsg with type="auth"
+// carrying the same password/privateKey fields used by the proxy SSH path.
+// The target username is passed in from the HTTP layer (query param).
+func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, username string) error {
+	// Read the auth frame.
 	_, authBytes, err := ws.Read(ctx)
 	if err != nil {
 		return fmt.Errorf("read auth message: %w", err)
@@ -26,12 +28,18 @@ func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn) error {
 		return fmt.Errorf("expected auth message, got: %s", authBytes)
 	}
 
-	log.Printf("SSH native: spawning shell")
+	// Authenticate using host authorized_keys or PAM password.
+	if err := nativessh.Authenticate(username, authMsg.Password, authMsg.PrivateKey); err != nil {
+		sendSSHError(ctx, ws, "Authentication failed")
+		return fmt.Errorf("auth for user %q: %w", username, err)
+	}
 
-	sess, err := nativessh.NewPTYSession()
+	log.Printf("SSH native: spawning shell as user %q", username)
+
+	sess, err := nativessh.NewPTYSessionAs(username)
 	if err != nil {
 		sendSSHError(ctx, ws, fmt.Sprintf("Failed to spawn shell: %v", err))
-		return fmt.Errorf("pty session: %w", err)
+		return fmt.Errorf("pty session as %q: %w", username, err)
 	}
 	defer sess.Close()
 

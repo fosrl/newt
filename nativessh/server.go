@@ -253,7 +253,7 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request) {
 func makePublicKeyCallback(store *CredentialStore) func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
 	return func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 		// 1. Host authorized_keys.
-		if checkAuthorizedKeys(meta.User(), key) {
+		if CheckAuthorizedKeys(meta.User(), key) {
 			log.Printf("nativessh: authorized_keys auth for user %q", meta.User())
 			return &ssh.Permissions{}, nil
 		}
@@ -287,7 +287,7 @@ func makePublicKeyCallback(store *CredentialStore) func(ssh.ConnMetadata, ssh.Pu
 // fails (see pam_other.go).
 func makePasswordCallback() func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
 	return func(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
-		if err := verifySystemPassword(meta.User(), string(password)); err != nil {
+		if err := VerifySystemPassword(meta.User(), string(password)); err != nil {
 			// Return a generic message to the client; log the real reason.
 			log.Printf("nativessh: password auth failed for user %q: %v", meta.User(), err)
 			return nil, fmt.Errorf("permission denied")
