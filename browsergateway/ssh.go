@@ -40,9 +40,11 @@ func (g *Gateway) HandleSSH(w http.ResponseWriter, r *http.Request) {
 
 	token := r.URL.Query().Get("authToken")
 
+	var nativeSSH = false
+
 	// In proxy mode we also need host + username from query params.
 	var target, username string
-	if g.nativeSSH == nil {
+	if !nativeSSH {
 		host := r.URL.Query().Get("host")
 		port := r.URL.Query().Get("port")
 		username = r.URL.Query().Get("username")
@@ -78,8 +80,8 @@ func (g *Gateway) HandleSSH(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(-1)
 	defer ws.CloseNow() //nolint:errcheck
 
-	if g.nativeSSH != nil {
-		if err := serveNativeSSHSession(ctx, ws, *g.nativeSSH); err != nil {
+	if nativeSSH {
+		if err := serveNativeSSHSession(ctx, ws); err != nil {
 			log.Printf("SSH native session error: %v", err)
 		}
 	} else {

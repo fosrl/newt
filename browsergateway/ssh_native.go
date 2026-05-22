@@ -10,18 +10,12 @@ import (
 	"github.com/fosrl/newt/nativessh"
 )
 
-// NativeSSHConfig holds configuration for the native PTY/shell mode.
-type NativeSSHConfig struct {
-	// Shell is the executable to spawn (e.g. /bin/bash). Defaults to /bin/sh.
-	Shell string
-}
-
 // serveNativeSSHSession handles a WebSocket SSH session by spawning a local
 // PTY+shell instead of proxying to an external SSH server. The auth token has
 // already been validated at the WebSocket upgrade level, so this function only
 // reads (and discards) the initial "auth" frame for protocol compatibility with
 // the browser client before starting the shell.
-func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, cfg NativeSSHConfig) error {
+func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn) error {
 	// Read and discard the auth frame (token already validated at HTTP layer).
 	_, authBytes, err := ws.Read(ctx)
 	if err != nil {
