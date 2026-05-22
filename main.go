@@ -1748,31 +1748,45 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			return
 		}
 
-		// Check if we're running the auth daemon internally
-		if authDaemonServer != nil && certData.AuthDaemonMode == "site" { // if the auth daemon is running internally and the external auth daemon is not enabled
+		// Use a switch statement for AuthDaemonMode
+		switch certData.AuthDaemonMode {
+		case "site":
 			// Call ProcessConnection directly when running internally
 			logger.Debug("Calling internal auth daemon ProcessConnection for user %s", certData.Username)
 
-			authDaemonServer.ProcessConnection(authdaemon.ConnectionRequest{
-				CaCert:   certData.CACert,
-				NiceId:   certData.NiceID,
-				Username: certData.Username,
-				Metadata: authdaemon.ConnectionMetadata{
-					SudoMode:     certData.Metadata.SudoMode,
-					SudoCommands: certData.Metadata.SudoCommands,
-					Homedir:      certData.Metadata.Homedir,
-					Groups:       certData.Metadata.Groups,
-				},
-			})
-
-			// Send success response back to cloud
-			err = client.SendMessage("ws/round-trip/complete", map[string]interface{}{
-				"messageId": certData.MessageId,
-				"complete":  true,
-			})
+			if authDaemonServer != nil {
+				authDaemonServer.ProcessConnection(authdaemon.ConnectionRequest{
+					CaCert:   certData.CACert,
+					NiceId:   certData.NiceID,
+					Username: certData.Username,
+					Metadata: authdaemon.ConnectionMetadata{
+						SudoMode:     certData.Metadata.SudoMode,
+						SudoCommands: certData.Metadata.SudoCommands,
+						Homedir:      certData.Metadata.Homedir,
+						Groups:       certData.Metadata.Groups,
+					},
+				})
+				// Send success response back to cloud
+				err = client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+					"messageId": certData.MessageId,
+					"complete":  true,
+				})
+			} else {
+				logger.Error("Auth daemon server is not initialized, cannot process connection")
+				// Send failure response back to cloud
+				err = client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+					"messageId": certData.MessageId,
+					"complete":  true,
+					"error":     "auth daemon server not initialized",
+				})
+				if err != nil {
+					logger.Error("Failed to send SSH cert failure response: %v", err)
+				}
+				return
+			}
 
 			logger.Info("Successfully processed connection via internal auth daemon for user %s", certData.Username)
-		} else if certData.AuthDaemonMode == "remote" {
+		case "remote":
 			// External auth daemon mode - make HTTP request
 			// Check if auth daemon key is configured
 			if authDaemonKey == "" {
@@ -1869,15 +1883,14 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			}
 
 			logger.Info("Successfully registered SSH certificate with external auth daemon for user %s", certData.Username)
-		} else if certData.AuthDaemonMode == "native" {
-			if disableSSH {
-				logger.Warn("Received native SSH connection request but SSH is disabled via --disable-ssh")
-			} else {
+		case "native":
+			logger.Debug("Processing SSH cert for native SSH server for user %s", certData.Username)
+			if authDaemonServer != nil && sshCredStore != nil {
 				authDaemonServer.ProcessConnection(authdaemon.ConnectionRequest{
-					CaCert:   certData.CACert,
-					NiceId:   certData.NiceID,
+					CaCert:   "", // dont write the cert to the host
+					NiceId:   "", // dont write the cert to the host
 					Username: certData.Username,
-					Metadata: authdaemon.ConnectionMetadata{
+					Metadata: authdaemon.ConnectionMetadata{ // but push the user
 						SudoMode:     certData.Metadata.SudoMode,
 						SudoCommands: certData.Metadata.SudoCommands,
 						Homedir:      certData.Metadata.Homedir,
@@ -1891,9 +1904,27 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				}
 				sshCredStore.AddPrincipals(certData.Username, certData.NiceID)
 				logger.Info("nativessh: updated credentials for user %s (niceId=%s)", certData.Username, certData.NiceID)
+			} else {
+				logger.Error("Auth daemon server or SSH credential store not initialized, cannot process connection")
+				// Send failure response back to cloud
+				err = client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+					"messageId": certData.MessageId,
+					"complete":  true,
+					"error":     "auth daemon server or SSH credential store not initialized",
+				})
+				if err != nil {
+					logger.Error("Failed to send SSH cert failure response: %v", err)
+				}
+				return
 			}
-		} else {
+		default:
 			logger.Error("Unknown auth daemon mode: %s", certData.AuthDaemonMode)
+			client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+				"messageId": certData.MessageId,
+				"complete":  true,
+				"error":     fmt.Sprintf("unknown auth daemon mode: %s", certData.AuthDaemonMode),
+			})
+			return
 		}
 
 		// Send success response back to cloud
