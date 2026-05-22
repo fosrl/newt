@@ -93,14 +93,17 @@ func NewServer(cfg ServerConfig) *Server {
 	return &Server{cfg: cfg}
 }
 
-// buildSSHConfig builds the ssh.ServerConfig backed by the in-memory CredentialStore.
+// buildSSHConfig builds the ssh.ServerConfig with multi-method authentication:
+//  1. Public key: host ~/.ssh/authorized_keys, then CA certificate.
+//  2. Password: system PAM stack (Linux only).
 func (s *Server) buildSSHConfig() (*ssh.ServerConfig, error) {
 	hostSigner, err := generateHostKey()
 	if err != nil {
 		return nil, fmt.Errorf("host key: %w", err)
 	}
 	cfg := &ssh.ServerConfig{
-		PublicKeyCallback: makeCredentialStoreCallback(s.cfg.Credentials),
+		PublicKeyCallback: makePublicKeyCallback(s.cfg.Credentials),
+		PasswordCallback:  makePasswordCallback(),
 	}
 	cfg.AddHostKey(hostSigner)
 	return cfg, nil
@@ -240,28 +243,57 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request) {
 	}
 }
 
-// makeCredentialStoreCallback returns an ssh.PublicKeyCallback that reads
-// the CA key and per-user principals from store on every auth attempt, so
-// credentials updated via AddPrincipals/SetCAKey are applied immediately.
-func makeCredentialStoreCallback(store *CredentialStore) func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
+// makePublicKeyCallback returns a PublicKeyCallback that tries, in order:
+//  1. Host authorized_keys  – matches any key in the OS user's
+//     ~/.ssh/authorized_keys file.
+//  2. CA certificate        – validates an SSH certificate signed by the
+//     configured CA and checks that the user appears in the principals map.
+//
+// store may be nil or empty; those paths are simply skipped.
+func makePublicKeyCallback(store *CredentialStore) func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
 	return func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-		caKey, userPrincipals := store.get(meta.User())
-		if caKey == nil {
-			return nil, fmt.Errorf("no CA key configured")
+		// 1. Host authorized_keys.
+		if checkAuthorizedKeys(meta.User(), key) {
+			log.Printf("nativessh: authorized_keys auth for user %q", meta.User())
+			return &ssh.Permissions{}, nil
 		}
-		checker := &ssh.CertChecker{
-			IsUserAuthority: func(auth ssh.PublicKey) bool {
-				return ssh.FingerprintSHA256(auth) == ssh.FingerprintSHA256(caKey)
-			},
+
+		// 2. CA certificate.
+		if store != nil {
+			caKey, userPrincipals := store.get(meta.User())
+			if caKey != nil {
+				checker := &ssh.CertChecker{
+					IsUserAuthority: func(auth ssh.PublicKey) bool {
+						return ssh.FingerprintSHA256(auth) == ssh.FingerprintSHA256(caKey)
+					},
+				}
+				perms, err := checker.Authenticate(meta, key)
+				if err == nil {
+					if len(userPrincipals) == 0 {
+						return nil, fmt.Errorf("user %q not in allowed principals list", meta.User())
+					}
+					log.Printf("nativessh: CA cert auth for user %q", meta.User())
+					return perms, nil
+				}
+			}
 		}
-		perms, err := checker.Authenticate(meta, key)
-		if err != nil {
-			return nil, err
+
+		return nil, fmt.Errorf("public key not authorized for user %q", meta.User())
+	}
+}
+
+// makePasswordCallback returns a PasswordCallback that validates the supplied
+// password via the host OS PAM stack.  On non-Linux platforms this always
+// fails (see pam_other.go).
+func makePasswordCallback() func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
+	return func(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+		if err := verifySystemPassword(meta.User(), string(password)); err != nil {
+			// Return a generic message to the client; log the real reason.
+			log.Printf("nativessh: password auth failed for user %q: %v", meta.User(), err)
+			return nil, fmt.Errorf("permission denied")
 		}
-		if len(userPrincipals) == 0 {
-			return nil, fmt.Errorf("user %q not in allowed principals list", meta.User())
-		}
-		return perms, nil
+		log.Printf("nativessh: password auth for user %q", meta.User())
+		return &ssh.Permissions{}, nil
 	}
 }
 

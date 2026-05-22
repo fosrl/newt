@@ -1715,14 +1715,14 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 		// Define the structure of the incoming message
 		type SSHCertData struct {
-			MessageId          int    `json:"messageId"`
-			AgentPort          int    `json:"agentPort"`
-			AgentHost          string `json:"agentHost"`
-			ExternalAuthDaemon bool   `json:"externalAuthDaemon"`
-			CACert             string `json:"caCert"`
-			Username           string `json:"username"`
-			NiceID             string `json:"niceId"`
-			Metadata           struct {
+			MessageId      int    `json:"messageId"`
+			AgentPort      int    `json:"agentPort"`
+			AgentHost      string `json:"agentHost"`
+			AuthDaemonMode string `json:"authDaemonMode"` // site, remote, native
+			CACert         string `json:"caCert"`
+			Username       string `json:"username"`
+			NiceID         string `json:"niceId"`
+			Metadata       struct {
 				SudoMode     string   `json:"sudoMode"`
 				SudoCommands []string `json:"sudoCommands"`
 				Homedir      bool     `json:"homedir"`
@@ -1745,28 +1745,8 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			return
 		}
 
-		var useNativeSSH = true
-
-		if useNativeSSH {
-			// Update in-memory credentials used by the native SSH server.
-			if err := sshCredStore.SetCAKey(certData.CACert); err != nil {
-				logger.Error("nativessh: failed to set CA key: %v", err)
-			}
-			sshCredStore.AddPrincipals(certData.Username, certData.NiceID)
-			logger.Info("nativessh: updated credentials for user %s (niceId=%s)", certData.Username, certData.NiceID)
-
-			// Acknowledge the PAM connection to the cloud.
-			if err := client.SendMessage("ws/round-trip/complete", map[string]interface{}{
-				"messageId": certData.MessageId,
-				"complete":  true,
-			}); err != nil {
-				logger.Error("nativessh: failed to send round-trip complete: %v", err)
-			}
-			return
-		}
-
 		// Check if we're running the auth daemon internally
-		if authDaemonServer != nil && !certData.ExternalAuthDaemon { // if the auth daemon is running internally and the external auth daemon is not enabled
+		if authDaemonServer != nil && certData.AuthDaemonMode == "site" { // if the auth daemon is running internally and the external auth daemon is not enabled
 			// Call ProcessConnection directly when running internally
 			logger.Debug("Calling internal auth daemon ProcessConnection for user %s", certData.Username)
 
@@ -1789,7 +1769,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			})
 
 			logger.Info("Successfully processed connection via internal auth daemon for user %s", certData.Username)
-		} else {
+		} else if certData.AuthDaemonMode == "remote" {
 			// External auth daemon mode - make HTTP request
 			// Check if auth daemon key is configured
 			if authDaemonKey == "" {
@@ -1886,6 +1866,15 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			}
 
 			logger.Info("Successfully registered SSH certificate with external auth daemon for user %s", certData.Username)
+		} else if certData.AuthDaemonMode == "native" {
+			// Update in-memory credentials used by the native SSH server.
+			if err := sshCredStore.SetCAKey(certData.CACert); err != nil {
+				logger.Error("nativessh: failed to set CA key: %v", err)
+			}
+			sshCredStore.AddPrincipals(certData.Username, certData.NiceID)
+			logger.Info("nativessh: updated credentials for user %s (niceId=%s)", certData.Username, certData.NiceID)
+		} else {
+			logger.Error("Unknown auth daemon mode: %s", certData.AuthDaemonMode)
 		}
 
 		// Send success response back to cloud
