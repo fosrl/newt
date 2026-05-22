@@ -5,11 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
-	"os/exec"
 
 	"github.com/coder/websocket"
-	"github.com/creack/pty"
+	"github.com/fosrl/newt/nativessh"
 )
 
 // NativeSSHConfig holds configuration for the native PTY/shell mode.
@@ -34,26 +32,14 @@ func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, cfg NativeSS
 		return fmt.Errorf("expected auth message, got: %s", authBytes)
 	}
 
-	shell := cfg.Shell
-	if shell == "" {
-		shell = "/bin/sh"
-	}
+	log.Printf("SSH native: spawning shell")
 
-	log.Printf("SSH native: spawning %s", shell)
-
-	cmd := exec.CommandContext(ctx, shell)
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
-
-	// Start the command with a PTY attached.
-	ptmx, err := pty.Start(cmd)
+	sess, err := nativessh.NewPTYSession(cfg.Shell)
 	if err != nil {
 		sendSSHError(ctx, ws, fmt.Sprintf("Failed to spawn shell: %v", err))
-		return fmt.Errorf("pty start: %w", err)
+		return fmt.Errorf("pty session: %w", err)
 	}
-	defer func() {
-		_ = ptmx.Close()
-		_ = cmd.Wait()
-	}()
+	defer sess.Close()
 
 	// Cancel context to unblock the WebSocket read loop when the shell exits.
 	sessCtx, cancelSess := context.WithCancel(ctx)
@@ -64,7 +50,7 @@ func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, cfg NativeSS
 		defer cancelSess()
 		buf := make([]byte, 4096)
 		for {
-			n, readErr := ptmx.Read(buf)
+			n, readErr := sess.Read(buf)
 			if n > 0 {
 				msg := sshServerMsg{Type: "data", Data: string(buf[:n])}
 				b, _ := json.Marshal(msg)
@@ -90,15 +76,12 @@ func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, cfg NativeSS
 		}
 		switch msg.Type {
 		case "data":
-			if _, writeErr := ptmx.Write([]byte(msg.Data)); writeErr != nil {
+			if _, writeErr := sess.Write([]byte(msg.Data)); writeErr != nil {
 				return fmt.Errorf("write pty: %w", writeErr)
 			}
 		case "resize":
 			if msg.Cols > 0 && msg.Rows > 0 {
-				_ = pty.Setsize(ptmx, &pty.Winsize{
-					Cols: uint16(msg.Cols),
-					Rows: uint16(msg.Rows),
-				})
+				_ = sess.Resize(uint16(msg.Cols), uint16(msg.Rows))
 			}
 		}
 	}
