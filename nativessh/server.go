@@ -58,42 +58,56 @@ func NewServer(cfg ServerConfig) *Server {
 	return &Server{cfg: cfg}
 }
 
-// ListenAndServe starts the SSH server and blocks until the listener is closed.
-func (s *Server) ListenAndServe() error {
+// buildSSHConfig loads keys/principals and builds the ssh.ServerConfig.
+func (s *Server) buildSSHConfig() (*ssh.ServerConfig, error) {
 	caKey, err := loadCAPublicKey(s.cfg.CAKeyPath)
 	if err != nil {
-		return fmt.Errorf("load CA public key from %s: %w", s.cfg.CAKeyPath, err)
+		return nil, fmt.Errorf("load CA public key from %s: %w", s.cfg.CAKeyPath, err)
 	}
 
 	principals, err := loadPrincipals(s.cfg.PrincipalsPath)
 	if err != nil {
-		return fmt.Errorf("load principals from %s: %w", s.cfg.PrincipalsPath, err)
+		return nil, fmt.Errorf("load principals from %s: %w", s.cfg.PrincipalsPath, err)
 	}
 
 	hostSigner, err := generateHostKey()
 	if err != nil {
-		return fmt.Errorf("host key: %w", err)
+		return nil, fmt.Errorf("host key: %w", err)
 	}
 
-	sshCfg := &ssh.ServerConfig{
+	cfg := &ssh.ServerConfig{
 		PublicKeyCallback: makeCertAuthCallback(caKey, principals),
 	}
-	sshCfg.AddHostKey(hostSigner)
+	cfg.AddHostKey(hostSigner)
+	return cfg, nil
+}
 
+// Serve accepts connections on ln and handles them. It returns when ln is
+// closed or a non-temporary Accept error occurs.
+func (s *Server) Serve(ln net.Listener) error {
+	sshCfg, err := s.buildSSHConfig()
+	if err != nil {
+		return err
+	}
+	log.Printf("nativessh: server listening on %s", ln.Addr())
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return err
+		}
+		go s.handleConn(conn, sshCfg)
+	}
+}
+
+// ListenAndServe starts the SSH server on the host network and blocks until
+// the listener is closed.
+func (s *Server) ListenAndServe() error {
 	ln, err := net.Listen("tcp", s.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.cfg.ListenAddr, err)
 	}
 	defer ln.Close()
-	log.Printf("nativessh: server listening on %s", s.cfg.ListenAddr)
-
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return fmt.Errorf("accept: %w", err)
-		}
-		go s.handleConn(conn, sshCfg)
-	}
+	return s.Serve(ln)
 }
 
 func (s *Server) handleConn(conn net.Conn, cfg *ssh.ServerConfig) {
