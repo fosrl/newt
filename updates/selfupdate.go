@@ -16,11 +16,13 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/fosrl/newt/logger"
 )
 
 // SelfUpdateConfig holds the configuration required to perform a self-update.
 type SelfUpdateConfig struct {
-	// Endpoint is the base URL of the pangolin server (e.g. "https://pangolin.example.com")
+	// Endpoint is the base URL of the pangolin server (e.g. "https://app.pangolin.net")
 	Endpoint string
 	// NewtID is the newt client identifier used for authentication.
 	NewtID string
@@ -107,11 +109,15 @@ func verifySHA256(path, expected string) error {
 // the function does not return – the process is replaced by the new binary via
 // syscall.Exec.
 func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
+	logger.Debug("++++++++++++++++++++++++++++++++++++++++++++checkAndSelfUpdate: starting update check (currentVersion=%s)", cfg.CurrentVersion)
+
 	if isOfficialContainer() {
+		logger.Debug("checkAndSelfUpdate: running inside official container, skipping auto-update")
 		return fmt.Errorf("auto-update is not supported in official Fossorial container images; pull a new image tag instead")
 	}
 
 	if cfg.CurrentVersion == "version_replaceme" {
+		logger.Debug("checkAndSelfUpdate: development build detected, skipping auto-update")
 		return fmt.Errorf("cannot auto-update a development build (version_replaceme)")
 	}
 
@@ -133,12 +139,14 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 	if err != nil {
 		return fmt.Errorf("failed to resolve symlinks for executable path: %w", err)
 	}
+	logger.Debug("checkAndSelfUpdate: current executable path: %s", exePath)
 
 	// --- Step 1: Ask the server for the latest version ---
 	plat := cfg.Platform
 	if plat == "" {
 		plat = platform()
 	}
+	logger.Debug("checkAndSelfUpdate: querying server for latest version (platform=%s, endpoint=%s)", plat, baseEndpoint)
 	reqBody, err := json.Marshal(map[string]string{
 		"newtId":   cfg.NewtID,
 		"secret":   cfg.Secret,
@@ -169,6 +177,16 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNoContent { // updates are disabled
+		logger.Debug("checkAndSelfUpdate: server indicated updates are disabled (204 No Content)")
+		return nil
+	}
+
+	if resp.StatusCode == http.StatusNotFound { // older server without version endpoint
+		logger.Debug("checkAndSelfUpdate: server does not support version endpoint (404 Not Found), skipping")
+		return nil
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
@@ -184,16 +202,16 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 	}
 
 	if verResp.Data.CurrentIsLatest {
-		fmt.Printf("newt is already up to date (%s)\n", cfg.CurrentVersion)
+		logger.Debug("checkAndSelfUpdate: already up to date (%s)", cfg.CurrentVersion)
 		return nil
 	}
 
-	fmt.Printf("Update available: %s → %s\n", cfg.CurrentVersion, verResp.Data.LatestVersion)
-	fmt.Printf("Downloading from: %s\n", verResp.Data.DownloadUrl)
+	logger.Debug("checkAndSelfUpdate: update available %s → %s", cfg.CurrentVersion, verResp.Data.LatestVersion)
 
 	// --- Pre-download: verify we can write to the binary's directory ---
 	// Do this before downloading so a permission failure doesn't waste bandwidth.
 	exeDir := filepath.Dir(exePath)
+	logger.Debug("checkAndSelfUpdate: verifying write access to %s", exeDir)
 	writeTestFile, err := os.CreateTemp(exeDir, ".newt-write-test-*")
 	if err != nil {
 		return fmt.Errorf("cannot write to %s (you may need to run as root or with elevated permissions): %w", exeDir, err)
@@ -202,6 +220,7 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 	_ = os.Remove(writeTestFile.Name())
 
 	// --- Step 2: Download the new binary ---
+	logger.Debug("checkAndSelfUpdate: beginning download of new binary")
 	dlCtx, dlCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer dlCancel()
 
@@ -240,13 +259,13 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 
 	// --- Verify SHA256 checksum if the server provided one ---
 	if verResp.Data.Sha256 != "" {
-		fmt.Println("Verifying SHA256 checksum...")
+		logger.Debug("checkAndSelfUpdate: verifying SHA256 checksum")
 		if err := verifySHA256(tmpPath, verResp.Data.Sha256); err != nil {
 			return fmt.Errorf("binary integrity check failed: %w", err)
 		}
-		fmt.Println("SHA256 checksum verified.")
+		logger.Debug("checkAndSelfUpdate: SHA256 checksum verified")
 	} else {
-		fmt.Println("Warning: no SHA256 checksum provided by server, skipping verification.")
+		logger.Debug("checkAndSelfUpdate: no SHA256 checksum provided by server, skipping verification")
 	}
 
 	// Make the new binary executable.
@@ -256,12 +275,12 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 
 	// --- Step 3: Replace the running binary ---
 	// On Unix an atomic rename works even while the file is running.
+	logger.Debug("checkAndSelfUpdate: replacing binary at %s", exePath)
 	if err := os.Rename(tmpPath, exePath); err != nil {
 		return fmt.Errorf("failed to replace binary (you may need to run as root): %w", err)
 	}
 
-	fmt.Printf("Binary updated to %s at %s\n", verResp.Data.LatestVersion, exePath)
-
 	// --- Step 4: Re-exec ---
+	logger.Debug("checkAndSelfUpdate: re-executing new binary")
 	return reexec(exePath)
 }
