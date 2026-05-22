@@ -34,7 +34,7 @@ func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, cfg NativeSS
 
 	log.Printf("SSH native: spawning shell")
 
-	sess, err := nativessh.NewPTYSession(cfg.Shell)
+	sess, err := nativessh.NewPTYSession()
 	if err != nil {
 		sendSSHError(ctx, ws, fmt.Sprintf("Failed to spawn shell: %v", err))
 		return fmt.Errorf("pty session: %w", err)

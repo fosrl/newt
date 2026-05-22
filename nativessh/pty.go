@@ -15,11 +15,21 @@ type PTYSession struct {
 	cmd  *exec.Cmd
 }
 
-// NewPTYSession spawns shell in a PTY. If shell is empty, /bin/sh is used.
-func NewPTYSession(shell string) (*PTYSession, error) {
-	if shell == "" {
-		shell = "/bin/sh"
+// findShell returns the path to the best available interactive shell by
+// checking preferred shells in order, falling back to /bin/sh.
+func findShell() string {
+	preferred := []string{"zsh", "bash", "fish", "ksh", "sh"}
+	for _, name := range preferred {
+		if path, err := exec.LookPath(name); err == nil {
+			return path
+		}
 	}
+	return "/bin/sh"
+}
+
+// NewPTYSession spawns the best available shell in a PTY.
+func NewPTYSession() (*PTYSession, error) {
+	shell := findShell()
 	cmd := exec.Command(shell)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 	ptmx, err := pty.Start(cmd)
