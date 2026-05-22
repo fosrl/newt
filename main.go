@@ -134,6 +134,7 @@ var (
 	port                               uint16
 	portStr                            string
 	disableClients                     bool
+	disableSSH                         bool
 	updownScript                       string
 	dockerSocket                       string
 	dockerEnforceNetworkValidation     string
@@ -157,7 +158,6 @@ var (
 	authDaemonKey                      string
 	authDaemonPrincipalsFile           string
 	authDaemonCACertPath               string
-	authDaemonEnabled                  bool
 	authDaemonGenerateRandomPassword   bool
 	// Build/version (can be overridden via -ldflags "-X main.newtVersion=...")
 	newtVersion = "version_replaceme"
@@ -255,7 +255,6 @@ func runNewtMain(ctx context.Context) {
 	authDaemonKey = os.Getenv("AD_KEY")
 	authDaemonPrincipalsFile = os.Getenv("AD_PRINCIPALS_FILE")
 	authDaemonCACertPath = os.Getenv("AD_CA_CERT_PATH")
-	authDaemonEnabledEnv := os.Getenv("AUTH_DAEMON_ENABLED")
 	authDaemonGenerateRandomPasswordEnv := os.Getenv("AD_GENERATE_RANDOM_PASSWORD")
 
 	// Metrics/observability env mirrors
@@ -268,6 +267,8 @@ func runNewtMain(ctx context.Context) {
 
 	disableClientsEnv := os.Getenv("DISABLE_CLIENTS")
 	disableClients = disableClientsEnv == "true"
+	disableSSHEnv := os.Getenv("DISABLE_SSH")
+	disableSSH = disableSSHEnv == "true"
 	useNativeInterfaceEnv := os.Getenv("USE_NATIVE_INTERFACE")
 	useNativeInterface = useNativeInterfaceEnv == "true"
 	enforceHealthcheckCertEnv := os.Getenv("ENFORCE_HC_CERT")
@@ -340,6 +341,9 @@ func runNewtMain(ctx context.Context) {
 	if disableClientsEnv == "" {
 		flag.BoolVar(&disableClients, "disable-clients", false, "Disable clients on the WireGuard interface")
 	}
+	if disableSSHEnv == "" {
+		flag.BoolVar(&disableSSH, "disable-ssh", false, "Disable SSH auth daemon and native SSH mode (remote auth daemon still works)")
+	}
 	if enforceHealthcheckCertEnv == "" {
 		flag.BoolVar(&enforceHealthcheckCert, "enforce-hc-cert", false, "Enforce certificate validation for health checks (default: false, accepts any cert)")
 	}
@@ -374,6 +378,8 @@ func runNewtMain(ctx context.Context) {
 	if tlsClientKey == "" {
 		flag.StringVar(&tlsClientKey, "tls-client-key", "", "Path to client private key file (PEM/DER format)")
 	}
+	// add a dummy input for --auth-daemon but ignore it since the auth daemon is always enabled now and this is just for backward compatibility with older versions
+	flag.Bool("auth-daemon", false, "Enable auth daemon mode (deprecated, always enabled)")
 
 	// Handle multiple CA files
 	var tlsClientCAsFlag stringSlice
@@ -485,13 +491,7 @@ func runNewtMain(ctx context.Context) {
 	if authDaemonCACertPath == "" {
 		flag.StringVar(&authDaemonCACertPath, "ad-ca-cert-path", "/etc/ssh/ca.pem", "Path to the CA certificate file for auth daemon")
 	}
-	if authDaemonEnabledEnv == "" {
-		flag.BoolVar(&authDaemonEnabled, "auth-daemon", false, "Enable auth daemon mode (runs alongside normal newt operation)")
-	} else {
-		if v, err := strconv.ParseBool(authDaemonEnabledEnv); err == nil {
-			authDaemonEnabled = v
-		}
-	}
+
 	if authDaemonGenerateRandomPasswordEnv == "" {
 		flag.BoolVar(&authDaemonGenerateRandomPassword, "ad-generate-random-password", false, "Generate a random password for authenticated users")
 	} else {
@@ -530,7 +530,7 @@ func runNewtMain(ctx context.Context) {
 	loggerLevel := util.ParseLogLevel(logLevel)
 
 	// Start auth daemon if enabled
-	if authDaemonEnabled {
+	if !disableSSH {
 		if err := startAuthDaemon(ctx); err != nil {
 			logger.Fatal("Failed to start auth daemon: %v", err)
 		}
@@ -717,7 +717,10 @@ func runNewtMain(ctx context.Context) {
 
 	// In-memory SSH credentials shared with the native SSH server started in
 	// the clients netstack once the WireGuard interface is ready.
-	sshCredStore := nativessh.NewCredentialStore()
+	var sshCredStore *nativessh.CredentialStore
+	if !disableSSH {
+		sshCredStore = nativessh.NewCredentialStore()
+	}
 
 	if !disableClients {
 		setupClients(client, sshCredStore)
@@ -1867,12 +1870,28 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 			logger.Info("Successfully registered SSH certificate with external auth daemon for user %s", certData.Username)
 		} else if certData.AuthDaemonMode == "native" {
-			// Update in-memory credentials used by the native SSH server.
-			if err := sshCredStore.SetCAKey(certData.CACert); err != nil {
-				logger.Error("nativessh: failed to set CA key: %v", err)
+			if disableSSH {
+				logger.Warn("Received native SSH connection request but SSH is disabled via --disable-ssh")
+			} else {
+				authDaemonServer.ProcessConnection(authdaemon.ConnectionRequest{
+					CaCert:   certData.CACert,
+					NiceId:   certData.NiceID,
+					Username: certData.Username,
+					Metadata: authdaemon.ConnectionMetadata{
+						SudoMode:     certData.Metadata.SudoMode,
+						SudoCommands: certData.Metadata.SudoCommands,
+						Homedir:      certData.Metadata.Homedir,
+						Groups:       certData.Metadata.Groups,
+					},
+				})
+
+				// Update in-memory credentials used by the native SSH server.
+				if err := sshCredStore.SetCAKey(certData.CACert); err != nil {
+					logger.Error("nativessh: failed to set CA key: %v", err)
+				}
+				sshCredStore.AddPrincipals(certData.Username, certData.NiceID)
+				logger.Info("nativessh: updated credentials for user %s (niceId=%s)", certData.Username, certData.NiceID)
 			}
-			sshCredStore.AddPrincipals(certData.Username, certData.NiceID)
-			logger.Info("nativessh: updated credentials for user %s (niceId=%s)", certData.Username, certData.NiceID)
 		} else {
 			logger.Error("Unknown auth daemon mode: %s", certData.AuthDaemonMode)
 		}
