@@ -908,10 +908,13 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 	}
 
 	// Start the SSH server on the clients' netstack (port 22).
-	if h, sshErr := startSSHOnNetstack(s.tnet, s.credStore); sshErr != nil {
-		logger.Warn("nativessh: not starting SSH server on clients netstack: %v", sshErr)
-	} else {
-		s.sshServer = h
+	// A nil credStore means SSH is disabled (--disable-ssh), so skip starting the server.
+	if s.credStore != nil {
+		if h, sshErr := startSSHOnNetstack(s.tnet, s.credStore); sshErr != nil {
+			logger.Warn("nativessh: not starting SSH server on clients netstack: %v", sshErr)
+		} else {
+			s.sshServer = h
+		}
 	}
 
 	// Note: we already unlocked above, so don't use defer unlock
