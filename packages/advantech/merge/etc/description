@@ -1,0 +1,4 @@
+Pangolin Site (newt) is a WireGuard-based tunnel client that connects this router to a
+Pangolin server, enabling secure remote access to local resources without opening
+firewall ports. Configure the server endpoint, ID, and secret via the web
+interface to establish the tunnel automatically on startup.

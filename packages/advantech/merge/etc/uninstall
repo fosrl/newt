@@ -1,0 +1,9 @@
+#!/bin/sh
+
+MODNAME=newt
+
+rm -f /opt/$MODNAME/www/.htpasswd
+rm -f /tmp/newt.pid
+rm -f /tmp/newt.log
+
+exit 0
