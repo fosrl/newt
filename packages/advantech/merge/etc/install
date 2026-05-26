@@ -1,0 +1,15 @@
+#!/bin/sh
+
+MODNAME=newt
+
+# Ensure scripts are executable
+chmod +x /opt/$MODNAME/etc/init
+chmod +x /opt/$MODNAME/etc/install
+chmod +x /opt/$MODNAME/etc/uninstall
+chmod +x /opt/$MODNAME/bin/newt
+chmod +x /opt/$MODNAME/www/index.cgi
+
+# Secure the web interface with router authentication
+ln -sf /etc/htpasswd /opt/$MODNAME/www/.htpasswd
+
+exit 0
