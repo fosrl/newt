@@ -52,10 +52,10 @@ type versionResponse struct {
 
 // isOfficialContainer returns true when the process is running inside an
 // official Fossorial-built container image.  The image sets
-// NEWT_OFFICIAL_CONTAINER=true at build time; users running newt in their own
+// NEWT_SYSTEM_SUBSTRATE="CONTAINER" at build time; users running newt in their own
 // containers (or bare-metal) will not have this variable set.
 func isOfficialContainer() bool {
-	return os.Getenv("NEWT_OFFICIAL_CONTAINER") == "true"
+	return os.Getenv("NEWT_SYSTEM_SUBSTRATE") == "CONTAINER"
 }
 
 // platform returns the OS+arch string used in the newt release binary names,
@@ -109,7 +109,7 @@ func verifySHA256(path, expected string) error {
 // the function does not return – the process is replaced by the new binary via
 // syscall.Exec.
 func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
-	logger.Debug("++++++++++++++++++++++++++++++++++++++++++++checkAndSelfUpdate: starting update check (currentVersion=%s)", cfg.CurrentVersion)
+	logger.Debug("checkAndSelfUpdate: starting update check (currentVersion=%s)", cfg.CurrentVersion)
 
 	if isOfficialContainer() {
 		logger.Debug("checkAndSelfUpdate: running inside official container, skipping auto-update")
@@ -278,6 +278,15 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 	logger.Debug("checkAndSelfUpdate: replacing binary at %s", exePath)
 	if err := os.Rename(tmpPath, exePath); err != nil {
 		return fmt.Errorf("failed to replace binary (you may need to run as root): %w", err)
+	}
+
+	systemSubstrate := os.Getenv("NEWT_SYSTEM_SUBSTRATE")
+	logger.Debug("checkAndSelfUpdate: system substrate: %s", systemSubstrate)
+	if systemSubstrate == "ADVANTECH_ROUTER_APP" {
+		pidFile := os.Getenv("NEWT_PID_FILE")
+		if err := postUpdateAdvantech(verResp.Data.LatestVersion, pidFile); err != nil {
+			logger.Debug("checkAndSelfUpdate: advantech post-update steps failed: %v", err)
+		}
 	}
 
 	// --- Step 4: Re-exec ---

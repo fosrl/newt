@@ -29,7 +29,7 @@ COPY entrypoint.sh /
 
 # Marks this as an official Fossorial container image.
 # Auto-update is disabled in official images — update by pulling a new image tag.
-ENV NEWT_OFFICIAL_CONTAINER=true
+ENV NEWT_SYSTEM_SUBSTRATE="CONTAINER"
 
 # Admin/metrics endpoint (Prometheus scrape)
 EXPOSE 2112
