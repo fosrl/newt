@@ -14,12 +14,13 @@ body:
           label: Environment
           description: Please fill out the relevant details below for your environment.
           value: |
-              - OS Type & Version: (e.g., Ubuntu 22.04)
+              - OS Type & Version:
               - Pangolin Version:
+              - Edition (Community or Enterprise):
               - Gerbil Version:
               - Traefik Version:
               - Newt Version:
-              - Olm Version: (if applicable)
+              - Client Version:
       validations:
           required: true
 
