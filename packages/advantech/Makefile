@@ -7,11 +7,12 @@ PLATFORM    ?= v4
 arch_v4  := arm64
 arch_v4i := arm64
 arch_v3  := arm32
+arch_v2  := arm32
 arch_v2i := arm32
 
 NEWT_ARCH := $(arch_$(PLATFORM))
 ifeq ($(NEWT_ARCH),)
-$(error Unknown platform '$(PLATFORM)'. Supported: v4, v4i, v3, v2i)
+$(error Unknown platform '$(PLATFORM)'. Supported: v4, v4i, v3, v2, v2i)
 endif
 
 BINARY   := newt_linux_$(NEWT_ARCH)

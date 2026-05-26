@@ -897,6 +897,20 @@ jobs:
           set -euo pipefail
           make -j 10 go-build-release VERSION="${TAG}"
 
+      - name: Build Advantech packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          ADVANTECH_DIR="packages/advantech"
+
+          mkdir -p "${ADVANTECH_DIR}/bin"
+          install -m 0755 "bin/newt_linux_arm64" "${ADVANTECH_DIR}/bin/newt_linux_arm64"
+          install -m 0755 "bin/newt_linux_arm32" "${ADVANTECH_DIR}/bin/newt_linux_arm32"
+
+          for platform in v2 v2i v3 v4 v4i; do
+            make -C "${ADVANTECH_DIR}" PLATFORM="${platform}"
+          done
+
       - name: Create GitHub Release (draft)
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
@@ -905,6 +919,7 @@ jobs:
           prerelease: ${{ env.IS_RC == 'true' }}
           files: |
             bin/*
+            packages/advantech/*.tgz
           fail_on_unmatched_files: true
           draft: true
           body: |
