@@ -172,6 +172,11 @@ func (c *Client) GetConfig() *Config {
 	return c.config
 }
 
+// GetConfigFilePath returns the resolved path to the config file used by this client.
+func (c *Client) GetConfigFilePath() string {
+	return getConfigPath(c.clientType, c.configFilePath)
+}
+
 func (c *Client) GetServerVersion() string {
 	return c.serverVersion
 }

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fosrl/newt/bind"
@@ -114,6 +115,9 @@ type WireGuardService struct {
 	netstackListener   net.PacketConn
 	netstackListenerMu sync.Mutex
 	wgTesterServer     *wgtester.Server
+
+	// connection blocking: when true, all new incoming connections are dropped
+	blocked atomic.Bool
 }
 
 // generateChainId generates a random chain ID for deduplicating round-trip messages.
@@ -284,6 +288,21 @@ func (s *WireGuardService) IsReady() bool {
 // GetPublicKey returns the public key of this WireGuard service
 func (s *WireGuardService) GetPublicKey() wgtypes.Key {
 	return s.key.PublicKey()
+}
+
+// SetBlocked enables or disables connection blocking for this WireGuard service.
+// The state is persisted and applied immediately to any active proxy handler.
+func (s *WireGuardService) SetBlocked(v bool) {
+	s.blocked.Store(v)
+	s.mu.Lock()
+	tnet := s.tnet
+	s.mu.Unlock()
+	if tnet == nil {
+		return
+	}
+	if ph := tnet.GetProxyHandler(); ph != nil {
+		ph.SetBlocked(v)
+	}
 }
 
 // SetOnNetstackReady sets a callback function to be called when the netstack interface is ready
@@ -891,6 +910,14 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 	}
 
 	// Note: we already unlocked above, so don't use defer unlock
+
+	// Apply any pending blocked state to the newly created proxy handler
+	if s.blocked.Load() {
+		if ph := s.tnet.GetProxyHandler(); ph != nil {
+			ph.SetBlocked(true)
+		}
+	}
+
 	return nil
 }
 

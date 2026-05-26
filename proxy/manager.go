@@ -70,6 +70,9 @@ type ProxyManager struct {
 	asyncBytes      bool
 	flushStop       chan struct{}
 	udpIdleTimeout  time.Duration
+
+	// connection blocking
+	blocked atomic.Bool
 }
 
 // tunnelEntry holds per-tunnel attributes and (optional) async counters.
@@ -149,12 +152,12 @@ func classifyProxyError(err error) string {
 // NewProxyManager creates a new proxy manager instance
 func NewProxyManager(tnet *netstack.Net) *ProxyManager {
 	return &ProxyManager{
-		tnet:       tnet,
-		tcpTargets: make(map[string]map[int]string),
-		udpTargets: make(map[string]map[int]string),
-		listeners:  make([]*gonet.TCPListener, 0),
-		udpConns:   make([]*gonet.UDPConn, 0),
-		tunnels:    make(map[string]*tunnelEntry),
+		tnet:           tnet,
+		tcpTargets:     make(map[string]map[int]string),
+		udpTargets:     make(map[string]map[int]string),
+		listeners:      make([]*gonet.TCPListener, 0),
+		udpConns:       make([]*gonet.UDPConn, 0),
+		tunnels:        make(map[string]*tunnelEntry),
 		udpIdleTimeout: defaultUDPIdleTimeout,
 	}
 }
@@ -229,10 +232,10 @@ func (pm *ProxyManager) ClearTunnelID() {
 // init function without tnet
 func NewProxyManagerWithoutTNet() *ProxyManager {
 	return &ProxyManager{
-		tcpTargets: make(map[string]map[int]string),
-		udpTargets: make(map[string]map[int]string),
-		listeners:  make([]*gonet.TCPListener, 0),
-		udpConns:   make([]*gonet.UDPConn, 0),
+		tcpTargets:     make(map[string]map[int]string),
+		udpTargets:     make(map[string]map[int]string),
+		listeners:      make([]*gonet.TCPListener, 0),
+		udpConns:       make([]*gonet.UDPConn, 0),
 		udpIdleTimeout: defaultUDPIdleTimeout,
 	}
 }
@@ -242,6 +245,18 @@ func (pm *ProxyManager) SetTNet(tnet *netstack.Net) {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
 	pm.tnet = tnet
+}
+
+// SetBlocked enables or disables connection blocking.
+// When enabled, all new incoming TCP connections are immediately closed
+// and all incoming UDP packets are silently dropped.
+func (pm *ProxyManager) SetBlocked(v bool) {
+	pm.blocked.Store(v)
+	if v {
+		logger.Info("ProxyManager: connection blocking enabled, new connections will be dropped")
+	} else {
+		logger.Info("ProxyManager: connection blocking disabled, accepting connections")
+	}
 }
 
 // AddTarget adds as new target for proxying
@@ -535,6 +550,12 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 		}
 
 		tunnelID := pm.currentTunnelID
+		// Drop connection if blocking is enabled
+		if pm.blocked.Load() {
+			conn.Close()
+			logger.Debug("TCP proxy: connection dropped (blocking enabled)")
+			continue
+		}
 		telemetry.IncProxyAccept(context.Background(), tunnelID, "tcp", "success", "")
 		telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "tcp", telemetry.ProxyConnectionOpened)
 		if tunnelID != "" {
@@ -631,6 +652,11 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 		}
 
 		clientKey := remoteAddr.String()
+		// Drop packet if blocking is enabled
+		if pm.blocked.Load() {
+			logger.Debug("UDP proxy: packet dropped (blocking enabled)")
+			continue
+		}
 		// bytes from client -> target (direction=in)
 		if pm.currentTunnelID != "" && n > 0 {
 			if pm.asyncBytes {

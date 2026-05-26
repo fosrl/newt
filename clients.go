@@ -63,6 +63,13 @@ func closeClients() {
 	}
 }
 
+// setClientsBlocked enables or disables connection blocking on the WireGuard service.
+func setClientsBlocked(v bool) {
+	if wgService != nil {
+		wgService.SetBlocked(v)
+	}
+}
+
 func clientsHandleNewtConnection(publicKey string, endpoint string, relayPort uint16) {
 	if !ready {
 		return
