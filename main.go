@@ -1959,10 +1959,24 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 					continue
 				}
 				oldCfg := client.GetConfig()
-				// If credentials changed, exit so the supervisor can restart with new values
+				// If credentials changed, clean up and re-exec ourselves with the same args
 				if newCfg.Endpoint != oldCfg.Endpoint || newCfg.ID != oldCfg.ID || newCfg.Secret != oldCfg.Secret {
-					logger.Info("Config credentials changed (endpoint/id/secret), exiting for supervisor restart...")
-					os.Exit(0)
+					logger.Info("Config credentials changed (endpoint/id/secret), restarting...")
+					closeWgTunnel()
+					closeClients()
+					if healthMonitor != nil {
+						healthMonitor.Stop()
+					}
+					client.Close()
+					exe, exeErr := os.Executable()
+					if exeErr != nil {
+						logger.Error("Failed to get executable path for restart: %v", exeErr)
+						os.Exit(0)
+					}
+					if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
+						logger.Error("Failed to re-exec for restart: %v", err)
+						os.Exit(1)
+					}
 				}
 				// If blocked state changed, apply in-place without restart
 				if newCfg.Blocked != connectionBlocked.Load() {
