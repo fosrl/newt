@@ -7,6 +7,7 @@ type Config struct {
 	TlsClientCert   string `json:"tlsClientCert"`
 	ProvisioningKey string `json:"provisioningKey,omitempty"`
 	Name            string `json:"name,omitempty"`
+	Blocked         bool   `json:"blocked,omitempty"`
 }
 
 type TokenResponse struct {

@@ -1,8 +1,3 @@
-/* SPDX-License-Identifier: MIT
- *
- * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
- */
-
 package netstack2
 
 import (
@@ -143,6 +138,13 @@ func (h *TCPHandler) handleTCPConn(netstackConn *gonet.TCPConn, id stack.Transpo
 	srcPort := id.RemotePort
 	dstIP := id.LocalAddress.String()
 	dstPort := id.LocalPort
+
+	// Drop connection if blocking is enabled
+	if h.proxyHandler != nil && h.proxyHandler.IsBlocked() {
+		logger.Debug("TCP Forwarder: connection blocked: %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
+		netstackConn.Close()
+		return
+	}
 
 	// For HTTP/HTTPS ports, look up the matching subnet rule. If the rule has
 	// Protocol configured, hand the connection off to the HTTP handler which
@@ -314,6 +316,12 @@ func (h *UDPHandler) handleUDPConn(netstackConn *gonet.UDPConn, id stack.Transpo
 	dstPort := id.LocalPort
 
 	logger.Info("UDP Forwarder: Handling connection %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
+
+	// Drop connection if blocking is enabled
+	if h.proxyHandler != nil && h.proxyHandler.IsBlocked() {
+		logger.Debug("UDP Forwarder: connection blocked: %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
+		return
+	}
 
 	// Check if there's a destination rewrite for this connection (e.g., localhost targets)
 	actualDstIP := dstIP

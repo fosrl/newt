@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -736,9 +737,18 @@ func runNewtMain(ctx context.Context) {
 	var connected bool
 	var wgData WgData
 	var dockerEventMonitor *docker.EventMonitor
+	var connectionBlocked atomic.Bool
+	var currentPM atomic.Pointer[proxy.ProxyManager]
 
 	if !disableClients {
 		setupClients(client)
+	}
+
+	// Initialize connection blocked state from config
+	connectionBlocked.Store(client.GetConfig().Blocked)
+	if connectionBlocked.Load() {
+		logger.Info("Connection blocking is enabled (from config)")
+		setClientsBlocked(true)
 	}
 
 	// Initialize health check monitor with status change callback
@@ -780,6 +790,7 @@ func runNewtMain(ctx context.Context) {
 		// Stop proxy manager if running
 		if pm != nil {
 			pm.Stop()
+			currentPM.Store(nil)
 			pm = nil
 		}
 
@@ -950,6 +961,8 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		pm.SetUDPIdleTimeout(udpProxyIdleTimeout)
 		// Set tunnel_id for metrics (WireGuard peer public key)
 		pm.SetTunnelID(wgData.PublicKey)
+		pm.SetBlocked(connectionBlocked.Load())
+		currentPM.Store(pm)
 
 		connected = true
 
@@ -1924,6 +1937,53 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 		return nil
 	})
+
+	// Handle SIGHUP for config reload
+	sighupChan := make(chan os.Signal, 1)
+	signal.Notify(sighupChan, syscall.SIGHUP)
+	go func() {
+		defer signal.Stop(sighupChan)
+		for {
+			select {
+			case <-sighupChan:
+				logger.Info("SIGHUP received, reloading config...")
+				cfgPath := client.GetConfigFilePath()
+				data, err := os.ReadFile(cfgPath)
+				if err != nil {
+					logger.Error("Failed to read config file on SIGHUP: %v", err)
+					continue
+				}
+				var newCfg websocket.Config
+				if err := json.Unmarshal(data, &newCfg); err != nil {
+					logger.Error("Failed to parse config file on SIGHUP: %v", err)
+					continue
+				}
+				oldCfg := client.GetConfig()
+				// If credentials changed, exit so the supervisor can restart with new values
+				if newCfg.Endpoint != oldCfg.Endpoint || newCfg.ID != oldCfg.ID || newCfg.Secret != oldCfg.Secret {
+					logger.Info("Config credentials changed (endpoint/id/secret), exiting for supervisor restart...")
+					os.Exit(0)
+				}
+				// If blocked state changed, apply in-place without restart
+				if newCfg.Blocked != connectionBlocked.Load() {
+					connectionBlocked.Store(newCfg.Blocked)
+					if newCfg.Blocked {
+						logger.Info("Config reload: connection blocking enabled")
+					} else {
+						logger.Info("Config reload: connection blocking disabled")
+					}
+					if p := currentPM.Load(); p != nil {
+						p.SetBlocked(newCfg.Blocked)
+					}
+					setClientsBlocked(newCfg.Blocked)
+				} else {
+					logger.Info("Config reload: no relevant changes detected")
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	// Connect to the WebSocket server
 	if err := client.Connect(); err != nil {

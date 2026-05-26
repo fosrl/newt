@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fosrl/newt/logger"
@@ -134,6 +135,7 @@ type ProxyHandler struct {
 	notifiable        channel.Notification // Notification handler for triggering reads
 	accessLogger      *AccessLogger        // Access logger for tracking sessions
 	httpRequestLogger *HTTPRequestLogger   // HTTP request logger for proxied HTTP/HTTPS requests
+	blocked           atomic.Bool          // when true, all new connections are dropped
 }
 
 // ProxyHandlerOptions configures the proxy handler
@@ -238,6 +240,28 @@ func (p *ProxyHandler) AddSubnetRule(rule SubnetRule) {
 		return
 	}
 	p.subnetLookup.AddSubnet(rule)
+}
+
+// SetBlocked enables or disables connection blocking on this proxy handler.
+// When enabled, all new TCP/UDP connections from the tunnel are dropped immediately.
+func (p *ProxyHandler) SetBlocked(v bool) {
+	if p == nil {
+		return
+	}
+	p.blocked.Store(v)
+	if v {
+		logger.Info("ProxyHandler: connection blocking enabled")
+	} else {
+		logger.Info("ProxyHandler: connection blocking disabled")
+	}
+}
+
+// IsBlocked returns true if connection blocking is currently enabled.
+func (p *ProxyHandler) IsBlocked() bool {
+	if p == nil {
+		return false
+	}
+	return p.blocked.Load()
 }
 
 // RemoveSubnetRule removes a subnet from the proxy handler
@@ -612,7 +636,7 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 	}
 
 	// logger.Debug("HandleIncomingPacket: No matching rule for %s -> %s (proto=%d, port=%d)",
-		// srcAddr, dstAddr, protocol, dstPort)
+	// srcAddr, dstAddr, protocol, dstPort)
 	return false
 }
 
