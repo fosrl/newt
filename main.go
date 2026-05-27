@@ -1032,6 +1032,19 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		logger.Info("Tunnel destroyed, ready for reconnection")
 	})
 
+	client.RegisterHandler("newt/wg/restart", func(msg websocket.WSMessage) {
+		closeWgTunnel()
+		closeClients()
+		if healthMonitor != nil {
+			healthMonitor.Stop()
+		}
+		client.Close()
+		if err := reexec(); err != nil {
+			logger.Error("Failed to restart: %v", err)
+			os.Exit(1)
+		}
+	})
+
 	client.RegisterHandler("newt/wg/terminate", func(msg websocket.WSMessage) {
 		logger.Info("Received termination message")
 		if wgData.PublicKey != "" {
@@ -1968,13 +1981,8 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 						healthMonitor.Stop()
 					}
 					client.Close()
-					exe, exeErr := os.Executable()
-					if exeErr != nil {
-						logger.Error("Failed to get executable path for restart: %v", exeErr)
-						os.Exit(0)
-					}
-					if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
-						logger.Error("Failed to re-exec for restart: %v", err)
+					if err := reexec(); err != nil {
+						logger.Error("Failed to restart: %v", err)
 						os.Exit(1)
 					}
 				}
