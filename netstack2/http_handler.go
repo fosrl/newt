@@ -310,6 +310,13 @@ func (h *HTTPHandler) getProxy(target HTTPTarget) *httputil.ReverseProxy {
 			// Director means the proxy does not append its own automatic
 			// X-Forwarded-For entry, so the header is set exactly once.
 			pr.SetXForwarded()
+
+			// SetXForwarded derives X-Forwarded-Proto from pr.In.TLS,
+			// which is nil because httpConnCtx wraps *tls.Conn behind
+			// net.Conn. Override using the context flag set by ConnContext.
+			if isTLS, _ := pr.In.Context().Value(connTLSKey{}).(bool); isTLS {
+				pr.Out.Header.Set("X-Forwarded-Proto", "https")
+			}
 		},
 		Transport: transport,
 	}
