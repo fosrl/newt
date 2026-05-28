@@ -3,10 +3,13 @@ module github.com/fosrl/newt
 go 1.25.0
 
 require (
+	github.com/coder/websocket v1.8.14
+	github.com/creack/pty v1.1.24
 	github.com/gaissmai/bart v0.26.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/moby/moby/api v1.54.2
 	github.com/moby/moby/client v0.4.1
+	github.com/msteinert/pam/v2 v2.1.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/vishvananda/netlink v1.3.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0

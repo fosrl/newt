@@ -19,7 +19,7 @@ func (s *Server) ProcessConnection(req ConnectionRequest) {
 	if err := ensureUser(req.Username, req.Metadata, s.cfg.GenerateRandomPassword); err != nil {
 		logger.Warn("auth-daemon: ensure user: %v", err)
 	}
-	if cfg.PrincipalsFilePath != "" {
+	if cfg.PrincipalsFilePath != "" && req.NiceId != "" {
 		if err := writePrincipals(cfg.PrincipalsFilePath, req.Username, req.NiceId); err != nil {
 			logger.Warn("auth-daemon: write principals: %v", err)
 		}
