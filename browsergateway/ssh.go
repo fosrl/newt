@@ -2,7 +2,6 @@ package browsergateway
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/fosrl/newt/logger"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -36,11 +36,14 @@ type sshServerMsg struct {
 
 // HandleSSH is an http.HandlerFunc for SSH-over-WebSocket connections.
 func (g *Gateway) HandleSSH(w http.ResponseWriter, r *http.Request) {
+	logger.Debug("SSH connection request from %s", r.RemoteAddr)
 	ctx := r.Context()
 
 	token := r.URL.Query().Get("authToken")
 
-	var nativeSSH = false
+	// "mode=native" (default) connects to the local SSH daemon on this host.
+	// "mode=proxy" connects to an arbitrary host+port supplied in query params.
+	nativeSSH := r.URL.Query().Get("mode") != "proxy"
 
 	// In proxy mode we also need host + username from query params.
 	var target, username string
@@ -62,8 +65,8 @@ func (g *Gateway) HandleSSH(w http.ResponseWriter, r *http.Request) {
 		}
 		target = net.JoinHostPort(host, port)
 	} else {
-		// Native SSH mode: validate the gateway token then read the target username.
-		if subtle.ConstantTimeCompare([]byte(token), []byte(g.authToken)) != 1 {
+		// Native SSH mode: validate the token against any registered ssh target.
+		if !g.isTokenValid("ssh", token) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

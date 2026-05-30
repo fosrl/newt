@@ -3,6 +3,7 @@ package nativessh
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -58,19 +59,31 @@ func SystemUserExists(username string) bool {
 //
 // Returns nil on the first method that succeeds, or an error if all fail.
 func Authenticate(username, password, privateKeyPEM string) error {
+	log.Printf("nativessh: authenticating user %q (hasPassword=%v, hasPrivateKey=%v)", username, password != "", privateKeyPEM != "")
 	if !SystemUserExists(username) {
+		log.Printf("nativessh: user %q not found on system", username)
 		return fmt.Errorf("user %q does not exist", username)
 	}
 	if privateKeyPEM != "" {
 		signer, err := ssh.ParsePrivateKey([]byte(privateKeyPEM))
-		if err == nil && CheckAuthorizedKeys(username, signer.PublicKey()) {
+		if err != nil {
+			log.Printf("nativessh: failed to parse private key for %q: %v", username, err)
+		} else if CheckAuthorizedKeys(username, signer.PublicKey()) {
+			log.Printf("nativessh: private key auth succeeded for %q", username)
 			return nil
+		} else {
+			log.Printf("nativessh: private key not in authorized_keys for %q", username)
 		}
 	}
 	if password != "" {
-		if err := VerifySystemPassword(username, password); err == nil {
+		if err := VerifySystemPassword(username, password); err != nil {
+			log.Printf("nativessh: password auth failed for %q: %v", username, err)
+		} else {
+			log.Printf("nativessh: password auth succeeded for %q", username)
 			return nil
 		}
+	} else {
+		log.Printf("nativessh: no password provided for %q", username)
 	}
 	return fmt.Errorf("authentication failed for user %q", username)
 }
