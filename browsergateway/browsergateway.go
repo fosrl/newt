@@ -96,6 +96,22 @@ func (g *Gateway) isAllowed(targetType, host string, port int, authToken string)
 	return false
 }
 
+// isTokenValid reports whether the given authToken matches any registered
+// target of the specified type. Used for native SSH mode where there is no
+// external destination to match against.
+func (g *Gateway) isTokenValid(targetType, authToken string) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	for _, t := range g.targets {
+		if t.Type == targetType {
+			if subtle.ConstantTimeCompare([]byte(authToken), []byte(t.AuthToken)) == 1 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Start serves the browser gateway HTTP server on the provided listener.
 // It returns nil when the listener is closed (normal shutdown).
 func (g *Gateway) Start(ln net.Listener) error {

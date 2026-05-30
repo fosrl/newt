@@ -534,7 +534,7 @@ func runNewtMain(ctx context.Context) {
 	// Start auth daemon if enabled
 	if !disableSSH {
 		if err := startAuthDaemon(ctx); err != nil {
-			logger.Fatal("Failed to start auth daemon: %v", err)
+			logger.Warn("Did not start on site auth daemon: %v", err)
 		}
 	}
 
