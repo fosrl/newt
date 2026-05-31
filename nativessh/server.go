@@ -159,13 +159,13 @@ func (s *Server) handleConn(conn net.Conn, cfg *ssh.ServerConfig) {
 			log.Printf("nativessh: channel accept error: %v", err)
 			return
 		}
-		go s.handleSession(ch, requests)
+		go s.handleSession(ch, requests, sshConn.User())
 	}
 }
 
 // handleSession drives a single SSH session channel. It waits for a pty-req
 // followed by a shell request and then bridges the PTY to the channel.
-func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request) {
+func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request, username string) {
 	defer ch.Close()
 
 	var (
@@ -178,7 +178,7 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request) {
 		case "pty-req":
 			var err error
 			if sess == nil {
-				sess, err = NewPTYSession()
+				sess, err = NewPTYSessionAs(username)
 				if err != nil {
 					log.Printf("nativessh: PTY start error: %v", err)
 					if req.WantReply {
