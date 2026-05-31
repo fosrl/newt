@@ -4,6 +4,7 @@ package nativessh
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"os/user"
 	"strconv"
@@ -42,7 +43,15 @@ func NewPTYSessionAs(username string) (*PTYSession, error) {
 		}
 	}
 
-	shell := findShell()
+	shell := userShell(u)
+
+	// Prefer the user's home directory as the working directory, but fall back
+	// to / if it does not exist (e.g. useradd was run without -m).
+	homeDir := u.HomeDir
+	if _, err := os.Stat(homeDir); err != nil {
+		homeDir = "/"
+	}
+
 	cmd := exec.Command(shell, "--login")
 	cmd.Env = []string{
 		"TERM=xterm-256color",
@@ -52,7 +61,7 @@ func NewPTYSessionAs(username string) (*PTYSession, error) {
 		"SHELL=" + shell,
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 	}
-	cmd.Dir = u.HomeDir
+	cmd.Dir = homeDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{
 			Uid:    uint32(uid),

@@ -1,10 +1,13 @@
 package nativessh
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
+	"strings"
 	"sync"
 
 	"github.com/creack/pty"
@@ -29,6 +32,42 @@ func findShell() string {
 		}
 	}
 	return "/bin/sh"
+}
+
+// userShell returns the login shell configured for u in /etc/passwd.
+// If the field is empty or the binary does not exist, it falls back to
+// findShell so there is always a usable shell.
+func userShell(u *user.User) string {
+	if shell := passwdShell(u.Username); shell != "" {
+		if _, err := exec.LookPath(shell); err == nil {
+			return shell
+		}
+	}
+	return findShell()
+}
+
+// passwdShell reads /etc/passwd and returns the login shell for the named user.
+// Returns "" if the user is not found or the file cannot be read.
+func passwdShell(username string) string {
+	f, err := os.Open("/etc/passwd")
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		// Fields: username:password:uid:gid:gecos:home:shell
+		fields := strings.SplitN(line, ":", 7)
+		if len(fields) == 7 && fields[0] == username {
+			return fields[6]
+		}
+	}
+	_ = scanner.Err()
+	return ""
 }
 
 // NewPTYSession spawns the best available shell in a PTY.
