@@ -21,6 +21,14 @@ type CredentialStore struct {
 	principals map[string]map[string]struct{} // username -> set of allowed principals
 }
 
+// connMetaWithUser wraps ConnMetadata while overriding User() for cert checks.
+type connMetaWithUser struct {
+	ssh.ConnMetadata
+	user string
+}
+
+func (m connMetaWithUser) User() string { return m.user }
+
 // NewCredentialStore returns an empty, ready-to-use CredentialStore.
 func NewCredentialStore() *CredentialStore {
 	return &CredentialStore{
@@ -267,13 +275,23 @@ func makePublicKeyCallback(store *CredentialStore) func(ssh.ConnMetadata, ssh.Pu
 						return ssh.FingerprintSHA256(auth) == ssh.FingerprintSHA256(caKey)
 					},
 				}
-				perms, err := checker.Authenticate(meta, key)
-				if err == nil {
-					if len(userPrincipals) == 0 {
-						return nil, fmt.Errorf("user %q not in allowed principals list", meta.User())
+
+				if len(userPrincipals) == 0 {
+					return nil, fmt.Errorf("user %q not in allowed principals list", meta.User())
+				}
+
+				var lastErr error
+				for principal := range userPrincipals {
+					perms, err := checker.Authenticate(connMetaWithUser{ConnMetadata: meta, user: principal}, key)
+					if err == nil {
+						log.Printf("nativessh: CA cert auth for user %q principal=%q", meta.User(), principal)
+						return perms, nil
 					}
-					log.Printf("nativessh: CA cert auth for user %q", meta.User())
-					return perms, nil
+					lastErr = err
+				}
+
+				if lastErr != nil {
+					log.Printf("nativessh: CA cert rejected for user %q: %v", meta.User(), lastErr)
 				}
 			}
 		}
