@@ -1483,10 +1483,6 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			"containers": containers,
 		})
 		if err != nil {
-			logger.Error("Failed to send registration message: %v", err)
-		}
-
-		if err != nil {
 			logger.Error("Failed to send Docker container list: %v", err)
 		} else {
 			logger.Debug("Docker container list sent, count: %d", len(containers))
