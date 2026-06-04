@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -38,7 +37,7 @@ func getConfigPath(clientType string, overridePath string) string {
 		}
 
 		if err := os.MkdirAll(configDir, 0755); err != nil {
-			log.Printf("Failed to create config directory: %v", err)
+			logger.Debug("Failed to create config directory: %v", err)
 		}
 
 		return filepath.Join(configDir, "config.json")

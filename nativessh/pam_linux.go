@@ -7,10 +7,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
+	"github.com/fosrl/newt/logger"
 	"github.com/go-crypt/crypt"
 	"github.com/go-crypt/x/yescrypt"
 )
@@ -21,7 +21,7 @@ import (
 func VerifySystemPassword(username, password string) error {
 	hash, err := readShadowHash(username)
 	if err != nil {
-		log.Printf("nativessh/pam: readShadowHash for %q failed: %v", username, err)
+		logger.Debug("nativessh/pam: readShadowHash for %q failed: %v", username, err)
 		return fmt.Errorf("shadow: %w", err)
 	}
 
@@ -33,17 +33,17 @@ func VerifySystemPassword(username, password string) error {
 			break
 		}
 	}
-	log.Printf("nativessh/pam: verifying password for %q using scheme %s", username, scheme)
+	logger.Debug("nativessh/pam: verifying password for %q using scheme %s", username, scheme)
 
 	// Yescrypt ($y$) is not in go-crypt/crypt's default decoder; handle it directly.
 	if strings.HasPrefix(hash, "$y$") {
 		computed, err := yescrypt.Hash([]byte(password), []byte(hash))
 		if err != nil {
-			log.Printf("nativessh/pam: yescrypt.Hash for %q failed: %v", username, err)
+			logger.Debug("nativessh/pam: yescrypt.Hash for %q failed: %v", username, err)
 			return fmt.Errorf("yescrypt: %w", err)
 		}
 		if !bytes.Equal(computed, []byte(hash)) {
-			log.Printf("nativessh/pam: yescrypt mismatch for %q", username)
+			logger.Debug("nativessh/pam: yescrypt mismatch for %q", username)
 			return errors.New("authentication failed")
 		}
 		return nil
@@ -56,17 +56,17 @@ func VerifySystemPassword(username, password string) error {
 
 	digest, err := decoder.Decode(hash)
 	if err != nil {
-		log.Printf("nativessh/pam: failed to decode hash for %q: %v", username, err)
+		logger.Debug("nativessh/pam: failed to decode hash for %q: %v", username, err)
 		return fmt.Errorf("unsupported password hash scheme %q: %w", scheme, err)
 	}
 
 	match, err := digest.MatchAdvanced(password)
 	if err != nil {
-		log.Printf("nativessh/pam: MatchAdvanced for %q failed: %v", username, err)
+		logger.Debug("nativessh/pam: MatchAdvanced for %q failed: %v", username, err)
 		return err
 	}
 	if !match {
-		log.Printf("nativessh/pam: password mismatch for %q", username)
+		logger.Debug("nativessh/pam: password mismatch for %q", username)
 		return errors.New("authentication failed")
 	}
 	return nil
