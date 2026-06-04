@@ -1,0 +1,124 @@
+#!/bin/sh
+
+MODNAME=newt
+PIDFILE=/tmp/newt.pid
+LOGFILE=/tmp/newt.log
+
+set_setting_raw() {
+    key="$1"
+    value="$2"
+    [ -f "/opt/$MODNAME/etc/settings" ] || cp "/opt/$MODNAME/etc/defaults" "/opt/$MODNAME/etc/settings" 2>/dev/null
+    awk -v k="$key" -v v="$value" '
+        BEGIN { done=0 }
+        index($0, k "=") == 1 { print k "=" v; done=1; next }
+        { print }
+        END { if (!done) print k "=" v }
+    ' "/opt/$MODNAME/etc/settings" > "/tmp/${MODNAME}.settings.tmp" && mv "/tmp/${MODNAME}.settings.tmp" "/opt/$MODNAME/etc/settings"
+}
+
+/usr/bin/logger -t $MODNAME "DEBUG: $0 $@"
+
+case "$1" in
+    start)
+        . /opt/$MODNAME/etc/settings
+        if [ "$MOD_PANGOLIN_SITE_ENABLED" != "1" ]; then
+            echo "$MODNAME is disabled in settings, skipping start"
+            exit 0
+        fi
+        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+            echo "$MODNAME is already running (PID: $(cat "$PIDFILE"))"
+            exit 0
+        fi
+
+        # Starting newt implies enable at boot.
+        set_setting_raw "MOD_PANGOLIN_SITE_ENABLED" "1"
+
+        # Map module settings to Newt environment variables.
+        [ -n "$MOD_PANGOLIN_SITE_ENDPOINT" ] && export PANGOLIN_ENDPOINT="$MOD_PANGOLIN_SITE_ENDPOINT"
+        [ -n "$MOD_PANGOLIN_SITE_ID" ] && export NEWT_ID="$MOD_PANGOLIN_SITE_ID"
+        [ -n "$MOD_PANGOLIN_SITE_SECRET" ] && export NEWT_SECRET="$MOD_PANGOLIN_SITE_SECRET"
+        [ -n "$MOD_PANGOLIN_SITE_MTU" ] && export MTU="$MOD_PANGOLIN_SITE_MTU"
+        [ -n "$MOD_PANGOLIN_SITE_DNS" ] && export DNS="$MOD_PANGOLIN_SITE_DNS"
+        [ -n "$MOD_PANGOLIN_SITE_LOG_LEVEL" ] && export LOG_LEVEL="$MOD_PANGOLIN_SITE_LOG_LEVEL"
+        [ -n "$MOD_PANGOLIN_SITE_UPDOWN_SCRIPT" ] && export UPDOWN_SCRIPT="$MOD_PANGOLIN_SITE_UPDOWN_SCRIPT"
+        [ -n "$MOD_PANGOLIN_SITE_INTERFACE" ] && export INTERFACE="$MOD_PANGOLIN_SITE_INTERFACE"
+        [ -n "$MOD_PANGOLIN_SITE_PORT" ] && export PORT="$MOD_PANGOLIN_SITE_PORT"
+        [ -n "$MOD_PANGOLIN_SITE_DISABLE_CLIENTS" ] && export DISABLE_CLIENTS="$MOD_PANGOLIN_SITE_DISABLE_CLIENTS"
+        [ -n "$MOD_PANGOLIN_SITE_USE_NATIVE_INTERFACE" ] && export USE_NATIVE_INTERFACE="$MOD_PANGOLIN_SITE_USE_NATIVE_INTERFACE"
+        [ -n "$MOD_PANGOLIN_SITE_ENFORCE_HC_CERT" ] && export ENFORCE_HC_CERT="$MOD_PANGOLIN_SITE_ENFORCE_HC_CERT"
+        [ -n "$MOD_PANGOLIN_SITE_DOCKER_SOCKET" ] && export DOCKER_SOCKET="$MOD_PANGOLIN_SITE_DOCKER_SOCKET"
+        [ -n "$MOD_PANGOLIN_SITE_PING_INTERVAL" ] && export PING_INTERVAL="$MOD_PANGOLIN_SITE_PING_INTERVAL"
+        [ -n "$MOD_PANGOLIN_SITE_PING_TIMEOUT" ] && export PING_TIMEOUT="$MOD_PANGOLIN_SITE_PING_TIMEOUT"
+        [ -n "$MOD_PANGOLIN_SITE_UDP_PROXY_IDLE_TIMEOUT" ] && export NEWT_UDP_PROXY_IDLE_TIMEOUT="$MOD_PANGOLIN_SITE_UDP_PROXY_IDLE_TIMEOUT"
+        [ -n "$MOD_PANGOLIN_SITE_DOCKER_ENFORCE_NETWORK_VALIDATION" ] && export DOCKER_ENFORCE_NETWORK_VALIDATION="$MOD_PANGOLIN_SITE_DOCKER_ENFORCE_NETWORK_VALIDATION"
+        [ -n "$MOD_PANGOLIN_SITE_HEALTH_FILE" ] && export HEALTH_FILE="$MOD_PANGOLIN_SITE_HEALTH_FILE"
+        [ -n "$MOD_PANGOLIN_SITE_AUTH_DAEMON_ENABLED" ] && export AUTH_DAEMON_ENABLED="$MOD_PANGOLIN_SITE_AUTH_DAEMON_ENABLED"
+        [ -n "$MOD_PANGOLIN_SITE_AD_GENERATE_RANDOM_PASSWORD" ] && export AD_GENERATE_RANDOM_PASSWORD="$MOD_PANGOLIN_SITE_AD_GENERATE_RANDOM_PASSWORD"
+        [ -n "$MOD_PANGOLIN_SITE_AD_KEY" ] && export AD_KEY="$MOD_PANGOLIN_SITE_AD_KEY"
+        [ -n "$MOD_PANGOLIN_SITE_AD_PRINCIPALS_FILE" ] && export AD_PRINCIPALS_FILE="$MOD_PANGOLIN_SITE_AD_PRINCIPALS_FILE"
+        [ -n "$MOD_PANGOLIN_SITE_AD_CA_CERT_PATH" ] && export AD_CA_CERT_PATH="$MOD_PANGOLIN_SITE_AD_CA_CERT_PATH"
+        [ -n "$MOD_PANGOLIN_SITE_METRICS_PROMETHEUS_ENABLED" ] && export NEWT_METRICS_PROMETHEUS_ENABLED="$MOD_PANGOLIN_SITE_METRICS_PROMETHEUS_ENABLED"
+        [ -n "$MOD_PANGOLIN_SITE_METRICS_OTLP_ENABLED" ] && export NEWT_METRICS_OTLP_ENABLED="$MOD_PANGOLIN_SITE_METRICS_OTLP_ENABLED"
+        [ -n "$MOD_PANGOLIN_SITE_ADMIN_ADDR" ] && export NEWT_ADMIN_ADDR="$MOD_PANGOLIN_SITE_ADMIN_ADDR"
+        [ -n "$MOD_PANGOLIN_SITE_REGION" ] && export NEWT_REGION="$MOD_PANGOLIN_SITE_REGION"
+        [ -n "$MOD_PANGOLIN_SITE_METRICS_ASYNC_BYTES" ] && export NEWT_METRICS_ASYNC_BYTES="$MOD_PANGOLIN_SITE_METRICS_ASYNC_BYTES"
+        [ -n "$MOD_PANGOLIN_SITE_PPROF_ENABLED" ] && export NEWT_PPROF_ENABLED="$MOD_PANGOLIN_SITE_PPROF_ENABLED"
+        [ -n "$MOD_PANGOLIN_SITE_TLS_CLIENT_CERT" ] && export TLS_CLIENT_CERT="$MOD_PANGOLIN_SITE_TLS_CLIENT_CERT"
+        [ -n "$MOD_PANGOLIN_SITE_TLS_CLIENT_KEY" ] && export TLS_CLIENT_KEY="$MOD_PANGOLIN_SITE_TLS_CLIENT_KEY"
+        [ -n "$MOD_PANGOLIN_SITE_TLS_CLIENT_CAS" ] && export TLS_CLIENT_CAS="$MOD_PANGOLIN_SITE_TLS_CLIENT_CAS"
+        [ -n "$MOD_PANGOLIN_SITE_TLS_CLIENT_CERT_PKCS12" ] && export TLS_CLIENT_CERT_PKCS12="$MOD_PANGOLIN_SITE_TLS_CLIENT_CERT_PKCS12"
+        [ -n "$MOD_PANGOLIN_SITE_BLUEPRINT_FILE" ] && export BLUEPRINT_FILE="$MOD_PANGOLIN_SITE_BLUEPRINT_FILE"
+        [ -n "$MOD_PANGOLIN_SITE_PROVISIONING_BLUEPRINT_FILE" ] && export PROVISIONING_BLUEPRINT_FILE="$MOD_PANGOLIN_SITE_PROVISIONING_BLUEPRINT_FILE"
+        [ -n "$MOD_PANGOLIN_SITE_NO_CLOUD" ] && export NO_CLOUD="$MOD_PANGOLIN_SITE_NO_CLOUD"
+        [ -n "$MOD_PANGOLIN_SITE_PROVISIONING_KEY" ] && export NEWT_PROVISIONING_KEY="$MOD_PANGOLIN_SITE_PROVISIONING_KEY"
+        [ -n "$MOD_PANGOLIN_SITE_NAME" ] && export NEWT_NAME="$MOD_PANGOLIN_SITE_NAME"
+        [ -n "$MOD_PANGOLIN_SITE_CONFIG_FILE" ] && export CONFIG_FILE="$MOD_PANGOLIN_SITE_CONFIG_FILE"
+
+        export NEWT_SYSTEM_SUBSTRATE="ADVANTECH_ROUTER_APP"
+        export NEWT_PID_FILE="$PIDFILE"
+
+        echo "Starting $MODNAME..."
+        if [ -n "$MOD_PANGOLIN_SITE_PREFER_ENDPOINT" ]; then
+            /opt/$MODNAME/bin/newt --prefer-endpoint "$MOD_PANGOLIN_SITE_PREFER_ENDPOINT" >> "$LOGFILE" 2>&1 &
+        else
+            /opt/$MODNAME/bin/newt >> "$LOGFILE" 2>&1 &
+        fi
+        echo $! > "$PIDFILE"
+        echo "Started $MODNAME (PID: $(cat "$PIDFILE"))"
+        exit 0
+        ;;
+    stop)
+        echo "Stopping $MODNAME..."
+        if [ -f "$PIDFILE" ]; then
+            kill "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+            rm -f "$PIDFILE"
+        fi
+        killall newt 2>/dev/null
+        # Stopping newt implies disable at boot.
+        set_setting_raw "MOD_PANGOLIN_SITE_ENABLED" "0"
+        echo "Stopped $MODNAME"
+        exit 0
+        ;;
+    restart)
+        $0 stop
+        sleep 1
+        # Restart should remain enabled after reboot.
+        set_setting_raw "MOD_PANGOLIN_SITE_ENABLED" "1"
+        $0 start
+        ;;
+    status)
+        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+            echo "$MODNAME is running (PID: $(cat "$PIDFILE"))"
+            exit 0
+        else
+            echo "$MODNAME is not running"
+            exit 1
+        fi
+        ;;
+    defaults)
+        cp /opt/$MODNAME/etc/defaults /opt/$MODNAME/etc/settings 2>/dev/null
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status|defaults}"
+        exit 1
+esac
