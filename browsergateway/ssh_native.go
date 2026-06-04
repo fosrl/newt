@@ -17,7 +17,7 @@ import (
 // The auth frame from the browser must be a JSON sshClientMsg with type="auth"
 // carrying the same password/privateKey fields used by the proxy SSH path.
 // The target username is passed in from the HTTP layer (query param).
-func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, username string) error {
+func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, username string, creds *nativessh.CredentialStore) error {
 	// Read the auth frame.
 	_, authBytes, err := ws.Read(ctx)
 	if err != nil {
@@ -29,7 +29,7 @@ func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, username str
 	}
 
 	// Authenticate using host authorized_keys or PAM password.
-	if err := nativessh.Authenticate(username, authMsg.Password, authMsg.PrivateKey); err != nil {
+	if err := nativessh.AuthenticateWithCertificate(creds, username, authMsg.Password, authMsg.PrivateKey, authMsg.Certificate); err != nil {
 		sendSSHError(ctx, ws, "Authentication failed")
 		return fmt.Errorf("auth for user %q: %w", username, err)
 	}

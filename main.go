@@ -1044,7 +1044,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				})
 			}
 
-			browserGateway = browsergateway.New(browsergateway.Config{})
+			browserGateway = browsergateway.New(browsergateway.Config{SSHCredentials: sshCredStore})
 			browserGateway.SetTargets(bgTargets)
 
 			ln, bgErr := tnet.ListenTCP(&net.TCPAddr{Port: browsergateway.ListenPort})
@@ -2024,7 +2024,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 		// If the gateway doesn't exist yet but we have a tunnel, start it
 		if browserGateway == nil && tnet != nil {
-			browserGateway = browsergateway.New(browsergateway.Config{})
+			browserGateway = browsergateway.New(browsergateway.Config{SSHCredentials: sshCredStore})
 			ln, bgErr := tnet.ListenTCP(&net.TCPAddr{Port: browsergateway.ListenPort})
 			if bgErr != nil {
 				logger.Error("Failed to start browser gateway listener: %v", bgErr)
@@ -2198,16 +2198,16 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				if newCfg.Blocked != connectionBlocked.Load() {
 					connectionBlocked.Store(newCfg.Blocked)
 					if newCfg.Blocked {
-						logger.Info("Config reload: connection blocking enabled")
+						logger.Debug("Config reload: connection blocking enabled")
 					} else {
-						logger.Info("Config reload: connection blocking disabled")
+						logger.Debug("Config reload: connection blocking disabled")
 					}
 					if p := currentPM.Load(); p != nil {
 						p.SetBlocked(newCfg.Blocked)
 					}
 					setClientsBlocked(newCfg.Blocked)
 				} else {
-					logger.Info("Config reload: no relevant changes detected")
+					logger.Debug("Config reload: no relevant changes detected")
 				}
 			case <-ctx.Done():
 				return

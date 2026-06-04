@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+
+	"github.com/fosrl/newt/nativessh"
 )
 
 // Forwarding buffer size. RDP graphics traffic is bursty and TLS records cap
@@ -36,6 +38,9 @@ type Config struct {
 	// to match against). For all proxy targets (RDP/SSH/VNC), auth tokens are
 	// stored per-Target and validated by isAllowed.
 	AuthToken string
+	// SSHCredentials are used by native SSH browser sessions for certificate
+	// validation against the in-memory CA/principal store.
+	SSHCredentials *nativessh.CredentialStore
 }
 
 // Gateway is a browser-based RDP/SSH/VNC WebSocket proxy.
@@ -43,6 +48,7 @@ type Config struct {
 // HandleRDP / HandleSSH / HandleVNC http.HandlerFunc methods.
 type Gateway struct {
 	authToken string
+	sshCreds  *nativessh.CredentialStore
 
 	mu      sync.RWMutex
 	targets map[int]Target // keyed by Target.ID
@@ -54,6 +60,7 @@ type Gateway struct {
 func New(cfg Config) *Gateway {
 	return &Gateway{
 		authToken: cfg.AuthToken,
+		sshCreds:  cfg.SSHCredentials,
 		targets:   make(map[int]Target),
 	}
 }

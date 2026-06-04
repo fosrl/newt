@@ -253,9 +253,9 @@ func (pm *ProxyManager) SetTNet(tnet *netstack.Net) {
 func (pm *ProxyManager) SetBlocked(v bool) {
 	pm.blocked.Store(v)
 	if v {
-		logger.Info("ProxyManager: connection blocking enabled, new connections will be dropped")
+		logger.Debug("ProxyManager: connection blocking enabled, new connections will be dropped")
 	} else {
-		logger.Info("ProxyManager: connection blocking disabled, accepting connections")
+		logger.Debug("ProxyManager: connection blocking disabled, accepting connections")
 	}
 }
 
