@@ -35,7 +35,7 @@
             inherit version;
             src = pkgs.nix-gitignore.gitignoreSource [ ] ./.;
 
-            vendorHash = "sha256-DJ3sEKzMUQB5qMXGfiAfVz1w4NQnMHf6S321nnKe43Y=";
+            vendorHash = "sha256-M3MjtU4t0iGskNZhAdN3RKny8TOZbiuljK4HThShfXs=";
 
             nativeInstallCheckInputs = [ pkgs.versionCheckHook ];
 
