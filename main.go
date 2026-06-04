@@ -18,13 +18,16 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/fosrl/newt/authdaemon"
+	"github.com/fosrl/newt/browsergateway"
 	"github.com/fosrl/newt/docker"
 	"github.com/fosrl/newt/healthcheck"
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/nativessh"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/updates"
 	"github.com/fosrl/newt/util"
@@ -40,15 +43,24 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
+type BrowserGatewayTarget struct {
+	ID              int    `json:"id"`
+	Type            string `json:"type"`
+	Destination     string `json:"destination"`
+	DestinationPort int    `json:"destinationPort"`
+	AuthToken       string `json:"authToken"`
+}
+
 type WgData struct {
-	Endpoint           string               `json:"endpoint"`
-	RelayPort          uint16               `json:"relayPort"`
-	PublicKey          string               `json:"publicKey"`
-	ServerIP           string               `json:"serverIP"`
-	TunnelIP           string               `json:"tunnelIP"`
-	Targets            TargetsByType        `json:"targets"`
-	HealthCheckTargets []healthcheck.Config `json:"healthCheckTargets"`
-	ChainId            string               `json:"chainId"`
+	Endpoint              string                 `json:"endpoint"`
+	RelayPort             uint16                 `json:"relayPort"`
+	PublicKey             string                 `json:"publicKey"`
+	ServerIP              string                 `json:"serverIP"`
+	TunnelIP              string                 `json:"tunnelIP"`
+	Targets               TargetsByType          `json:"targets"`
+	HealthCheckTargets    []healthcheck.Config   `json:"healthCheckTargets"`
+	BrowserGatewayTargets []BrowserGatewayTarget `json:"browserGatewayTargets"`
+	ChainId               string                 `json:"chainId"`
 }
 
 type TargetsByType struct {
@@ -123,6 +135,7 @@ var (
 	port                               uint16
 	portStr                            string
 	disableClients                     bool
+	disableSSH                         bool
 	updownScript                       string
 	dockerSocket                       string
 	dockerEnforceNetworkValidation     string
@@ -134,6 +147,8 @@ var (
 	pingStopChan                       chan struct{}
 	stopFunc                           func()
 	pendingRegisterChainId             string
+	browserGateway                     *browsergateway.Gateway
+	browserGatewayStop                 func()
 	pendingPingChainId                 string
 	healthFile                         string
 	useNativeInterface                 bool
@@ -144,21 +159,21 @@ var (
 	authDaemonKey                      string
 	authDaemonPrincipalsFile           string
 	authDaemonCACertPath               string
-	authDaemonEnabled                  bool
 	authDaemonGenerateRandomPassword   bool
 	// Build/version (can be overridden via -ldflags "-X main.newtVersion=...")
-	newtVersion = "version_replaceme"
+	newtVersion  = "version_replaceme"
+	newtPlatform = "" // embedded at build time via -X main.newtPlatform=<os>_<arch>
 
 	// Observability/metrics flags
-	metricsEnabled    bool
-	otlpEnabled       bool
-	adminAddr         string
-	region            string
-	metricsAsyncBytes bool
-	pprofEnabled      bool
-	blueprintFile              string
-	provisioningBlueprintFile  string
-	noCloud                    bool
+	metricsEnabled            bool
+	otlpEnabled               bool
+	adminAddr                 string
+	region                    string
+	metricsAsyncBytes         bool
+	pprofEnabled              bool
+	blueprintFile             string
+	provisioningBlueprintFile string
+	noCloud                   bool
 
 	// New mTLS configuration variables
 	tlsClientCert string
@@ -242,7 +257,6 @@ func runNewtMain(ctx context.Context) {
 	authDaemonKey = os.Getenv("AD_KEY")
 	authDaemonPrincipalsFile = os.Getenv("AD_PRINCIPALS_FILE")
 	authDaemonCACertPath = os.Getenv("AD_CA_CERT_PATH")
-	authDaemonEnabledEnv := os.Getenv("AUTH_DAEMON_ENABLED")
 	authDaemonGenerateRandomPasswordEnv := os.Getenv("AD_GENERATE_RANDOM_PASSWORD")
 
 	// Metrics/observability env mirrors
@@ -255,6 +269,8 @@ func runNewtMain(ctx context.Context) {
 
 	disableClientsEnv := os.Getenv("DISABLE_CLIENTS")
 	disableClients = disableClientsEnv == "true"
+	disableSSHEnv := os.Getenv("DISABLE_SSH")
+	disableSSH = disableSSHEnv == "true"
 	useNativeInterfaceEnv := os.Getenv("USE_NATIVE_INTERFACE")
 	useNativeInterface = useNativeInterfaceEnv == "true"
 	enforceHealthcheckCertEnv := os.Getenv("ENFORCE_HC_CERT")
@@ -327,6 +343,9 @@ func runNewtMain(ctx context.Context) {
 	if disableClientsEnv == "" {
 		flag.BoolVar(&disableClients, "disable-clients", false, "Disable clients on the WireGuard interface")
 	}
+	if disableSSHEnv == "" {
+		flag.BoolVar(&disableSSH, "disable-ssh", false, "Disable SSH auth daemon and native SSH mode (remote auth daemon still works)")
+	}
 	if enforceHealthcheckCertEnv == "" {
 		flag.BoolVar(&enforceHealthcheckCert, "enforce-hc-cert", false, "Enforce certificate validation for health checks (default: false, accepts any cert)")
 	}
@@ -361,6 +380,8 @@ func runNewtMain(ctx context.Context) {
 	if tlsClientKey == "" {
 		flag.StringVar(&tlsClientKey, "tls-client-key", "", "Path to client private key file (PEM/DER format)")
 	}
+	// add a dummy input for --auth-daemon but ignore it since the auth daemon is always enabled now and this is just for backward compatibility with older versions
+	flag.Bool("auth-daemon", false, "Enable auth daemon mode (deprecated, always enabled)")
 
 	// Handle multiple CA files
 	var tlsClientCAsFlag stringSlice
@@ -472,13 +493,7 @@ func runNewtMain(ctx context.Context) {
 	if authDaemonCACertPath == "" {
 		flag.StringVar(&authDaemonCACertPath, "ad-ca-cert-path", "/etc/ssh/ca.pem", "Path to the CA certificate file for auth daemon")
 	}
-	if authDaemonEnabledEnv == "" {
-		flag.BoolVar(&authDaemonEnabled, "auth-daemon", false, "Enable auth daemon mode (runs alongside normal newt operation)")
-	} else {
-		if v, err := strconv.ParseBool(authDaemonEnabledEnv); err == nil {
-			authDaemonEnabled = v
-		}
-	}
+
 	if authDaemonGenerateRandomPasswordEnv == "" {
 		flag.BoolVar(&authDaemonGenerateRandomPassword, "ad-generate-random-password", false, "Generate a random password for authenticated users")
 	} else {
@@ -517,11 +532,12 @@ func runNewtMain(ctx context.Context) {
 	loggerLevel := util.ParseLogLevel(logLevel)
 
 	// Start auth daemon if enabled
-	if authDaemonEnabled {
+	if !disableSSH {
 		if err := startAuthDaemon(ctx); err != nil {
-			logger.Fatal("Failed to start auth daemon: %v", err)
+			logger.Warn("Did not start on site auth daemon: %v", err)
 		}
 	}
+
 	logger.GetLogger().SetLevel(loggerLevel)
 
 	// Initialize telemetry after flags are parsed (so flags override env)
@@ -656,8 +672,43 @@ func runNewtMain(ctx context.Context) {
 
 	endpoint = client.GetConfig().Endpoint // Update endpoint from config
 	id = client.GetConfig().ID             // Update ID from config
+	secret = client.GetConfig().Secret     // Update secret from config
 	// Update site labels for metrics with the resolved ID
 	telemetry.UpdateSiteInfo(id, region)
+
+	var tlsCfg *tls.Config
+	if opt != nil {
+		// Reuse the TLS configuration already set up for the websocket client.
+		tlsCfg, _ = websocket.BuildTLSConfig(tlsClientCert, tlsClientKey, tlsClientCAs, tlsPrivateKey)
+	}
+	doUpdate := func() {
+		logger.Debug("checkAndSelfUpdate: running periodic update check")
+		if err := updates.CheckAndSelfUpdate(updates.SelfUpdateConfig{
+			Endpoint:       endpoint,
+			NewtID:         id,
+			Secret:         secret,
+			CurrentVersion: newtVersion,
+			Platform:       newtPlatform,
+			TLSConfig:      tlsCfg,
+		}); err != nil {
+			logger.Error("Auto-update check failed: %v", err)
+		}
+	}
+	go func() {
+		// wait for 2 minutes after startup before the first check to avoid interfering with initial provisioning and registration
+		time.Sleep(2 * time.Minute)
+		doUpdate() // run once at startup
+		ticker := time.NewTicker(6 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				doUpdate()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	// output env var values if set
 	logger.Debug("Endpoint: %v", endpoint)
@@ -700,9 +751,25 @@ func runNewtMain(ctx context.Context) {
 	var connected bool
 	var wgData WgData
 	var dockerEventMonitor *docker.EventMonitor
+	var connectionBlocked atomic.Bool
+	var currentPM atomic.Pointer[proxy.ProxyManager]
+
+	// In-memory SSH credentials shared with the native SSH server started in
+	// the clients netstack once the WireGuard interface is ready.
+	var sshCredStore *nativessh.CredentialStore
+	if !disableSSH {
+		sshCredStore = nativessh.NewCredentialStore()
+	}
 
 	if !disableClients {
-		setupClients(client)
+		setupClients(client, sshCredStore)
+	}
+
+	// Initialize connection blocked state from config
+	connectionBlocked.Store(client.GetConfig().Blocked)
+	if connectionBlocked.Load() {
+		logger.Info("Connection blocking is enabled (from config)")
+		setClientsBlocked(true)
 	}
 
 	// Initialize health check monitor with status change callback
@@ -741,9 +808,17 @@ func runNewtMain(ctx context.Context) {
 			pingStopChan = nil
 		}
 
+		// Shutdown browser gateway if running
+		if browserGatewayStop != nil {
+			browserGatewayStop()
+			browserGatewayStop = nil
+			browserGateway = nil
+		}
+
 		// Stop proxy manager if running
 		if pm != nil {
 			pm.Stop()
+			currentPM.Store(nil)
 			pm = nil
 		}
 
@@ -914,6 +989,8 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		pm.SetUDPIdleTimeout(udpProxyIdleTimeout)
 		// Set tunnel_id for metrics (WireGuard peer public key)
 		pm.SetTunnelID(wgData.PublicKey)
+		pm.SetBlocked(connectionBlocked.Load())
+		currentPM.Store(pm)
 
 		connected = true
 
@@ -946,6 +1023,42 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		err = pm.Start()
 		if err != nil {
 			logger.Error("Failed to start proxy manager: %v", err)
+		}
+
+		// Start browser gateway if targets are present
+		if len(wgData.BrowserGatewayTargets) > 0 {
+			// Shutdown any existing gateway first
+			if browserGatewayStop != nil {
+				browserGatewayStop()
+				browserGatewayStop = nil
+			}
+
+			bgTargets := make([]browsergateway.Target, 0, len(wgData.BrowserGatewayTargets))
+			for _, t := range wgData.BrowserGatewayTargets {
+				bgTargets = append(bgTargets, browsergateway.Target{
+					ID:              t.ID,
+					Type:            t.Type,
+					Destination:     t.Destination,
+					DestinationPort: t.DestinationPort,
+					AuthToken:       t.AuthToken,
+				})
+			}
+
+			browserGateway = browsergateway.New(browsergateway.Config{SSHCredentials: sshCredStore})
+			browserGateway.SetTargets(bgTargets)
+
+			ln, bgErr := tnet.ListenTCP(&net.TCPAddr{Port: browsergateway.ListenPort})
+			if bgErr != nil {
+				logger.Error("Failed to start browser gateway listener: %v", bgErr)
+			} else {
+				browserGatewayStop = func() { _ = ln.Close() }
+				go func() {
+					logger.Info("Browser gateway started on port %d", browsergateway.ListenPort)
+					if startErr := browserGateway.Start(ln); startErr != nil {
+						logger.Error("Browser gateway stopped with error: %v", startErr)
+					}
+				}()
+			}
 		}
 	})
 
@@ -981,6 +1094,19 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}, 3*time.Second)
 
 		logger.Info("Tunnel destroyed, ready for reconnection")
+	})
+
+	client.RegisterHandler("newt/wg/restart", func(msg websocket.WSMessage) {
+		closeWgTunnel()
+		closeClients()
+		if healthMonitor != nil {
+			healthMonitor.Stop()
+		}
+		client.Close()
+		if err := reexec(); err != nil {
+			logger.Error("Failed to restart: %v", err)
+			os.Exit(1)
+		}
 	})
 
 	client.RegisterHandler("newt/wg/terminate", func(msg websocket.WSMessage) {
@@ -1650,14 +1776,14 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 		// Define the structure of the incoming message
 		type SSHCertData struct {
-			MessageId          int    `json:"messageId"`
-			AgentPort          int    `json:"agentPort"`
-			AgentHost          string `json:"agentHost"`
-			ExternalAuthDaemon bool   `json:"externalAuthDaemon"`
-			CACert             string `json:"caCert"`
-			Username           string `json:"username"`
-			NiceID             string `json:"niceId"`
-			Metadata           struct {
+			MessageId      int    `json:"messageId"`
+			AgentPort      int    `json:"agentPort"`
+			AgentHost      string `json:"agentHost"`
+			AuthDaemonMode string `json:"authDaemonMode"` // site, remote, native
+			CACert         string `json:"caCert"`
+			Username       string `json:"username"`
+			NiceID         string `json:"niceId"`
+			Metadata       struct {
 				SudoMode     string   `json:"sudoMode"`
 				SudoCommands []string `json:"sudoCommands"`
 				Homedir      bool     `json:"homedir"`
@@ -1680,31 +1806,45 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			return
 		}
 
-		// Check if we're running the auth daemon internally
-		if authDaemonServer != nil && !certData.ExternalAuthDaemon { // if the auth daemon is running internally and the external auth daemon is not enabled
+		// Use a switch statement for AuthDaemonMode
+		switch certData.AuthDaemonMode {
+		case "site":
 			// Call ProcessConnection directly when running internally
 			logger.Debug("Calling internal auth daemon ProcessConnection for user %s", certData.Username)
 
-			authDaemonServer.ProcessConnection(authdaemon.ConnectionRequest{
-				CaCert:   certData.CACert,
-				NiceId:   certData.NiceID,
-				Username: certData.Username,
-				Metadata: authdaemon.ConnectionMetadata{
-					SudoMode:     certData.Metadata.SudoMode,
-					SudoCommands: certData.Metadata.SudoCommands,
-					Homedir:      certData.Metadata.Homedir,
-					Groups:       certData.Metadata.Groups,
-				},
-			})
-
-			// Send success response back to cloud
-			err = client.SendMessage("ws/round-trip/complete", map[string]interface{}{
-				"messageId": certData.MessageId,
-				"complete":  true,
-			})
+			if authDaemonServer != nil {
+				authDaemonServer.ProcessConnection(authdaemon.ConnectionRequest{
+					CaCert:   certData.CACert,
+					NiceId:   certData.NiceID,
+					Username: certData.Username,
+					Metadata: authdaemon.ConnectionMetadata{
+						SudoMode:     certData.Metadata.SudoMode,
+						SudoCommands: certData.Metadata.SudoCommands,
+						Homedir:      certData.Metadata.Homedir,
+						Groups:       certData.Metadata.Groups,
+					},
+				})
+				// Send success response back to cloud
+				err = client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+					"messageId": certData.MessageId,
+					"complete":  true,
+				})
+			} else {
+				logger.Error("Auth daemon server is not initialized, cannot process connection")
+				// Send failure response back to cloud
+				err = client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+					"messageId": certData.MessageId,
+					"complete":  true,
+					"error":     "auth daemon server not initialized",
+				})
+				if err != nil {
+					logger.Error("Failed to send SSH cert failure response: %v", err)
+				}
+				return
+			}
 
 			logger.Info("Successfully processed connection via internal auth daemon for user %s", certData.Username)
-		} else {
+		case "remote":
 			// External auth daemon mode - make HTTP request
 			// Check if auth daemon key is configured
 			if authDaemonKey == "" {
@@ -1801,6 +1941,48 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			}
 
 			logger.Info("Successfully registered SSH certificate with external auth daemon for user %s", certData.Username)
+		case "native":
+			logger.Debug("Processing SSH cert for native SSH server for user %s", certData.Username)
+			if authDaemonServer != nil && sshCredStore != nil {
+				authDaemonServer.ProcessConnection(authdaemon.ConnectionRequest{
+					CaCert:   "", // dont write the cert to the host
+					NiceId:   "", // dont write the cert to the host
+					Username: certData.Username,
+					Metadata: authdaemon.ConnectionMetadata{ // but push the user
+						SudoMode:     certData.Metadata.SudoMode,
+						SudoCommands: certData.Metadata.SudoCommands,
+						Homedir:      certData.Metadata.Homedir,
+						Groups:       certData.Metadata.Groups,
+					},
+				})
+
+				// Update in-memory credentials used by the native SSH server.
+				if err := sshCredStore.SetCAKey(certData.CACert); err != nil {
+					logger.Error("nativessh: failed to set CA key: %v", err)
+				}
+				sshCredStore.AddPrincipals(certData.Username, certData.NiceID)
+				logger.Info("nativessh: updated credentials for user %s (niceId=%s)", certData.Username, certData.NiceID)
+			} else {
+				logger.Error("Auth daemon server or SSH credential store not initialized, cannot process connection")
+				// Send failure response back to cloud
+				err = client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+					"messageId": certData.MessageId,
+					"complete":  true,
+					"error":     "auth daemon server or SSH credential store not initialized",
+				})
+				if err != nil {
+					logger.Error("Failed to send SSH cert failure response: %v", err)
+				}
+				return
+			}
+		default:
+			logger.Error("Unknown auth daemon mode: %s", certData.AuthDaemonMode)
+			client.SendMessage("ws/round-trip/complete", map[string]interface{}{
+				"messageId": certData.MessageId,
+				"complete":  true,
+				"error":     fmt.Sprintf("unknown auth daemon mode: %s", certData.AuthDaemonMode),
+			})
+			return
 		}
 
 		// Send success response back to cloud
@@ -1810,6 +1992,94 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		})
 		if err != nil {
 			logger.Error("Failed to send SSH cert success response: %v", err)
+		}
+	})
+
+	// Register handler for adding browser gateway targets dynamically
+	client.RegisterHandler("newt/browsergateway/add", func(msg websocket.WSMessage) {
+		logger.Debug("Received browser gateway add message")
+
+		type BrowserGatewayAddData struct {
+			Targets []BrowserGatewayTarget `json:"targets"`
+		}
+
+		var addData BrowserGatewayAddData
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling browser gateway add data: %v", err)
+			return
+		}
+		if err := json.Unmarshal(jsonData, &addData); err != nil {
+			logger.Error("Error unmarshaling browser gateway add data: %v", err)
+			return
+		}
+
+		if len(addData.Targets) == 0 {
+			return
+		}
+
+		// If the gateway doesn't exist yet but we have a tunnel, start it
+		if browserGateway == nil && tnet != nil {
+			browserGateway = browsergateway.New(browsergateway.Config{SSHCredentials: sshCredStore})
+			ln, bgErr := tnet.ListenTCP(&net.TCPAddr{Port: browsergateway.ListenPort})
+			if bgErr != nil {
+				logger.Error("Failed to start browser gateway listener: %v", bgErr)
+				browserGateway = nil
+			} else {
+				browserGatewayStop = func() { _ = ln.Close() }
+				go func() {
+					logger.Info("Browser gateway started on port %d", browsergateway.ListenPort)
+					if startErr := browserGateway.Start(ln); startErr != nil {
+						logger.Error("Browser gateway stopped with error: %v", startErr)
+					}
+				}()
+			}
+		}
+
+		if browserGateway == nil {
+			logger.Warn("Browser gateway not available, cannot add targets")
+			return
+		}
+
+		for _, t := range addData.Targets {
+			browserGateway.AddTarget(browsergateway.Target{
+				ID:              t.ID,
+				Type:            t.Type,
+				Destination:     t.Destination,
+				DestinationPort: t.DestinationPort,
+				AuthToken:       t.AuthToken,
+			})
+			logger.Debug("Added browser gateway target %d", t.ID)
+		}
+	})
+
+	// Register handler for removing browser gateway targets dynamically
+	client.RegisterHandler("newt/browsergateway/remove", func(msg websocket.WSMessage) {
+		logger.Debug("Received browser gateway remove message")
+
+		type BrowserGatewayRemoveData struct {
+			IDs []int `json:"ids"`
+		}
+
+		var removeData BrowserGatewayRemoveData
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling browser gateway remove data: %v", err)
+			return
+		}
+		if err := json.Unmarshal(jsonData, &removeData); err != nil {
+			logger.Error("Error unmarshaling browser gateway remove data: %v", err)
+			return
+		}
+
+		if browserGateway == nil {
+			logger.Warn("Browser gateway not available, cannot remove targets")
+			return
+		}
+
+		for _, id := range removeData.IDs {
+			browserGateway.RemoveTarget(id)
+			logger.Debug("Removed browser gateway target %d", id)
 		}
 	})
 
@@ -1837,7 +2107,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			} else {
 				logger.Warn("CLIENTS WILL NOT WORK ON THIS VERSION OF NEWT WITH THIS VERSION OF PANGOLIN, PLEASE UPDATE THE SERVER TO 1.13 OR HIGHER OR DOWNGRADE NEWT")
 			}
-			
+
 			sendBlueprint(client, blueprintFile)
 			if client.WasJustProvisioned() {
 				logger.Info("Provisioning detected – sending provisioning blueprint")
@@ -1884,6 +2154,62 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 		return nil
 	})
+
+	// Handle SIGHUP for config reload
+	sighupChan := make(chan os.Signal, 1)
+	signal.Notify(sighupChan, syscall.SIGHUP)
+	go func() {
+		defer signal.Stop(sighupChan)
+		for {
+			select {
+			case <-sighupChan:
+				logger.Info("SIGHUP received, reloading config...")
+				cfgPath := client.GetConfigFilePath()
+				data, err := os.ReadFile(cfgPath)
+				if err != nil {
+					logger.Error("Failed to read config file on SIGHUP: %v", err)
+					continue
+				}
+				var newCfg websocket.Config
+				if err := json.Unmarshal(data, &newCfg); err != nil {
+					logger.Error("Failed to parse config file on SIGHUP: %v", err)
+					continue
+				}
+				oldCfg := client.GetConfig()
+				// If credentials changed, clean up and re-exec ourselves with the same args
+				if newCfg.Endpoint != oldCfg.Endpoint || newCfg.ID != oldCfg.ID || newCfg.Secret != oldCfg.Secret {
+					logger.Info("Config credentials changed (endpoint/id/secret), restarting...")
+					closeWgTunnel()
+					closeClients()
+					if healthMonitor != nil {
+						healthMonitor.Stop()
+					}
+					client.Close()
+					if err := reexec(); err != nil {
+						logger.Error("Failed to restart: %v", err)
+						os.Exit(1)
+					}
+				}
+				// If blocked state changed, apply in-place without restart
+				if newCfg.Blocked != connectionBlocked.Load() {
+					connectionBlocked.Store(newCfg.Blocked)
+					if newCfg.Blocked {
+						logger.Debug("Config reload: connection blocking enabled")
+					} else {
+						logger.Debug("Config reload: connection blocking disabled")
+					}
+					if p := currentPM.Load(); p != nil {
+						p.SetBlocked(newCfg.Blocked)
+					}
+					setClientsBlocked(newCfg.Blocked)
+				} else {
+					logger.Debug("Config reload: no relevant changes detected")
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	// Connect to the WebSocket server
 	if err := client.Connect(); err != nil {

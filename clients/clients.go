@@ -13,12 +13,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fosrl/newt/bind"
 	newtDevice "github.com/fosrl/newt/device"
 	"github.com/fosrl/newt/holepunch"
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/nativessh"
 	"github.com/fosrl/newt/netstack2"
 	"github.com/fosrl/newt/network"
 	"github.com/fosrl/newt/util"
@@ -108,12 +110,18 @@ type WireGuardService struct {
 	sharedBind         *bind.SharedBind
 	holePunchManager   *holepunch.Manager
 	useNativeInterface bool
+	// SSH server running on the clients' netstack
+	sshServer *sshServerHandle
+	credStore *nativessh.CredentialStore
 	// Direct UDP relay from main tunnel to clients' WireGuard
 	directRelayStop    chan struct{}
 	directRelayWg      sync.WaitGroup
 	netstackListener   net.PacketConn
 	netstackListenerMu sync.Mutex
 	wgTesterServer     *wgtester.Server
+
+	// connection blocking: when true, all new incoming connections are dropped
+	blocked atomic.Bool
 }
 
 // generateChainId generates a random chain ID for deduplicating round-trip messages.
@@ -193,6 +201,13 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 	return service, nil
 }
 
+// SetCredentialStore sets the in-memory SSH credential store used by the
+// native SSH server. It must be called before the netstack is configured
+// (i.e. before the first newt/wg/receive-config message is processed).
+func (s *WireGuardService) SetCredentialStore(store *nativessh.CredentialStore) {
+	s.credStore = store
+}
+
 // ReportRTT allows reporting native RTTs to telemetry, rate-limited externally.
 func (s *WireGuardService) ReportRTT(seconds float64) {
 	if s.serverPubKey == "" {
@@ -209,6 +224,12 @@ func (s *WireGuardService) Close() {
 	if s.stopGetConfig != nil {
 		s.stopGetConfig()
 		s.stopGetConfig = nil
+	}
+
+	// Stop SSH server before tearing down the netstack
+	if s.sshServer != nil {
+		s.sshServer.stop()
+		s.sshServer = nil
 	}
 
 	// Flush access logs before tearing down the tunnel
@@ -284,6 +305,21 @@ func (s *WireGuardService) IsReady() bool {
 // GetPublicKey returns the public key of this WireGuard service
 func (s *WireGuardService) GetPublicKey() wgtypes.Key {
 	return s.key.PublicKey()
+}
+
+// SetBlocked enables or disables connection blocking for this WireGuard service.
+// The state is persisted and applied immediately to any active proxy handler.
+func (s *WireGuardService) SetBlocked(v bool) {
+	s.blocked.Store(v)
+	s.mu.Lock()
+	tnet := s.tnet
+	s.mu.Unlock()
+	if tnet == nil {
+		return
+	}
+	if ph := tnet.GetProxyHandler(); ph != nil {
+		ph.SetBlocked(v)
+	}
 }
 
 // SetOnNetstackReady sets a callback function to be called when the netstack interface is ready
@@ -890,7 +926,25 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		logger.Error("Failed to start WireGuard tester server: %v", err)
 	}
 
+	// Start the SSH server on the clients' netstack (port 22).
+	// A nil credStore means SSH is disabled (--disable-ssh), so skip starting the server.
+	if s.credStore != nil {
+		if h, sshErr := startSSHOnNetstack(s.tnet, s.credStore); sshErr != nil {
+			logger.Warn("nativessh: not starting SSH server on clients netstack: %v", sshErr)
+		} else {
+			s.sshServer = h
+		}
+	}
+
 	// Note: we already unlocked above, so don't use defer unlock
+
+	// Apply any pending blocked state to the newly created proxy handler
+	if s.blocked.Load() {
+		if ph := s.tnet.GetProxyHandler(); ph != nil {
+			ph.SetBlocked(true)
+		}
+	}
+
 	return nil
 }
 
@@ -1562,4 +1616,34 @@ func (s *WireGuardService) filterReadOnlyFields(config string) string {
 	}
 
 	return strings.Join(filteredLines, "\n")
+}
+
+// sshServerHandle holds the listener so the SSH server can be stopped by
+// closing it.
+type sshServerHandle struct {
+	ln net.Listener
+}
+
+func (h *sshServerHandle) stop() {
+	_ = h.ln.Close()
+}
+
+// startSSHOnNetstack creates a TCP listener on port 22 of the clients' netstack
+// and starts serving SSH connections on it in the background. The returned
+// handle can be used to stop the server by closing the listener.
+func startSSHOnNetstack(tnet *netstack2.Net, creds *nativessh.CredentialStore) (*sshServerHandle, error) {
+	srv := nativessh.NewServer(nativessh.ServerConfig{
+		Credentials: creds,
+	})
+	ln, err := tnet.ListenTCP(&net.TCPAddr{Port: 22})
+	if err != nil {
+		return nil, fmt.Errorf("listen on netstack port 22: %w", err)
+	}
+	h := &sshServerHandle{ln: ln}
+	go func() {
+		if err := srv.Serve(ln); err != nil {
+			logger.Debug("nativessh: clients netstack server stopped: %v", err)
+		}
+	}()
+	return h, nil
 }
