@@ -121,19 +121,11 @@ func reliablePing(tnet *netstack.Net, dst string, baseTimeout time.Duration, max
 		totalLatency += latency
 		successCount++
 
-		// If we get at least one success, we can return early for health checks
-		if successCount > 0 {
-			avgLatency := totalLatency / time.Duration(successCount)
-			// logger.Debug("Reliable ping succeeded after %d attempts, avg latency: %v", attempt, avgLatency)
-			return avgLatency, nil
-		}
+		// Return on first success
+		return totalLatency / time.Duration(successCount), nil
 	}
 
-	if successCount == 0 {
-		return 0, fmt.Errorf("all %d ping attempts failed, last error: %v", maxAttempts, lastErr)
-	}
-
-	return totalLatency / time.Duration(successCount), nil
+	return 0, fmt.Errorf("all %d ping attempts failed, last error: %v", maxAttempts, lastErr)
 }
 
 func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopChan chan struct{}, err error) {
