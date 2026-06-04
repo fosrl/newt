@@ -3,13 +3,13 @@ package browsergateway
 import (
 	"context"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/fosrl/newt/logger"
 )
 
 const (
@@ -51,7 +51,7 @@ func (g *Gateway) handleVNC(w http.ResponseWriter, r *http.Request) {
 		Subprotocols:       []string{"binary", "base64"},
 	})
 	if err != nil {
-		log.Printf("vnc: websocket upgrade failed: %v", err)
+		logger.Debug("vnc: websocket upgrade failed: %v", err)
 		return
 	}
 	ws.SetReadLimit(-1)
@@ -59,7 +59,7 @@ func (g *Gateway) handleVNC(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	if err := serveVNC(ctx, ws, target); err != nil {
-		log.Printf("vnc: session error (%s): %v", target, err)
+		logger.Debug("vnc: session error (%s): %v", target, err)
 	}
 }
 

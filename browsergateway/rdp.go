@@ -7,13 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/fosrl/newt/logger"
 )
 
 // HandleRDP is an http.HandlerFunc for RDP-over-WebSocket connections.
@@ -24,7 +24,7 @@ func (g *Gateway) HandleRDP(w http.ResponseWriter, r *http.Request) {
 		Subprotocols:       []string{"binary"},
 	})
 	if err != nil {
-		log.Printf("websocket upgrade failed: %v", err)
+		logger.Debug("websocket upgrade failed: %v", err)
 		return
 	}
 	// Disable per-message read size cap (default is 32 KiB which would break
@@ -33,7 +33,7 @@ func (g *Gateway) HandleRDP(w http.ResponseWriter, r *http.Request) {
 	defer ws.CloseNow() //nolint:errcheck
 
 	if err := g.serveSession(ctx, ws); err != nil {
-		log.Printf("session error: %v", err)
+		logger.Debug("session error: %v", err)
 	}
 }
 
@@ -71,7 +71,7 @@ func (g *Gateway) serveSession(ctx context.Context, ws *websocket.Conn) error {
 		return fmt.Errorf("RDP destination %s is not in the allowed target list or auth token mismatch", target)
 	}
 
-	log.Printf("Connecting to RDP server %s", target)
+	logger.Debug("Connecting to RDP server %s", target)
 
 	// -- Open TCP connection to the destination RDP server --
 	serverTCP, err := net.DialTimeout("tcp", target, 15*time.Second)
@@ -128,7 +128,7 @@ func (g *Gateway) serveSession(ctx context.Context, ws *websocket.Conn) error {
 	if err := tlsConn.Handshake(); err != nil {
 		return fmt.Errorf("TLS handshake with server: %w", err)
 	}
-	log.Printf("Server TLS handshake OK (version=0x%04x cipher=0x%04x)",
+	logger.Debug("Server TLS handshake OK (version=0x%04x cipher=0x%04x)",
 		tlsConn.ConnectionState().Version, tlsConn.ConnectionState().CipherSuite)
 
 	// Collect the raw DER server certificate chain to return to the client.
@@ -150,7 +150,7 @@ func (g *Gateway) serveSession(ctx context.Context, ws *websocket.Conn) error {
 		return fmt.Errorf("write RDCleanPath response: %w", err)
 	}
 
-	log.Printf("RDCleanPath handshake complete, forwarding traffic to %s", serverAddr)
+	logger.Debug("RDCleanPath handshake complete, forwarding traffic to %s", serverAddr)
 
 	// -- Two-way blind forwarding of the (now TLS-encrypted) RDP stream --
 	return forward(stream, tlsConn)
@@ -219,7 +219,7 @@ func readX224(r io.Reader) ([]byte, error) {
 //	bytes 15..18 selected protocol / failure code (u32 little-endian)
 func logX224Negotiation(pdu []byte) {
 	if len(pdu) < 19 {
-		log.Printf("X.224 response too short (%d bytes) to contain RDP negotiation", len(pdu))
+		logger.Debug("X.224 response too short (%d bytes) to contain RDP negotiation", len(pdu))
 		return
 	}
 	switch pdu[11] {
@@ -236,12 +236,12 @@ func logX224Negotiation(pdu []byte) {
 		case 8:
 			name = "HYBRID_EX"
 		}
-		log.Printf("Server selected RDP protocol 0x%x (%s)", proto, name)
+		logger.Debug("Server selected RDP protocol 0x%x (%s)", proto, name)
 	case 0x03:
 		code := uint32(pdu[15]) | uint32(pdu[16])<<8 | uint32(pdu[17])<<16 | uint32(pdu[18])<<24
-		log.Printf("Server returned RDP negotiation failure code 0x%x", code)
+		logger.Debug("Server returned RDP negotiation failure code 0x%x", code)
 	default:
-		log.Printf("X.224 response has no RDP negotiation block (type=0x%02x)", pdu[11])
+		logger.Debug("X.224 response has no RDP negotiation block (type=0x%02x)", pdu[11])
 	}
 }
 

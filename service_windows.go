@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -649,7 +648,7 @@ func setupWindowsEventLog() {
 	// Set the custom logger output
 	logger.GetLogger().SetOutput(file)
 
-	log.Printf("Newt service logging initialized - log file: %s", logFile)
+	logger.Debug("Newt service logging initialized - log file: %s", logFile)
 }
 
 // handleServiceCommand checks for service management commands and returns true if handled

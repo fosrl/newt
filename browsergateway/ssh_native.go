@@ -6,9 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 
 	"github.com/coder/websocket"
+	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/nativessh"
 )
 
@@ -36,7 +36,7 @@ func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, username str
 		return fmt.Errorf("auth for user %q: %w", username, err)
 	}
 
-	log.Printf("SSH native: spawning shell as user %q", username)
+	logger.Debug("SSH native: spawning shell as user %q", username)
 
 	sess, err := nativessh.NewPTYSessionAs(username)
 	if err != nil {

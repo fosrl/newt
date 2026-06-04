@@ -3,13 +3,13 @@ package nativessh
 import (
 	"bufio"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
 
+	"github.com/fosrl/newt/logger"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -17,12 +17,12 @@ type staticConnMeta struct {
 	user string
 }
 
-func (m staticConnMeta) User() string              { return m.user }
-func (m staticConnMeta) SessionID() []byte         { return nil }
-func (m staticConnMeta) ClientVersion() []byte     { return nil }
-func (m staticConnMeta) ServerVersion() []byte     { return nil }
-func (m staticConnMeta) RemoteAddr() net.Addr      { return nil }
-func (m staticConnMeta) LocalAddr() net.Addr       { return nil }
+func (m staticConnMeta) User() string          { return m.user }
+func (m staticConnMeta) SessionID() []byte     { return nil }
+func (m staticConnMeta) ClientVersion() []byte { return nil }
+func (m staticConnMeta) ServerVersion() []byte { return nil }
+func (m staticConnMeta) RemoteAddr() net.Addr  { return nil }
+func (m staticConnMeta) LocalAddr() net.Addr   { return nil }
 
 // CheckAuthorizedKeys reports whether key matches any entry in the system
 // user's ~/.ssh/authorized_keys file.  Returns false (not an error) when the
@@ -80,9 +80,9 @@ func Authenticate(username, password, privateKeyPEM string) error {
 //  2. SSH certificate signed by the configured CA (when provided).
 //  3. Password via host PAM stack.
 func AuthenticateWithCertificate(store *CredentialStore, username, password, privateKeyPEM, certificate string) error {
-	log.Printf("nativessh: authenticating user %q (hasPassword=%v, hasPrivateKey=%v)", username, password != "", privateKeyPEM != "")
+	logger.Debug("nativessh: authenticating user %q (hasPassword=%v, hasPrivateKey=%v)", username, password != "", privateKeyPEM != "")
 	if !SystemUserExists(username) {
-		log.Printf("nativessh: user %q not found on system", username)
+		logger.Debug("nativessh: user %q not found on system", username)
 		return fmt.Errorf("user %q does not exist", username)
 	}
 
@@ -90,35 +90,35 @@ func AuthenticateWithCertificate(store *CredentialStore, username, password, pri
 	if privateKeyPEM != "" {
 		parsedSigner, err := ssh.ParsePrivateKey([]byte(privateKeyPEM))
 		if err != nil {
-			log.Printf("nativessh: failed to parse private key for %q: %v", username, err)
+			logger.Debug("nativessh: failed to parse private key for %q: %v", username, err)
 		} else if CheckAuthorizedKeys(username, parsedSigner.PublicKey()) {
-			log.Printf("nativessh: private key auth succeeded for %q", username)
+			logger.Debug("nativessh: private key auth succeeded for %q", username)
 			return nil
 		} else {
 			signer = parsedSigner
-			log.Printf("nativessh: private key not in authorized_keys for %q", username)
+			logger.Debug("nativessh: private key not in authorized_keys for %q", username)
 		}
 	}
 
 	if store != nil && certificate != "" {
 		if signer == nil {
-			log.Printf("nativessh: certificate provided for %q but no matching private key was provided", username)
+			logger.Debug("nativessh: certificate provided for %q but no matching private key was provided", username)
 		} else {
 			pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(certificate))
 			if err != nil {
-				log.Printf("nativessh: failed to parse certificate for %q: %v", username, err)
+				logger.Debug("nativessh: failed to parse certificate for %q: %v", username, err)
 			} else {
 				cert, ok := pub.(*ssh.Certificate)
 				if !ok {
-					log.Printf("nativessh: provided cert data for %q is not an SSH certificate", username)
+					logger.Debug("nativessh: provided cert data for %q is not an SSH certificate", username)
 				} else if ssh.FingerprintSHA256(cert.Key) != ssh.FingerprintSHA256(signer.PublicKey()) {
-					log.Printf("nativessh: certificate key mismatch for %q", username)
+					logger.Debug("nativessh: certificate key mismatch for %q", username)
 				} else {
 					caKey, userPrincipals := store.get(username)
 					if caKey == nil {
-						log.Printf("nativessh: CA key is not set for certificate auth user %q", username)
+						logger.Debug("nativessh: CA key is not set for certificate auth user %q", username)
 					} else if len(userPrincipals) == 0 {
-						log.Printf("nativessh: no allowed principals found for certificate auth user %q", username)
+						logger.Debug("nativessh: no allowed principals found for certificate auth user %q", username)
 					} else {
 						checker := &ssh.CertChecker{
 							IsUserAuthority: func(auth ssh.PublicKey) bool {
@@ -130,13 +130,13 @@ func AuthenticateWithCertificate(store *CredentialStore, username, password, pri
 						for principal := range userPrincipals {
 							_, authErr := checker.Authenticate(staticConnMeta{user: principal}, cert)
 							if authErr == nil {
-								log.Printf("nativessh: certificate auth succeeded for %q (principal=%q)", username, principal)
+								logger.Debug("nativessh: certificate auth succeeded for %q (principal=%q)", username, principal)
 								return nil
 							}
 							lastErr = authErr
 						}
 						if lastErr != nil {
-							log.Printf("nativessh: certificate auth failed for %q: %v", username, lastErr)
+							logger.Debug("nativessh: certificate auth failed for %q: %v", username, lastErr)
 						}
 					}
 				}
@@ -146,13 +146,13 @@ func AuthenticateWithCertificate(store *CredentialStore, username, password, pri
 
 	if password != "" {
 		if err := VerifySystemPassword(username, password); err != nil {
-			log.Printf("nativessh: password auth failed for %q: %v", username, err)
+			logger.Debug("nativessh: password auth failed for %q: %v", username, err)
 		} else {
-			log.Printf("nativessh: password auth succeeded for %q", username)
+			logger.Debug("nativessh: password auth succeeded for %q", username)
 			return nil
 		}
 	} else {
-		log.Printf("nativessh: no password provided for %q", username)
+		logger.Debug("nativessh: no password provided for %q", username)
 	}
 	return fmt.Errorf("authentication failed for user %q", username)
 }

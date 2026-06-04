@@ -7,11 +7,11 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"strings"
 	"sync"
 
+	"github.com/fosrl/newt/logger"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -126,7 +126,7 @@ func (s *Server) Serve(ln net.Listener) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("nativessh: server listening on %s", ln.Addr())
+	logger.Debug("nativessh: server listening on %s", ln.Addr())
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -151,11 +151,11 @@ func (s *Server) handleConn(conn net.Conn, cfg *ssh.ServerConfig) {
 	defer conn.Close()
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
-		log.Printf("nativessh: handshake failed from %s: %v", conn.RemoteAddr(), err)
+		logger.Debug("nativessh: handshake failed from %s: %v", conn.RemoteAddr(), err)
 		return
 	}
 	defer sshConn.Close()
-	log.Printf("nativessh: connection from %s user=%s", conn.RemoteAddr(), sshConn.User())
+	logger.Debug("nativessh: connection from %s user=%s", conn.RemoteAddr(), sshConn.User())
 
 	go ssh.DiscardRequests(reqs)
 
@@ -166,7 +166,7 @@ func (s *Server) handleConn(conn net.Conn, cfg *ssh.ServerConfig) {
 		}
 		ch, requests, err := newChan.Accept()
 		if err != nil {
-			log.Printf("nativessh: channel accept error: %v", err)
+			logger.Debug("nativessh: channel accept error: %v", err)
 			return
 		}
 		go s.handleSession(ch, requests, sshConn.User())
@@ -190,7 +190,7 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request, use
 			if sess == nil {
 				sess, err = NewPTYSessionAs(username)
 				if err != nil {
-					log.Printf("nativessh: PTY start error: %v", err)
+					logger.Debug("nativessh: PTY start error: %v", err)
 					if req.WantReply {
 						_ = req.Reply(false, nil)
 					}
@@ -264,7 +264,7 @@ func makePublicKeyCallback(store *CredentialStore) func(ssh.ConnMetadata, ssh.Pu
 	return func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 		// 1. Host authorized_keys.
 		if CheckAuthorizedKeys(meta.User(), key) {
-			log.Printf("nativessh: authorized_keys auth for user %q", meta.User())
+			logger.Debug("nativessh: authorized_keys auth for user %q", meta.User())
 			return &ssh.Permissions{}, nil
 		}
 
@@ -286,14 +286,14 @@ func makePublicKeyCallback(store *CredentialStore) func(ssh.ConnMetadata, ssh.Pu
 				for principal := range userPrincipals {
 					perms, err := checker.Authenticate(connMetaWithUser{ConnMetadata: meta, user: principal}, key)
 					if err == nil {
-						log.Printf("nativessh: CA cert auth for user %q principal=%q", meta.User(), principal)
+						logger.Debug("nativessh: CA cert auth for user %q principal=%q", meta.User(), principal)
 						return perms, nil
 					}
 					lastErr = err
 				}
 
 				if lastErr != nil {
-					log.Printf("nativessh: CA cert rejected for user %q: %v", meta.User(), lastErr)
+					logger.Debug("nativessh: CA cert rejected for user %q: %v", meta.User(), lastErr)
 				}
 			}
 		}
@@ -309,10 +309,10 @@ func makePasswordCallback() func(ssh.ConnMetadata, []byte) (*ssh.Permissions, er
 	return func(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 		if err := VerifySystemPassword(meta.User(), string(password)); err != nil {
 			// Return a generic message to the client; log the real reason.
-			log.Printf("nativessh: password auth failed for user %q: %v", meta.User(), err)
+			logger.Debug("nativessh: password auth failed for user %q: %v", meta.User(), err)
 			return nil, fmt.Errorf("permission denied")
 		}
-		log.Printf("nativessh: password auth for user %q", meta.User())
+		logger.Debug("nativessh: password auth for user %q", meta.User())
 		return &ssh.Permissions{}, nil
 	}
 }
@@ -324,7 +324,7 @@ func generateHostKey() (ssh.Signer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate host key: %w", err)
 	}
-	log.Printf("nativessh: generated ephemeral Ed25519 host key")
+	logger.Debug("nativessh: generated ephemeral Ed25519 host key")
 	return ssh.NewSignerFromKey(priv)
 }
 

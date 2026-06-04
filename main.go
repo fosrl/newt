@@ -1053,7 +1053,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			} else {
 				browserGatewayStop = func() { _ = ln.Close() }
 				go func() {
-					logger.Info("Browser gateway started on port %d", browsergateway.ListenPort)
+					logger.Debug("Browser gateway started on port %d", browsergateway.ListenPort)
 					if startErr := browserGateway.Start(ln); startErr != nil {
 						logger.Error("Browser gateway stopped with error: %v", startErr)
 					}
@@ -2028,7 +2028,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			} else {
 				browserGatewayStop = func() { _ = ln.Close() }
 				go func() {
-					logger.Info("Browser gateway started on port %d", browsergateway.ListenPort)
+					logger.Debug("Browser gateway started on port %d", browsergateway.ListenPort)
 					if startErr := browserGateway.Start(ln); startErr != nil {
 						logger.Error("Browser gateway stopped with error: %v", startErr)
 					}
