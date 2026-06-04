@@ -250,9 +250,9 @@ func (p *ProxyHandler) SetBlocked(v bool) {
 	}
 	p.blocked.Store(v)
 	if v {
-		logger.Info("ProxyHandler: connection blocking enabled")
+		logger.Debug("ProxyHandler: connection blocking enabled")
 	} else {
-		logger.Info("ProxyHandler: connection blocking disabled")
+		logger.Debug("ProxyHandler: connection blocking disabled")
 	}
 }
 

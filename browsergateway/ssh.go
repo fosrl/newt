@@ -21,6 +21,7 @@ type sshClientMsg struct {
 	Type       string `json:"type"`
 	Password   string `json:"password,omitempty"`   // used when type="auth"
 	PrivateKey string `json:"privateKey,omitempty"` // used when type="auth"
+	Certificate string `json:"certificate,omitempty"` // used when type="auth"
 	Data       string `json:"data,omitempty"`       // used when type="data"
 	Cols       uint32 `json:"cols,omitempty"`       // used when type="resize"
 	Rows       uint32 `json:"rows,omitempty"`       // used when type="resize"
@@ -89,7 +90,7 @@ func (g *Gateway) HandleSSH(w http.ResponseWriter, r *http.Request) {
 	defer ws.CloseNow() //nolint:errcheck
 
 	if nativeSSH {
-		if err := serveNativeSSHSession(ctx, ws, username); err != nil {
+		if err := serveNativeSSHSession(ctx, ws, username, g.sshCreds); err != nil {
 			log.Printf("SSH native session error: %v", err)
 		}
 	} else {
