@@ -5,11 +5,17 @@ package nativessh
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"os/exec"
+	"os/user"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/fosrl/newt/logger"
 	"golang.org/x/crypto/ssh"
@@ -232,6 +238,16 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request, use
 				_, _ = io.Copy(sess, ch)
 			}()
 
+		case "exec":
+			if req.WantReply {
+				_ = req.Reply(true, nil)
+			}
+			cmd := parseExecPayload(req.Payload)
+			go s.runExecAs(ch, username, cmd)
+			// Drain remaining requests; the goroutine owns the channel now.
+			go ssh.DiscardRequests(requests)
+			return
+
 		case "window-change":
 			if sess != nil {
 				cols, rows := parseWindowChange(req.Payload)
@@ -251,6 +267,94 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request, use
 	if sess != nil && !started {
 		sess.Close() //nolint:errcheck
 	}
+}
+
+// runExecAs runs command as username, wiring stdin/stdout/stderr directly to
+// the SSH channel (no PTY). This supports scp, rsync, and plain exec requests.
+func (s *Server) runExecAs(ch ssh.Channel, username, command string) {
+	defer ch.Close()
+
+	u, err := user.Lookup(username)
+	if err != nil {
+		logger.Debug("nativessh: exec user lookup %q: %v", username, err)
+		sendExitStatus(ch, 1)
+		return
+	}
+
+	uid, err := strconv.ParseUint(u.Uid, 10, 32)
+	if err != nil {
+		logger.Debug("nativessh: exec parse uid for %q: %v", username, err)
+		sendExitStatus(ch, 1)
+		return
+	}
+	gid, err := strconv.ParseUint(u.Gid, 10, 32)
+	if err != nil {
+		logger.Debug("nativessh: exec parse gid for %q: %v", username, err)
+		sendExitStatus(ch, 1)
+		return
+	}
+
+	groupIDs, _ := u.GroupIds()
+	var groups []uint32
+	for _, g := range groupIDs {
+		gval, err := strconv.ParseUint(g, 10, 32)
+		if err == nil {
+			groups = append(groups, uint32(gval))
+		}
+	}
+
+	homeDir := u.HomeDir
+	if _, err := os.Stat(homeDir); err != nil {
+		homeDir = "/"
+	}
+
+	cmd := exec.Command("/bin/sh", "-c", command)
+	cmd.Env = []string{
+		"HOME=" + u.HomeDir,
+		"USER=" + username,
+		"LOGNAME=" + username,
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+	}
+	cmd.Dir = homeDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:    uint32(uid),
+			Gid:    uint32(gid),
+			Groups: groups,
+		},
+	}
+	cmd.Stdin = ch
+	cmd.Stdout = ch
+	cmd.Stderr = ch.Stderr()
+
+	exitCode := 0
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 1
+		}
+		logger.Debug("nativessh: exec %q as %q exited: %v", command, username, err)
+	}
+
+	sendExitStatus(ch, exitCode)
+	_ = ch.CloseWrite()
+}
+
+// sendExitStatus sends an SSH exit-status request on ch.
+func sendExitStatus(ch ssh.Channel, code int) {
+	payload := ssh.Marshal(struct{ Status uint32 }{uint32(code)})
+	_, _ = ch.SendRequest("exit-status", false, payload)
+}
+
+// parseExecPayload decodes the command string from an SSH exec request payload.
+func parseExecPayload(payload []byte) string {
+	var msg struct{ Command string }
+	if err := ssh.Unmarshal(payload, &msg); err != nil {
+		return ""
+	}
+	return msg.Command
 }
 
 // makePublicKeyCallback returns a PublicKeyCallback that tries, in order:
