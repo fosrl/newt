@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -120,19 +122,11 @@ func reliablePing(tnet *netstack.Net, dst string, baseTimeout time.Duration, max
 		totalLatency += latency
 		successCount++
 
-		// If we get at least one success, we can return early for health checks
-		if successCount > 0 {
-			avgLatency := totalLatency / time.Duration(successCount)
-			// logger.Debug("Reliable ping succeeded after %d attempts, avg latency: %v", attempt, avgLatency)
-			return avgLatency, nil
-		}
+		// Return on first success
+		return totalLatency / time.Duration(successCount), nil
 	}
 
-	if successCount == 0 {
-		return 0, fmt.Errorf("all %d ping attempts failed, last error: %v", maxAttempts, lastErr)
-	}
-
-	return totalLatency / time.Duration(successCount), nil
+	return 0, fmt.Errorf("all %d ping attempts failed, last error: %v", maxAttempts, lastErr)
 }
 
 func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopChan chan struct{}, err error) {
@@ -207,6 +201,7 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 							logger.Warn(msgHealthFileWriteFailed, err)
 						}
 					}
+					return
 				}
 			case <-pingStopChan:
 				// Stop the goroutine when signaled
@@ -217,6 +212,25 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 
 	// Return an error for the first batch of attempts (to maintain compatibility with existing code)
 	return stopChan, fmt.Errorf("initial ping attempts failed, continuing in background")
+}
+
+// shouldFireRecovery decides whether the data-plane recovery flow in
+// startPingCheck should run on this tick. Recovery fires once when the
+// consecutive-failure counter first crosses the threshold; the connectionLost
+// flag prevents re-firing until a successful ping resets the state.
+//
+// This condition was previously inlined into startPingCheck and AND-ed with
+// `currentInterval < maxInterval`, which silently broke recovery once
+// pingInterval's default was bumped to 15s while maxInterval stayed at 6s
+// (commit 8161fa6, March 2026): the gate became permanently false on default
+// settings, so the recovery code never executed and ping failures climbed
+// forever — the proximate cause of fosrl/newt#284, #310 and pangolin#1004.
+//
+// Recovery and backoff are independent concerns; the backoff ramp is now
+// computed separately in the caller. Do not re-introduce currentInterval
+// here.
+func shouldFireRecovery(consecutiveFailures, failureThreshold int, connectionLost bool) bool {
+	return consecutiveFailures >= failureThreshold && !connectionLost
 }
 
 func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Client, tunnelID string) chan struct{} {
@@ -278,35 +292,44 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 
 					// More lenient threshold for declaring connection lost under load
 					failureThreshold := 4
-					if consecutiveFailures >= failureThreshold && currentInterval < maxInterval {
-						if !connectionLost {
-							connectionLost = true
-							logger.Warn("Connection to server lost after %d failures. Continuous reconnection attempts will be made.", consecutiveFailures)
-							if tunnelID != "" {
-								telemetry.IncReconnect(context.Background(), tunnelID, "client", telemetry.ReasonTimeout)
-							}
-							stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{}, 3*time.Second)
-							// Send registration message to the server for backward compatibility
-							err := client.SendMessage("newt/wg/register", map[string]interface{}{
-								"publicKey":           publicKey.String(),
-								"backwardsCompatible": true,
-							})
+					if shouldFireRecovery(consecutiveFailures, failureThreshold, connectionLost) {
+						connectionLost = true
+						logger.Warn("Connection to server lost after %d failures. Continuous reconnection attempts will be made.", consecutiveFailures)
+						if tunnelID != "" {
+							telemetry.IncReconnect(context.Background(), tunnelID, "client", telemetry.ReasonTimeout)
+						}
+						pingChainId := generateChainId()
+						pendingPingChainId = pingChainId
+						stopFunc = client.SendMessageInterval("newt/ping/request", map[string]interface{}{
+							"chainId": pingChainId,
+						}, 3*time.Second)
+						// Send registration message to the server for backward compatibility
+						bcChainId := generateChainId()
+						pendingRegisterChainId = bcChainId
+						err := client.SendMessage("newt/wg/register", map[string]interface{}{
+							"publicKey":           publicKey.String(),
+							"backwardsCompatible": true,
+							"chainId":             bcChainId,
+						})
+						if err != nil {
+							logger.Error("Failed to send registration message: %v", err)
+						}
+						if healthFile != "" {
+							err = os.Remove(healthFile)
 							if err != nil {
-								logger.Error("Failed to send registration message: %v", err)
-							}
-							if healthFile != "" {
-								err = os.Remove(healthFile)
-								if err != nil {
-									logger.Error("Failed to remove health file: %v", err)
-								}
+								logger.Error("Failed to remove health file: %v", err)
 							}
 						}
-						currentInterval = time.Duration(float64(currentInterval) * 1.3) // Slower increase
+					}
+					// Backoff: ramp the periodic-ping interval up while we are
+					// past the failure threshold, capped at maxInterval. Kept
+					// independent of the recovery trigger above so the trigger
+					// fires on every outage regardless of pingInterval.
+					if consecutiveFailures >= failureThreshold && currentInterval < maxInterval {
+						currentInterval = time.Duration(float64(currentInterval) * 1.3)
 						if currentInterval > maxInterval {
 							currentInterval = maxInterval
 						}
-						ticker.Reset(currentInterval)
-						logger.Debug("Increased ping check interval to %v due to consecutive failures", currentInterval)
 					}
 				} else {
 					// Track recent latencies
@@ -364,27 +387,62 @@ func parseTargetData(data interface{}) (TargetData, error) {
 	return targetData, nil
 }
 
+// parseTargetString parses a target string in the format "listenPort:host:targetPort"
+// It properly handles IPv6 addresses which must be in brackets: "listenPort:[ipv6]:targetPort"
+// Examples:
+//   - IPv4: "3001:192.168.1.1:80"
+//   - IPv6: "3001:[::1]:8080" or "3001:[fd70:1452:b736:4dd5:caca:7db9:c588:f5b3]:80"
+//
+// Returns listenPort, targetAddress (in host:port format suitable for net.Dial), and error
+func parseTargetString(target string) (int, string, error) {
+	// Find the first colon to extract the listen port
+	firstColon := strings.Index(target, ":")
+	if firstColon == -1 {
+		return 0, "", fmt.Errorf("invalid target format, no colon found: %s", target)
+	}
+
+	listenPortStr := target[:firstColon]
+	var listenPort int
+	_, err := fmt.Sscanf(listenPortStr, "%d", &listenPort)
+	if err != nil {
+		return 0, "", fmt.Errorf("invalid listen port: %s", listenPortStr)
+	}
+	if listenPort <= 0 || listenPort > 65535 {
+		return 0, "", fmt.Errorf("listen port out of range: %d", listenPort)
+	}
+
+	// The remainder is host:targetPort - use net.SplitHostPort which handles IPv6 brackets
+	remainder := target[firstColon+1:]
+	host, targetPort, err := net.SplitHostPort(remainder)
+	if err != nil {
+		return 0, "", fmt.Errorf("invalid host:port format '%s': %w", remainder, err)
+	}
+
+	// Reject empty host or target port
+	if host == "" {
+		return 0, "", fmt.Errorf("empty host in target: %s", target)
+	}
+	if targetPort == "" {
+		return 0, "", fmt.Errorf("empty target port in target: %s", target)
+	}
+
+	// Reconstruct the target address using JoinHostPort (handles IPv6 properly)
+	targetAddr := net.JoinHostPort(host, targetPort)
+
+	return listenPort, targetAddr, nil
+}
+
 func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto string, targetData TargetData) error {
 	for _, t := range targetData.Targets {
-		// Split the first number off of the target with : separator and use as the port
-		parts := strings.Split(t, ":")
-		if len(parts) != 3 {
-			logger.Info("Invalid target format: %s", t)
-			continue
-		}
-
-		// Get the port as an int
-		port := 0
-		_, err := fmt.Sscanf(parts[0], "%d", &port)
+		// Parse the target string, handling both IPv4 and IPv6 addresses
+		port, target, err := parseTargetString(t)
 		if err != nil {
-			logger.Info("Invalid port: %s", parts[0])
+			logger.Info("Invalid target format: %s (%v)", t, err)
 			continue
 		}
 
 		switch action {
 		case "add":
-			target := parts[1] + ":" + parts[2]
-
 			// Call updown script if provided
 			processedTarget := target
 			if updownScript != "" {
@@ -411,8 +469,6 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 		case "remove":
 			logger.Info("Removing target with port %d", port)
 
-			target := parts[1] + ":" + parts[2]
-
 			// Call updown script if provided
 			if updownScript != "" {
 				_, err := executeUpdownScript(action, proto, target)
@@ -421,7 +477,7 @@ func updateTargets(pm *proxy.ProxyManager, action string, tunnelIP string, proto
 				}
 			}
 
-			err := pm.RemoveTarget(proto, tunnelIP, port)
+			err = pm.RemoveTarget(proto, tunnelIP, port)
 			if err != nil {
 				logger.Error("Failed to remove target: %v", err)
 				return err
@@ -476,15 +532,41 @@ func executeUpdownScript(action, proto, target string) (string, error) {
 	return target, nil
 }
 
-func sendBlueprint(client *websocket.Client) error {
-	if blueprintFile == "" {
+// interpolateBlueprint finds all {{...}} tokens in the raw blueprint bytes and
+// replaces recognised schemes with their resolved values. Currently supported:
+//
+//   - env.<VAR>  – replaced with the value of the named environment variable
+//
+// Any token that does not match a supported scheme is left as-is so that
+// future schemes (e.g. tag., api.) are preserved rather than silently dropped.
+func interpolateBlueprint(data []byte) []byte {
+	re := regexp.MustCompile(`\{\{([^}]+)\}\}`)
+	return re.ReplaceAllFunc(data, func(match []byte) []byte {
+		// strip the surrounding {{ }}
+		inner := strings.TrimSpace(string(match[2 : len(match)-2]))
+
+		if strings.HasPrefix(inner, "env.") {
+			varName := strings.TrimPrefix(inner, "env.")
+			return []byte(os.Getenv(varName))
+		}
+
+		// unrecognised scheme – leave the token untouched
+		return match
+	})
+}
+
+func sendBlueprint(client *websocket.Client, file string) error {
+	if file == "" {
 		return nil
 	}
 	// try to read the blueprint file
-	blueprintData, err := os.ReadFile(blueprintFile)
+	blueprintData, err := os.ReadFile(file)
 	if err != nil {
 		logger.Error("Failed to read blueprint file: %v", err)
 	} else {
+		// interpolate {{env.VAR}} (and any future schemes) before parsing
+		blueprintData = interpolateBlueprint(blueprintData)
+
 		// first we should convert the yaml to json and error if the yaml is bad
 		var yamlObj interface{}
 		var blueprintJsonData string

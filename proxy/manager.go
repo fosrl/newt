@@ -21,7 +21,32 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
-const errUnsupportedProtoFmt = "unsupported protocol: %s"
+const (
+	errUnsupportedProtoFmt = "unsupported protocol: %s"
+	maxUDPPacketSize       = 65507 // Maximum UDP packet size
+	defaultUDPIdleTimeout  = 90 * time.Second
+)
+
+// udpBufferPool provides reusable buffers for UDP packet handling.
+// This reduces GC pressure from frequent large allocations.
+var udpBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, maxUDPPacketSize)
+		return &buf
+	},
+}
+
+// getUDPBuffer retrieves a buffer from the pool.
+func getUDPBuffer() *[]byte {
+	return udpBufferPool.Get().(*[]byte)
+}
+
+// putUDPBuffer clears and returns a buffer to the pool.
+func putUDPBuffer(buf *[]byte) {
+	// Clear the buffer to prevent data leakage
+	clear(*buf)
+	udpBufferPool.Put(buf)
+}
 
 // Target represents a proxy target with its address and port
 type Target struct {
@@ -44,6 +69,10 @@ type ProxyManager struct {
 	tunnels         map[string]*tunnelEntry
 	asyncBytes      bool
 	flushStop       chan struct{}
+	udpIdleTimeout  time.Duration
+
+	// connection blocking
+	blocked atomic.Bool
 }
 
 // tunnelEntry holds per-tunnel attributes and (optional) async counters.
@@ -105,13 +134,9 @@ func classifyProxyError(err error) string {
 	if errors.Is(err, net.ErrClosed) {
 		return "closed"
 	}
-	if ne, ok := err.(net.Error); ok {
-		if ne.Timeout() {
-			return "timeout"
-		}
-		if ne.Temporary() {
-			return "temporary"
-		}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return "timeout"
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
@@ -127,12 +152,13 @@ func classifyProxyError(err error) string {
 // NewProxyManager creates a new proxy manager instance
 func NewProxyManager(tnet *netstack.Net) *ProxyManager {
 	return &ProxyManager{
-		tnet:       tnet,
-		tcpTargets: make(map[string]map[int]string),
-		udpTargets: make(map[string]map[int]string),
-		listeners:  make([]*gonet.TCPListener, 0),
-		udpConns:   make([]*gonet.UDPConn, 0),
-		tunnels:    make(map[string]*tunnelEntry),
+		tnet:           tnet,
+		tcpTargets:     make(map[string]map[int]string),
+		udpTargets:     make(map[string]map[int]string),
+		listeners:      make([]*gonet.TCPListener, 0),
+		udpConns:       make([]*gonet.UDPConn, 0),
+		tunnels:        make(map[string]*tunnelEntry),
+		udpIdleTimeout: defaultUDPIdleTimeout,
 	}
 }
 
@@ -206,10 +232,11 @@ func (pm *ProxyManager) ClearTunnelID() {
 // init function without tnet
 func NewProxyManagerWithoutTNet() *ProxyManager {
 	return &ProxyManager{
-		tcpTargets: make(map[string]map[int]string),
-		udpTargets: make(map[string]map[int]string),
-		listeners:  make([]*gonet.TCPListener, 0),
-		udpConns:   make([]*gonet.UDPConn, 0),
+		tcpTargets:     make(map[string]map[int]string),
+		udpTargets:     make(map[string]map[int]string),
+		listeners:      make([]*gonet.TCPListener, 0),
+		udpConns:       make([]*gonet.UDPConn, 0),
+		udpIdleTimeout: defaultUDPIdleTimeout,
 	}
 }
 
@@ -218,6 +245,18 @@ func (pm *ProxyManager) SetTNet(tnet *netstack.Net) {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
 	pm.tnet = tnet
+}
+
+// SetBlocked enables or disables connection blocking.
+// When enabled, all new incoming TCP connections are immediately closed
+// and all incoming UDP packets are silently dropped.
+func (pm *ProxyManager) SetBlocked(v bool) {
+	pm.blocked.Store(v)
+	if v {
+		logger.Debug("ProxyManager: connection blocking enabled, new connections will be dropped")
+	} else {
+		logger.Debug("ProxyManager: connection blocking disabled, accepting connections")
+	}
 }
 
 // AddTarget adds as new target for proxying
@@ -346,6 +385,17 @@ func (pm *ProxyManager) SetAsyncBytes(b bool) {
 		go pm.flushLoop()
 	}
 }
+
+// SetUDPIdleTimeout configures when idle UDP client flows are reclaimed.
+func (pm *ProxyManager) SetUDPIdleTimeout(d time.Duration) {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+	if d <= 0 {
+		pm.udpIdleTimeout = defaultUDPIdleTimeout
+		return
+	}
+	pm.udpIdleTimeout = d
+}
 func (pm *ProxyManager) flushLoop() {
 	flushInterval := 2 * time.Second
 	if v := os.Getenv("OTEL_METRIC_EXPORT_INTERVAL"); v != "" {
@@ -437,14 +487,6 @@ func (pm *ProxyManager) Stop() error {
 		pm.udpConns = append(pm.udpConns[:i], pm.udpConns[i+1:]...)
 	}
 
-	// // Clear the target maps
-	// for k := range pm.tcpTargets {
-	// 	delete(pm.tcpTargets, k)
-	// }
-	// for k := range pm.udpTargets {
-	// 	delete(pm.udpTargets, k)
-	// }
-
 	// Give active connections a chance to close gracefully
 	time.Sleep(100 * time.Millisecond)
 
@@ -498,7 +540,7 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 			if !pm.running {
 				return
 			}
-			if ne, ok := err.(net.Error); ok && !ne.Temporary() {
+			if errors.Is(err, net.ErrClosed) {
 				logger.Info("TCP listener closed, stopping proxy handler for %v", listener.Addr())
 				return
 			}
@@ -508,6 +550,12 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 		}
 
 		tunnelID := pm.currentTunnelID
+		// Drop connection if blocking is enabled
+		if pm.blocked.Load() {
+			conn.Close()
+			logger.Debug("TCP proxy: connection dropped (blocking enabled)")
+			continue
+		}
 		telemetry.IncProxyAccept(context.Background(), tunnelID, "tcp", "success", "")
 		telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "tcp", telemetry.ProxyConnectionOpened)
 		if tunnelID != "" {
@@ -564,7 +612,9 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 }
 
 func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
-	buffer := make([]byte, 65507) // Max UDP packet size
+	bufPtr := getUDPBuffer()
+	defer putUDPBuffer(bufPtr)
+	buffer := *bufPtr
 	clientConns := make(map[string]*net.UDPConn)
 	var clientsMutex sync.RWMutex
 
@@ -583,7 +633,7 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			}
 
 			// Check for connection closed conditions
-			if err == io.EOF || strings.Contains(err.Error(), "use of closed network connection") {
+			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 				logger.Info("UDP connection closed, stopping proxy handler")
 
 				// Clean up existing client connections
@@ -602,6 +652,11 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 		}
 
 		clientKey := remoteAddr.String()
+		// Drop packet if blocking is enabled
+		if pm.blocked.Load() {
+			logger.Debug("UDP proxy: packet dropped (blocking enabled)")
+			continue
+		}
 		// bytes from client -> target (direction=in)
 		if pm.currentTunnelID != "" && n > 0 {
 			if pm.asyncBytes {
@@ -632,6 +687,9 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 				telemetry.IncProxyAccept(context.Background(), pm.currentTunnelID, "udp", "failure", classifyProxyError(err))
 				continue
 			}
+			// Prevent idle UDP client goroutines from living forever and
+			// retaining large per-connection buffers.
+			_ = targetConn.SetReadDeadline(time.Now().Add(pm.udpIdleTimeout))
 			tunnelID := pm.currentTunnelID
 			telemetry.IncProxyAccept(context.Background(), tunnelID, "udp", "success", "")
 			telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "udp", telemetry.ProxyConnectionOpened)
@@ -647,7 +705,10 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			go func(clientKey string, targetConn *net.UDPConn, remoteAddr net.Addr, tunnelID string) {
 				start := time.Now()
 				result := "success"
+				bufPtr := getUDPBuffer()
 				defer func() {
+					// Return buffer to pool first
+					putUDPBuffer(bufPtr)
 					// Always clean up when this goroutine exits
 					clientsMutex.Lock()
 					if storedConn, exists := clientConns[clientKey]; exists && storedConn == targetConn {
@@ -662,10 +723,18 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 					telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "udp", telemetry.ProxyConnectionClosed)
 				}()
 
-				buffer := make([]byte, 65507)
+				buffer := *bufPtr
 				for {
 					n, _, err := targetConn.ReadFromUDP(buffer)
 					if err != nil {
+						var netErr net.Error
+						if errors.As(err, &netErr) && netErr.Timeout() {
+							return
+						}
+						// Connection closed is normal during cleanup
+						if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
+							return // defer will handle cleanup, result stays "success"
+						}
 						logger.Error("Error reading from target: %v", err)
 						result = "failure"
 						return // defer will handle cleanup
@@ -704,6 +773,8 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 			delete(clientConns, clientKey)
 			clientsMutex.Unlock()
 		} else if pm.currentTunnelID != "" && written > 0 {
+			// Extend idle timeout whenever client traffic is observed.
+			_ = targetConn.SetReadDeadline(time.Now().Add(pm.udpIdleTimeout))
 			if pm.asyncBytes {
 				if e := pm.getEntry(pm.currentTunnelID); e != nil {
 					e.bytesInUDP.Add(uint64(written))
@@ -735,4 +806,29 @@ func (pm *ProxyManager) PrintTargets() {
 			logger.Info("UDP %s:%d -> %s", listenIP, port, targetAddr)
 		}
 	}
+}
+
+// GetTargets returns a copy of the current TCP and UDP targets
+// Returns map[listenIP]map[port]targetAddress for both TCP and UDP
+func (pm *ProxyManager) GetTargets() (tcpTargets map[string]map[int]string, udpTargets map[string]map[int]string) {
+	pm.mutex.RLock()
+	defer pm.mutex.RUnlock()
+
+	tcpTargets = make(map[string]map[int]string)
+	for listenIP, targets := range pm.tcpTargets {
+		tcpTargets[listenIP] = make(map[int]string)
+		for port, targetAddr := range targets {
+			tcpTargets[listenIP][port] = targetAddr
+		}
+	}
+
+	udpTargets = make(map[string]map[int]string)
+	for listenIP, targets := range pm.udpTargets {
+		udpTargets[listenIP] = make(map[int]string)
+		for port, targetAddr := range targets {
+			udpTargets[listenIP][port] = targetAddr
+		}
+	}
+
+	return tcpTargets, udpTargets
 }

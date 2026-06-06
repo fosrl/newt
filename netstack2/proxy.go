@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fosrl/newt/logger"
@@ -20,6 +21,12 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+)
+
+const (
+	// udpAccessSessionTimeout is how long a UDP access session stays alive without traffic
+	// before being considered ended by the access logger
+	udpAccessSessionTimeout = 120 * time.Second
 )
 
 // PortRange represents an allowed range of ports (inclusive) with optional protocol filtering
@@ -46,6 +53,32 @@ type SubnetRule struct {
 	DisableIcmp  bool         // If true, ICMP traffic is blocked for this subnet
 	RewriteTo    string       // Optional rewrite address for DNAT - can be IP/CIDR or domain name
 	PortRanges   []PortRange  // empty slice means all ports allowed
+	ResourceId   int          // Optional resource ID from the server for access logging
+
+	// HTTP proxy configuration (optional).
+	// When Protocol is non-empty the TCP connection is handled by HTTPHandler
+	// instead of the raw TCP forwarder.
+	Protocol    string       // "", "http", or "https" — controls the incoming (client-facing) protocol
+	HTTPTargets []HTTPTarget // downstream services to proxy requests to
+	TLSCert     string       // PEM-encoded certificate for incoming HTTPS termination
+	TLSKey      string       // PEM-encoded private key for incoming HTTPS termination
+}
+
+// GetAllRules returns a copy of all subnet rules
+func (sl *SubnetLookup) GetAllRules() []SubnetRule {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+
+	var rules []SubnetRule
+	for _, destTriePtr := range sl.sourceTrie.All() {
+		if destTriePtr == nil {
+			continue
+		}
+		for _, rule := range destTriePtr.rules {
+			rules = append(rules, *rule)
+		}
+	}
+	return rules
 }
 
 // connKey uniquely identifies a connection for NAT tracking
@@ -90,14 +123,19 @@ type ProxyHandler struct {
 	tcpHandler        *TCPHandler
 	udpHandler        *UDPHandler
 	icmpHandler       *ICMPHandler
+	httpHandler       *HTTPHandler
 	subnetLookup      *SubnetLookup
 	natTable          map[connKey]*natState
 	reverseNatTable   map[reverseConnKey]*natState // Reverse lookup map for O(1) reply packet NAT
 	destRewriteTable  map[destKey]netip.Addr       // Maps original dest to rewritten dest for handler lookups
+	resourceTable     map[destKey]int              // Maps connection key to resource ID for access logging
 	natMu             sync.RWMutex
 	enabled           bool
 	icmpReplies       chan []byte          // Channel for ICMP reply packets to be sent back through the tunnel
 	notifiable        channel.Notification // Notification handler for triggering reads
+	accessLogger      *AccessLogger        // Access logger for tracking sessions
+	httpRequestLogger *HTTPRequestLogger   // HTTP request logger for proxied HTTP/HTTPS requests
+	blocked           atomic.Bool          // when true, all new connections are dropped
 }
 
 // ProxyHandlerOptions configures the proxy handler
@@ -120,7 +158,9 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 		natTable:         make(map[connKey]*natState),
 		reverseNatTable:  make(map[reverseConnKey]*natState),
 		destRewriteTable: make(map[destKey]netip.Addr),
+		resourceTable:    make(map[destKey]int),
 		icmpReplies:      make(chan []byte, 256), // Buffer for ICMP reply packets
+		accessLogger:     NewAccessLogger(udpAccessSessionTimeout),
 		proxyEp:          channel.New(1024, uint32(options.MTU), ""),
 		proxyStack: stack.New(stack.Options{
 			NetworkProtocols: []stack.NetworkProtocolFactory{
@@ -136,12 +176,24 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 		}),
 	}
 
-	// Initialize TCP handler if enabled
+	// Initialize TCP handler if enabled. The HTTP handler piggybacks on the
+	// TCP forwarder — TCPHandler.handleTCPConn checks the subnet rule for
+	// ports 80/443 and routes matching connections to the HTTP handler, so
+	// the HTTP handler is always initialised alongside TCP.
 	if options.EnableTCP {
 		handler.tcpHandler = NewTCPHandler(handler.proxyStack, handler)
 		if err := handler.tcpHandler.InstallTCPHandler(); err != nil {
 			return nil, fmt.Errorf("failed to install TCP handler: %v", err)
 		}
+
+		handler.httpHandler = NewHTTPHandler(handler.proxyStack, handler)
+		if err := handler.httpHandler.Start(); err != nil {
+			return nil, fmt.Errorf("failed to start HTTP handler: %v", err)
+		}
+
+		handler.httpRequestLogger = NewHTTPRequestLogger()
+		handler.httpHandler.SetRequestLogger(handler.httpRequestLogger)
+		logger.Debug("ProxyHandler: HTTP handler enabled")
 	}
 
 	// Initialize UDP handler if enabled
@@ -180,16 +232,36 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 	return handler, nil
 }
 
-// AddSubnetRule adds a subnet with optional port restrictions to the proxy handler
-// sourcePrefix: The IP prefix of the peer sending the data
-// destPrefix: The IP prefix of the destination
-// rewriteTo: Optional address to rewrite destination to - can be IP/CIDR or domain name
-// If portRanges is nil or empty, all ports are allowed for this subnet
-func (p *ProxyHandler) AddSubnetRule(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool) {
+// AddSubnetRule adds a subnet rule to the proxy handler.
+// HTTP proxy behaviour is configured via rule.Protocol, rule.HTTPTargets,
+// rule.TLSCert, and rule.TLSKey; leave Protocol empty for raw TCP/UDP.
+func (p *ProxyHandler) AddSubnetRule(rule SubnetRule) {
 	if p == nil || !p.enabled {
 		return
 	}
-	p.subnetLookup.AddSubnet(sourcePrefix, destPrefix, rewriteTo, portRanges, disableIcmp)
+	p.subnetLookup.AddSubnet(rule)
+}
+
+// SetBlocked enables or disables connection blocking on this proxy handler.
+// When enabled, all new TCP/UDP connections from the tunnel are dropped immediately.
+func (p *ProxyHandler) SetBlocked(v bool) {
+	if p == nil {
+		return
+	}
+	p.blocked.Store(v)
+	if v {
+		logger.Debug("ProxyHandler: connection blocking enabled")
+	} else {
+		logger.Debug("ProxyHandler: connection blocking disabled")
+	}
+}
+
+// IsBlocked returns true if connection blocking is currently enabled.
+func (p *ProxyHandler) IsBlocked() bool {
+	if p == nil {
+		return false
+	}
+	return p.blocked.Load()
 }
 
 // RemoveSubnetRule removes a subnet from the proxy handler
@@ -198,6 +270,69 @@ func (p *ProxyHandler) RemoveSubnetRule(sourcePrefix, destPrefix netip.Prefix) {
 		return
 	}
 	p.subnetLookup.RemoveSubnet(sourcePrefix, destPrefix)
+}
+
+// GetAllRules returns all subnet rules from the proxy handler
+func (p *ProxyHandler) GetAllRules() []SubnetRule {
+	if p == nil || !p.enabled {
+		return nil
+	}
+	return p.subnetLookup.GetAllRules()
+}
+
+// LookupResourceId looks up the resource ID for a connection
+// Returns 0 if no resource ID is associated with this connection
+func (p *ProxyHandler) LookupResourceId(srcIP, dstIP string, dstPort uint16, proto uint8) int {
+	if p == nil || !p.enabled {
+		return 0
+	}
+
+	key := destKey{
+		srcIP:   srcIP,
+		dstIP:   dstIP,
+		dstPort: dstPort,
+		proto:   proto,
+	}
+
+	p.natMu.RLock()
+	defer p.natMu.RUnlock()
+
+	return p.resourceTable[key]
+}
+
+// GetAccessLogger returns the access logger for session tracking
+func (p *ProxyHandler) GetAccessLogger() *AccessLogger {
+	if p == nil {
+		return nil
+	}
+	return p.accessLogger
+}
+
+// SetAccessLogSender configures the function used to send compressed access log
+// batches to the server. This should be called once the websocket client is available.
+func (p *ProxyHandler) SetAccessLogSender(fn SendFunc) {
+	if p == nil || !p.enabled || p.accessLogger == nil {
+		return
+	}
+	p.accessLogger.SetSendFunc(fn)
+}
+
+// GetHTTPRequestLogger returns the HTTP request logger.
+func (p *ProxyHandler) GetHTTPRequestLogger() *HTTPRequestLogger {
+	if p == nil {
+		return nil
+	}
+	return p.httpRequestLogger
+}
+
+// SetHTTPRequestLogSender configures the function used to send compressed HTTP
+// request log batches to the server. This should be called once the websocket
+// client is available.
+func (p *ProxyHandler) SetHTTPRequestLogSender(fn SendFunc) {
+	if p == nil || !p.enabled || p.httpRequestLogger == nil {
+		return
+	}
+	p.httpRequestLogger.SetSendFunc(fn)
 }
 
 // LookupDestinationRewrite looks up the rewritten destination for a connection
@@ -362,8 +497,22 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 	// Check if the source IP, destination IP, port, and protocol match any subnet rule
 	matchedRule := p.subnetLookup.Match(srcAddr, dstAddr, dstPort, protocol)
 	if matchedRule != nil {
-		logger.Debug("HandleIncomingPacket: Matched rule for %s -> %s (proto=%d, port=%d)",
-			srcAddr, dstAddr, protocol, dstPort)
+		logger.Debug("HandleIncomingPacket: Matched rule for %s -> %s (proto=%d, port=%d, resourceId=%d)",
+			srcAddr, dstAddr, protocol, dstPort, matchedRule.ResourceId)
+
+		// Store resource ID for connections without DNAT as well
+		if matchedRule.ResourceId != 0 && matchedRule.RewriteTo == "" {
+			dKey := destKey{
+				srcIP:   srcAddr.String(),
+				dstIP:   dstAddr.String(),
+				dstPort: dstPort,
+				proto:   uint8(protocol),
+			}
+			p.natMu.Lock()
+			p.resourceTable[dKey] = matchedRule.ResourceId
+			p.natMu.Unlock()
+		}
+
 		// Check if we need to perform DNAT
 		if matchedRule.RewriteTo != "" {
 			// Create connection tracking key using original destination
@@ -393,6 +542,13 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 				dstIP:   dstAddr.String(),
 				dstPort: dstPort,
 				proto:   uint8(protocol),
+			}
+
+			// Store resource ID for access logging if present
+			if matchedRule.ResourceId != 0 {
+				p.natMu.Lock()
+				p.resourceTable[dKey] = matchedRule.ResourceId
+				p.natMu.Unlock()
 			}
 
 			// Check if we already have a NAT entry for this connection
@@ -440,6 +596,18 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 
 				// Store destination rewrite for handler lookups
 				p.destRewriteTable[dKey] = newDst
+
+				// Also store the resource ID under the rewritten destination key so that
+				// TCP/UDP handlers can find it after DNAT (they see the post-NAT dst IP).
+				if matchedRule.ResourceId != 0 {
+					rewrittenKey := destKey{
+						srcIP:   srcAddr.String(),
+						dstIP:   newDst.String(),
+						dstPort: dstPort,
+						proto:   uint8(protocol),
+					}
+					p.resourceTable[rewrittenKey] = matchedRule.ResourceId
+				}
 				p.natMu.Unlock()
 				logger.Debug("New NAT entry for connection: %s -> %s", dstAddr, newDst)
 			}
@@ -468,7 +636,7 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 	}
 
 	// logger.Debug("HandleIncomingPacket: No matching rule for %s -> %s (proto=%d, port=%d)",
-		// srcAddr, dstAddr, protocol, dstPort)
+	// srcAddr, dstAddr, protocol, dstPort)
 	return false
 }
 
@@ -693,6 +861,21 @@ func (p *ProxyHandler) QueueICMPReply(packet []byte) bool {
 func (p *ProxyHandler) Close() error {
 	if p == nil || !p.enabled {
 		return nil
+	}
+
+	// Shut down access logger
+	if p.accessLogger != nil {
+		p.accessLogger.Close()
+	}
+
+	// Shut down HTTP request logger
+	if p.httpRequestLogger != nil {
+		p.httpRequestLogger.Close()
+	}
+
+	// Shut down HTTP handler
+	if p.httpHandler != nil {
+		p.httpHandler.Close()
 	}
 
 	// Close ICMP replies channel
