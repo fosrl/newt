@@ -1,9 +1,150 @@
 package main
 
 import (
+	"context"
 	"net"
+	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 )
+
+func TestWatchBlueprintFile_WriteTriggersSend(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "blueprint-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls atomic.Int32
+	go watchBlueprintFile(ctx, f.Name(), func() error {
+		calls.Add(1)
+		return nil
+	})
+
+	time.Sleep(50 * time.Millisecond)
+
+	if err := os.WriteFile(f.Name(), []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(700 * time.Millisecond)
+
+	if calls.Load() != 1 {
+		t.Errorf("expected 1 send call, got %d", calls.Load())
+	}
+}
+
+func TestWatchBlueprintFile_DebounceCoalescesEvents(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "blueprint-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls atomic.Int32
+	go watchBlueprintFile(ctx, f.Name(), func() error {
+		calls.Add(1)
+		return nil
+	})
+
+	time.Sleep(50 * time.Millisecond)
+
+	for i := 0; i < 5; i++ {
+		if err := os.WriteFile(f.Name(), []byte("change"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	time.Sleep(700 * time.Millisecond)
+
+	if calls.Load() != 1 {
+		t.Errorf("expected 1 send call after debounce, got %d", calls.Load())
+	}
+}
+
+func TestWatchBlueprintFile_ContextCancellationStops(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "blueprint-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		watchBlueprintFile(ctx, f.Name(), func() error { return nil })
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("watchBlueprintFile did not exit after context cancellation")
+	}
+}
+
+func TestWatchBlueprintFile_AtomicWriteTriggersSend(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "blueprint.yaml")
+	if err := os.WriteFile(target, []byte("initial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls atomic.Int32
+	go watchBlueprintFile(ctx, target, func() error {
+		calls.Add(1)
+		return nil
+	})
+
+	time.Sleep(50 * time.Millisecond)
+
+	tmp := filepath.Join(dir, "blueprint.yaml.tmp")
+	if err := os.WriteFile(tmp, []byte("updated"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(700 * time.Millisecond)
+
+	if calls.Load() < 1 {
+		t.Errorf("expected at least 1 send call after atomic write, got %d", calls.Load())
+	}
+}
+
+func TestWatchBlueprintFile_MissingFileReturnsGracefully(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		watchBlueprintFile(ctx, "/nonexistent/path/blueprint.yaml", func() error { return nil })
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("watchBlueprintFile did not return for missing file")
+	}
+}
 
 func TestParseTargetString(t *testing.T) {
 	tests := []struct {
@@ -13,7 +154,6 @@ func TestParseTargetString(t *testing.T) {
 		wantTargetAddr string
 		wantErr        bool
 	}{
-		// IPv4 test cases
 		{
 			name:           "valid IPv4 basic",
 			input:          "3001:192.168.1.1:80",
@@ -35,8 +175,6 @@ func TestParseTargetString(t *testing.T) {
 			wantTargetAddr: "10.0.0.1:443",
 			wantErr:        false,
 		},
-
-		// IPv6 test cases
 		{
 			name:           "valid IPv6 loopback",
 			input:          "3001:[::1]:8080",
@@ -72,8 +210,6 @@ func TestParseTargetString(t *testing.T) {
 			wantTargetAddr: "[::ffff:192.168.1.1]:6000",
 			wantErr:        false,
 		},
-
-		// Hostname test cases
 		{
 			name:           "valid hostname",
 			input:          "8080:example.com:80",
@@ -95,8 +231,6 @@ func TestParseTargetString(t *testing.T) {
 			wantTargetAddr: "localhost:3000",
 			wantErr:        false,
 		},
-
-		// Error cases
 		{
 			name:    "invalid - no colons",
 			input:   "invalid",
@@ -169,7 +303,7 @@ func TestParseTargetString(t *testing.T) {
 			}
 
 			if tt.wantErr {
-				return // Don't check other values if we expected an error
+				return
 			}
 
 			if listenPort != tt.wantListenPort {
@@ -183,7 +317,7 @@ func TestParseTargetString(t *testing.T) {
 	}
 }
 
-// TestParseTargetStringNetDialCompatibility verifies that the output is compatible with net.Dial
+// TestParseTargetStringNetDialCompatibility verifies that the output is compatible with net.Dial.
 func TestParseTargetStringNetDialCompatibility(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -201,8 +335,6 @@ func TestParseTargetStringNetDialCompatibility(t *testing.T) {
 				t.Fatalf("parseTargetString(%q) unexpected error: %v", tt.input, err)
 			}
 
-			// Verify the format is valid for net.Dial by checking it can be split back
-			// This doesn't actually dial, just validates the format
 			_, _, err = net.SplitHostPort(targetAddr)
 			if err != nil {
 				t.Errorf("parseTargetString(%q) produced invalid net.Dial format %q: %v", tt.input, targetAddr, err)
