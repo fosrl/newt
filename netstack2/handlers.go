@@ -1,8 +1,3 @@
-/* SPDX-License-Identifier: MIT
- *
- * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
- */
-
 package netstack2
 
 import (
@@ -137,13 +132,39 @@ func (h *TCPHandler) InstallTCPHandler() error {
 
 // handleTCPConn handles a TCP connection by proxying it to the actual target
 func (h *TCPHandler) handleTCPConn(netstackConn *gonet.TCPConn, id stack.TransportEndpointID) {
-	defer netstackConn.Close()
-
-	// Extract source and target address from the connection ID
+	// Extract source and target address from the connection ID first so they
+	// are available for HTTP routing before any defer is set up.
 	srcIP := id.RemoteAddress.String()
 	srcPort := id.RemotePort
 	dstIP := id.LocalAddress.String()
 	dstPort := id.LocalPort
+
+	// Drop connection if blocking is enabled
+	if h.proxyHandler != nil && h.proxyHandler.IsBlocked() {
+		logger.Debug("TCP Forwarder: connection blocked: %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
+		netstackConn.Close()
+		return
+	}
+
+	// For HTTP/HTTPS ports, look up the matching subnet rule. If the rule has
+	// Protocol configured, hand the connection off to the HTTP handler which
+	// takes full ownership of the lifecycle (the defer close must not be
+	// installed before this point).
+	if (dstPort == 80 || dstPort == 443) && h.proxyHandler != nil && h.proxyHandler.httpHandler != nil {
+		srcAddr, _ := netip.ParseAddr(srcIP)
+		dstAddr, _ := netip.ParseAddr(dstIP)
+		rule := h.proxyHandler.subnetLookup.Match(srcAddr, dstAddr, dstPort, tcp.ProtocolNumber)
+		if rule != nil && rule.Protocol != "" && len(rule.HTTPTargets) > 0 {
+			logger.Info("TCP Forwarder: Routing %s:%d -> %s:%d to HTTP handler (%s)",
+				srcIP, srcPort, dstIP, dstPort, rule.Protocol)
+			h.proxyHandler.httpHandler.HandleConn(netstackConn, rule)
+			return
+		}
+		// Otherwise fall through to raw TCP forwarding (e.g. CIDR resources
+		// that happen to use port 80/443 without HTTP configuration).
+	}
+
+	defer netstackConn.Close()
 
 	logger.Info("TCP Forwarder: Handling connection %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
 
@@ -158,6 +179,18 @@ func (h *TCPHandler) handleTCPConn(netstackConn *gonet.TCPConn, id stack.Transpo
 
 	targetAddr := fmt.Sprintf("%s:%d", actualDstIP, dstPort)
 
+	// Look up resource ID and start access session if applicable
+	var accessSessionID string
+	if h.proxyHandler != nil {
+		resourceId := h.proxyHandler.LookupResourceId(srcIP, dstIP, dstPort, uint8(tcp.ProtocolNumber))
+		if resourceId != 0 {
+			if al := h.proxyHandler.GetAccessLogger(); al != nil {
+				srcAddr := fmt.Sprintf("%s:%d", srcIP, srcPort)
+				accessSessionID = al.StartTCPSession(resourceId, srcAddr, targetAddr)
+			}
+		}
+	}
+
 	// Create context with timeout for connection establishment
 	ctx, cancel := context.WithTimeout(context.Background(), tcpConnectTimeout)
 	defer cancel()
@@ -167,10 +200,25 @@ func (h *TCPHandler) handleTCPConn(netstackConn *gonet.TCPConn, id stack.Transpo
 	targetConn, err := d.DialContext(ctx, "tcp", targetAddr)
 	if err != nil {
 		logger.Info("TCP Forwarder: Failed to connect to %s: %v", targetAddr, err)
+		// End access session on connection failure
+		if accessSessionID != "" {
+			if al := h.proxyHandler.GetAccessLogger(); al != nil {
+				al.EndTCPSession(accessSessionID)
+			}
+		}
 		// Connection failed, netstack will handle RST
 		return
 	}
 	defer targetConn.Close()
+
+	// End access session when connection closes
+	if accessSessionID != "" {
+		defer func() {
+			if al := h.proxyHandler.GetAccessLogger(); al != nil {
+				al.EndTCPSession(accessSessionID)
+			}
+		}()
+	}
 
 	logger.Info("TCP Forwarder: Successfully connected to %s, starting bidirectional copy", targetAddr)
 
@@ -269,6 +317,12 @@ func (h *UDPHandler) handleUDPConn(netstackConn *gonet.UDPConn, id stack.Transpo
 
 	logger.Info("UDP Forwarder: Handling connection %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
 
+	// Drop connection if blocking is enabled
+	if h.proxyHandler != nil && h.proxyHandler.IsBlocked() {
+		logger.Debug("UDP Forwarder: connection blocked: %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
+		return
+	}
+
 	// Check if there's a destination rewrite for this connection (e.g., localhost targets)
 	actualDstIP := dstIP
 	if h.proxyHandler != nil {
@@ -279,6 +333,27 @@ func (h *UDPHandler) handleUDPConn(netstackConn *gonet.UDPConn, id stack.Transpo
 	}
 
 	targetAddr := fmt.Sprintf("%s:%d", actualDstIP, dstPort)
+
+	// Look up resource ID and start access session if applicable
+	var accessSessionID string
+	if h.proxyHandler != nil {
+		resourceId := h.proxyHandler.LookupResourceId(srcIP, dstIP, dstPort, uint8(udp.ProtocolNumber))
+		if resourceId != 0 {
+			if al := h.proxyHandler.GetAccessLogger(); al != nil {
+				srcAddr := fmt.Sprintf("%s:%d", srcIP, srcPort)
+				accessSessionID = al.TrackUDPSession(resourceId, srcAddr, targetAddr)
+			}
+		}
+	}
+
+	// End access session when UDP handler returns (timeout or error)
+	if accessSessionID != "" {
+		defer func() {
+			if al := h.proxyHandler.GetAccessLogger(); al != nil {
+				al.EndUDPSession(accessSessionID)
+			}
+		}()
+	}
 
 	// Resolve target address
 	remoteUDPAddr, err := net.ResolveUDPAddr("udp", targetAddr)

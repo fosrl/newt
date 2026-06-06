@@ -7,6 +7,7 @@ import (
 	wgnetstack "github.com/fosrl/newt/clients"
 	"github.com/fosrl/newt/clients/permissions"
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/nativessh"
 	"github.com/fosrl/newt/websocket"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
@@ -14,7 +15,7 @@ import (
 var wgService *clients.WireGuardService
 var ready bool
 
-func setupClients(client *websocket.Client) {
+func setupClients(client *websocket.Client, credStore *nativessh.CredentialStore) {
 	var host = endpoint
 	if strings.HasPrefix(host, "http://") {
 		host = strings.TrimPrefix(host, "http://")
@@ -42,6 +43,8 @@ func setupClients(client *websocket.Client) {
 		logger.Fatal("Failed to create WireGuard service: %v", err)
 	}
 
+	wgService.SetCredentialStore(credStore)
+
 	client.OnTokenUpdate(func(token string) {
 		wgService.SetToken(token)
 	})
@@ -60,6 +63,13 @@ func closeClients() {
 	if wgService != nil {
 		wgService.Close()
 		wgService = nil
+	}
+}
+
+// setClientsBlocked enables or disables connection blocking on the WireGuard service.
+func setClientsBlocked(v bool) {
+	if wgService != nil {
+		wgService.SetBlocked(v)
 	}
 }
 

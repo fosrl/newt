@@ -1,8 +1,3 @@
-/* SPDX-License-Identifier: MIT
- *
- * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
- */
-
 package netstack2
 
 import (
@@ -351,13 +346,13 @@ func (net *Net) ListenUDP(laddr *net.UDPAddr) (*gonet.UDPConn, error) {
 	return net.DialUDP(laddr, nil)
 }
 
-// AddProxySubnetRule adds a subnet rule to the proxy handler
-// If portRanges is nil or empty, all ports are allowed for this subnet
-// rewriteTo can be either an IP/CIDR (e.g., "192.168.1.1/32") or a domain name (e.g., "example.com")
-func (net *Net) AddProxySubnetRule(sourcePrefix, destPrefix netip.Prefix, rewriteTo string, portRanges []PortRange, disableIcmp bool) {
+// AddProxySubnetRule adds a subnet rule to the proxy handler.
+// HTTP proxy behaviour is configured via rule.Protocol, rule.HTTPTargets,
+// rule.TLSCert, and rule.TLSKey; leave Protocol empty for raw TCP/UDP.
+func (net *Net) AddProxySubnetRule(rule SubnetRule) {
 	tun := (*netTun)(net)
 	if tun.proxyHandler != nil {
-		tun.proxyHandler.AddSubnetRule(sourcePrefix, destPrefix, rewriteTo, portRanges, disableIcmp)
+		tun.proxyHandler.AddSubnetRule(rule)
 	}
 }
 
@@ -369,11 +364,39 @@ func (net *Net) RemoveProxySubnetRule(sourcePrefix, destPrefix netip.Prefix) {
 	}
 }
 
+// GetProxySubnetRules returns all subnet rules from the proxy handler
+func (net *Net) GetProxySubnetRules() []SubnetRule {
+	tun := (*netTun)(net)
+	if tun.proxyHandler != nil {
+		return tun.proxyHandler.GetAllRules()
+	}
+	return nil
+}
+
 // GetProxyHandler returns the proxy handler (for advanced use cases)
 // Returns nil if proxy is not enabled
 func (net *Net) GetProxyHandler() *ProxyHandler {
 	tun := (*netTun)(net)
 	return tun.proxyHandler
+}
+
+// SetAccessLogSender configures the function used to send compressed access log
+// batches to the server. This should be called once the websocket client is available.
+func (net *Net) SetAccessLogSender(fn SendFunc) {
+	tun := (*netTun)(net)
+	if tun.proxyHandler != nil {
+		tun.proxyHandler.SetAccessLogSender(fn)
+	}
+}
+
+// SetHTTPRequestLogSender configures the function used to send compressed HTTP
+// request log batches to the server. This should be called once the websocket
+// client is available.
+func (net *Net) SetHTTPRequestLogSender(fn SendFunc) {
+	tun := (*netTun)(net)
+	if tun.proxyHandler != nil {
+		tun.proxyHandler.SetHTTPRequestLogSender(fn)
+	}
 }
 
 type PingConn struct {
