@@ -1,4 +1,4 @@
-package main
+package newt
 
 import (
 	"bytes"
@@ -22,16 +22,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fosrl/newt/authdaemon"
-	"github.com/fosrl/newt/browsergateway"
-	"github.com/fosrl/newt/docker"
-	"github.com/fosrl/newt/healthcheck"
-	"github.com/fosrl/newt/logger"
-	"github.com/fosrl/newt/nativessh"
-	"github.com/fosrl/newt/proxy"
-	"github.com/fosrl/newt/updates"
-	"github.com/fosrl/newt/util"
-	"github.com/fosrl/newt/websocket"
+	"github.com/fosrl/newt/internal/authdaemon"
+	"github.com/fosrl/newt/internal/browsergateway"
+	"github.com/fosrl/newt/internal/docker"
+	"github.com/fosrl/newt/pkg/healthcheck"
+	"github.com/fosrl/newt/pkg/logger"
+	"github.com/fosrl/newt/pkg/nativessh"
+	"github.com/fosrl/newt/internal/proxy"
+	"github.com/fosrl/newt/internal/updates"
+	"github.com/fosrl/newt/pkg/util"
+	"github.com/fosrl/newt/internal/websocket"
 
 	"github.com/fosrl/newt/internal/state"
 	"github.com/fosrl/newt/internal/telemetry"
@@ -200,7 +200,8 @@ func generateChainId() string {
 	return hex.EncodeToString(b)
 }
 
-func main() {
+// Run is the entrypoint of the newt application. It is invoked by cmd/newt.
+func Run() {
 	// Check for subcommands first (only principals exits early)
 	if len(os.Args) > 1 {
 		switch os.Args[1] {

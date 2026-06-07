@@ -1,4 +1,4 @@
-package main
+package newt
 
 import (
 	"context"
@@ -154,6 +154,7 @@ func TestParseTargetString(t *testing.T) {
 		wantTargetAddr string
 		wantErr        bool
 	}{
+		// IPv4 test cases
 		{
 			name:           "valid IPv4 basic",
 			input:          "3001:192.168.1.1:80",
@@ -175,6 +176,8 @@ func TestParseTargetString(t *testing.T) {
 			wantTargetAddr: "10.0.0.1:443",
 			wantErr:        false,
 		},
+
+		// IPv6 test cases
 		{
 			name:           "valid IPv6 loopback",
 			input:          "3001:[::1]:8080",
@@ -210,6 +213,8 @@ func TestParseTargetString(t *testing.T) {
 			wantTargetAddr: "[::ffff:192.168.1.1]:6000",
 			wantErr:        false,
 		},
+
+		// Hostname test cases
 		{
 			name:           "valid hostname",
 			input:          "8080:example.com:80",
@@ -231,6 +236,8 @@ func TestParseTargetString(t *testing.T) {
 			wantTargetAddr: "localhost:3000",
 			wantErr:        false,
 		},
+
+		// Error cases
 		{
 			name:    "invalid - no colons",
 			input:   "invalid",
@@ -303,7 +310,7 @@ func TestParseTargetString(t *testing.T) {
 			}
 
 			if tt.wantErr {
-				return
+				return // Don't check other values if we expected an error
 			}
 
 			if listenPort != tt.wantListenPort {
@@ -317,7 +324,7 @@ func TestParseTargetString(t *testing.T) {
 	}
 }
 
-// TestParseTargetStringNetDialCompatibility verifies that the output is compatible with net.Dial.
+// TestParseTargetStringNetDialCompatibility verifies that the output is compatible with net.Dial
 func TestParseTargetStringNetDialCompatibility(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -335,6 +342,8 @@ func TestParseTargetStringNetDialCompatibility(t *testing.T) {
 				t.Fatalf("parseTargetString(%q) unexpected error: %v", tt.input, err)
 			}
 
+			// Verify the format is valid for net.Dial by checking it can be split back
+			// This doesn't actually dial, just validates the format
 			_, _, err = net.SplitHostPort(targetAddr)
 			if err != nil {
 				t.Errorf("parseTargetString(%q) produced invalid net.Dial format %q: %v", tt.input, targetAddr, err)

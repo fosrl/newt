@@ -1,4 +1,4 @@
-package main
+package newt
 
 import (
 	"bytes"
@@ -15,10 +15,9 @@ import (
 	"math/rand"
 
 	"github.com/fosrl/newt/internal/telemetry"
-	"github.com/fosrl/newt/logger"
-	"github.com/fosrl/newt/proxy"
-	"github.com/fosrl/newt/websocket"
-	"github.com/fsnotify/fsnotify"
+	"github.com/fosrl/newt/pkg/logger"
+	"github.com/fosrl/newt/internal/proxy"
+	"github.com/fosrl/newt/internal/websocket"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.zx2c4.com/wireguard/tun/netstack"

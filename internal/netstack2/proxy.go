@@ -1,0 +1,899 @@
+package netstack2
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"net/netip"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/fosrl/newt/pkg/logger"
+	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
+	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+)
+
+const (
+	// udpAccessSessionTimeout is how long a UDP access session stays alive without traffic
+	// before being considered ended by the access logger
+	udpAccessSessionTimeout = 120 * time.Second
+)
+
+// PortRange represents an allowed range of ports (inclusive) with optional protocol filtering
+// Protocol can be "tcp", "udp", or "" (empty string means both protocols)
+type PortRange struct {
+	Min      uint16
+	Max      uint16
+	Protocol string // "tcp", "udp", or "" for both
+}
+
+// SubnetRule represents a subnet with optional port restrictions and source address
+// When RewriteTo is set, DNAT (Destination Network Address Translation) is performed:
+//   - Incoming packets: destination IP is rewritten to the resolved RewriteTo address
+//   - Outgoing packets: source IP is rewritten back to the original destination
+//
+// RewriteTo can be either:
+//   - An IP address with CIDR notation (e.g., "192.168.1.1/32")
+//   - A domain name (e.g., "example.com") which will be resolved at request time
+//
+// This allows transparent proxying where traffic appears to come from the rewritten address
+type SubnetRule struct {
+	SourcePrefix netip.Prefix // Source IP prefix (who is sending)
+	DestPrefix   netip.Prefix // Destination IP prefix (where it's going)
+	DisableIcmp  bool         // If true, ICMP traffic is blocked for this subnet
+	RewriteTo    string       // Optional rewrite address for DNAT - can be IP/CIDR or domain name
+	PortRanges   []PortRange  // empty slice means all ports allowed
+	ResourceId   int          // Optional resource ID from the server for access logging
+
+	// HTTP proxy configuration (optional).
+	// When Protocol is non-empty the TCP connection is handled by HTTPHandler
+	// instead of the raw TCP forwarder.
+	Protocol    string       // "", "http", or "https" — controls the incoming (client-facing) protocol
+	HTTPTargets []HTTPTarget // downstream services to proxy requests to
+	TLSCert     string       // PEM-encoded certificate for incoming HTTPS termination
+	TLSKey      string       // PEM-encoded private key for incoming HTTPS termination
+}
+
+// GetAllRules returns a copy of all subnet rules
+func (sl *SubnetLookup) GetAllRules() []SubnetRule {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+
+	var rules []SubnetRule
+	for _, destTriePtr := range sl.sourceTrie.All() {
+		if destTriePtr == nil {
+			continue
+		}
+		for _, rule := range destTriePtr.rules {
+			rules = append(rules, *rule)
+		}
+	}
+	return rules
+}
+
+// connKey uniquely identifies a connection for NAT tracking
+type connKey struct {
+	srcIP   string
+	srcPort uint16
+	dstIP   string
+	dstPort uint16
+	proto   uint8
+}
+
+// reverseConnKey uniquely identifies a connection for reverse NAT lookup (reply direction)
+// Key structure: (rewrittenTo, originalSrcIP, originalSrcPort, originalDstPort, proto)
+// This allows O(1) lookup of NAT entries for reply packets
+type reverseConnKey struct {
+	rewrittenTo     string // The address we rewrote to (becomes src in replies)
+	originalSrcIP   string // Original source IP (becomes dst in replies)
+	originalSrcPort uint16 // Original source port (becomes dst port in replies)
+	originalDstPort uint16 // Original destination port (becomes src port in replies)
+	proto           uint8
+}
+
+// destKey identifies a destination for handler lookups (without source port since it may change)
+type destKey struct {
+	srcIP   string
+	dstIP   string
+	dstPort uint16
+	proto   uint8
+}
+
+// natState tracks NAT translation state for reverse translation
+type natState struct {
+	originalDst netip.Addr // Original destination before DNAT
+	rewrittenTo netip.Addr // The address we rewrote to
+}
+
+// ProxyHandler handles packet injection and extraction for promiscuous mode
+type ProxyHandler struct {
+	proxyStack        *stack.Stack
+	proxyEp           *channel.Endpoint
+	proxyNotifyHandle *channel.NotificationHandle
+	tcpHandler        *TCPHandler
+	udpHandler        *UDPHandler
+	icmpHandler       *ICMPHandler
+	httpHandler       *HTTPHandler
+	subnetLookup      *SubnetLookup
+	natTable          map[connKey]*natState
+	reverseNatTable   map[reverseConnKey]*natState // Reverse lookup map for O(1) reply packet NAT
+	destRewriteTable  map[destKey]netip.Addr       // Maps original dest to rewritten dest for handler lookups
+	resourceTable     map[destKey]int              // Maps connection key to resource ID for access logging
+	natMu             sync.RWMutex
+	enabled           bool
+	icmpReplies       chan []byte          // Channel for ICMP reply packets to be sent back through the tunnel
+	notifiable        channel.Notification // Notification handler for triggering reads
+	accessLogger      *AccessLogger        // Access logger for tracking sessions
+	httpRequestLogger *HTTPRequestLogger   // HTTP request logger for proxied HTTP/HTTPS requests
+	blocked           atomic.Bool          // when true, all new connections are dropped
+}
+
+// ProxyHandlerOptions configures the proxy handler
+type ProxyHandlerOptions struct {
+	EnableTCP  bool
+	EnableUDP  bool
+	EnableICMP bool
+	MTU        int
+}
+
+// NewProxyHandler creates a new proxy handler for promiscuous mode
+func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
+	if !options.EnableTCP && !options.EnableUDP && !options.EnableICMP {
+		return nil, nil // No proxy needed
+	}
+
+	handler := &ProxyHandler{
+		enabled:          true,
+		subnetLookup:     NewSubnetLookup(),
+		natTable:         make(map[connKey]*natState),
+		reverseNatTable:  make(map[reverseConnKey]*natState),
+		destRewriteTable: make(map[destKey]netip.Addr),
+		resourceTable:    make(map[destKey]int),
+		icmpReplies:      make(chan []byte, 256), // Buffer for ICMP reply packets
+		accessLogger:     NewAccessLogger(udpAccessSessionTimeout),
+		proxyEp:          channel.New(1024, uint32(options.MTU), ""),
+		proxyStack: stack.New(stack.Options{
+			NetworkProtocols: []stack.NetworkProtocolFactory{
+				ipv4.NewProtocol,
+				ipv6.NewProtocol,
+			},
+			TransportProtocols: []stack.TransportProtocolFactory{
+				tcp.NewProtocol,
+				udp.NewProtocol,
+				icmp.NewProtocol4,
+				icmp.NewProtocol6,
+			},
+		}),
+	}
+
+	// Initialize TCP handler if enabled. The HTTP handler piggybacks on the
+	// TCP forwarder — TCPHandler.handleTCPConn checks the subnet rule for
+	// ports 80/443 and routes matching connections to the HTTP handler, so
+	// the HTTP handler is always initialised alongside TCP.
+	if options.EnableTCP {
+		handler.tcpHandler = NewTCPHandler(handler.proxyStack, handler)
+		if err := handler.tcpHandler.InstallTCPHandler(); err != nil {
+			return nil, fmt.Errorf("failed to install TCP handler: %v", err)
+		}
+
+		handler.httpHandler = NewHTTPHandler(handler.proxyStack, handler)
+		if err := handler.httpHandler.Start(); err != nil {
+			return nil, fmt.Errorf("failed to start HTTP handler: %v", err)
+		}
+
+		handler.httpRequestLogger = NewHTTPRequestLogger()
+		handler.httpHandler.SetRequestLogger(handler.httpRequestLogger)
+		logger.Debug("ProxyHandler: HTTP handler enabled")
+	}
+
+	// Initialize UDP handler if enabled
+	if options.EnableUDP {
+		handler.udpHandler = NewUDPHandler(handler.proxyStack, handler)
+		if err := handler.udpHandler.InstallUDPHandler(); err != nil {
+			return nil, fmt.Errorf("failed to install UDP handler: %v", err)
+		}
+	}
+
+	// Initialize ICMP handler if enabled
+	if options.EnableICMP {
+		handler.icmpHandler = NewICMPHandler(handler.proxyStack, handler)
+		if err := handler.icmpHandler.InstallICMPHandler(); err != nil {
+			return nil, fmt.Errorf("failed to install ICMP handler: %v", err)
+		}
+		logger.Debug("ProxyHandler: ICMP handler enabled")
+	}
+
+	// // Example 1: Add a rule with no port restrictions (all ports allowed)
+	// // This accepts all traffic FROM 10.0.0.0/24 TO 10.20.20.0/24
+	// sourceSubnet := netip.MustParsePrefix("10.0.0.0/24")
+	// destSubnet := netip.MustParsePrefix("10.20.20.0/24")
+	// handler.AddSubnetRule(sourceSubnet, destSubnet, nil)
+
+	// // Example 2: Add a rule with specific port ranges
+	// // This accepts traffic FROM 10.0.0.5/32 TO 10.20.21.21/32 only on ports 80, 443, and 8000-9000
+	// sourceIP := netip.MustParsePrefix("10.0.0.5/32")
+	// destIP := netip.MustParsePrefix("10.20.21.21/32")
+	// handler.AddSubnetRule(sourceIP, destIP, []PortRange{
+	// 	{Min: 80, Max: 80},
+	// 	{Min: 443, Max: 443},
+	// 	{Min: 8000, Max: 9000},
+	// })
+
+	return handler, nil
+}
+
+// AddSubnetRule adds a subnet rule to the proxy handler.
+// HTTP proxy behaviour is configured via rule.Protocol, rule.HTTPTargets,
+// rule.TLSCert, and rule.TLSKey; leave Protocol empty for raw TCP/UDP.
+func (p *ProxyHandler) AddSubnetRule(rule SubnetRule) {
+	if p == nil || !p.enabled {
+		return
+	}
+	p.subnetLookup.AddSubnet(rule)
+}
+
+// SetBlocked enables or disables connection blocking on this proxy handler.
+// When enabled, all new TCP/UDP connections from the tunnel are dropped immediately.
+func (p *ProxyHandler) SetBlocked(v bool) {
+	if p == nil {
+		return
+	}
+	p.blocked.Store(v)
+	if v {
+		logger.Debug("ProxyHandler: connection blocking enabled")
+	} else {
+		logger.Debug("ProxyHandler: connection blocking disabled")
+	}
+}
+
+// IsBlocked returns true if connection blocking is currently enabled.
+func (p *ProxyHandler) IsBlocked() bool {
+	if p == nil {
+		return false
+	}
+	return p.blocked.Load()
+}
+
+// RemoveSubnetRule removes a subnet from the proxy handler
+func (p *ProxyHandler) RemoveSubnetRule(sourcePrefix, destPrefix netip.Prefix) {
+	if p == nil || !p.enabled {
+		return
+	}
+	p.subnetLookup.RemoveSubnet(sourcePrefix, destPrefix)
+}
+
+// GetAllRules returns all subnet rules from the proxy handler
+func (p *ProxyHandler) GetAllRules() []SubnetRule {
+	if p == nil || !p.enabled {
+		return nil
+	}
+	return p.subnetLookup.GetAllRules()
+}
+
+// LookupResourceId looks up the resource ID for a connection
+// Returns 0 if no resource ID is associated with this connection
+func (p *ProxyHandler) LookupResourceId(srcIP, dstIP string, dstPort uint16, proto uint8) int {
+	if p == nil || !p.enabled {
+		return 0
+	}
+
+	key := destKey{
+		srcIP:   srcIP,
+		dstIP:   dstIP,
+		dstPort: dstPort,
+		proto:   proto,
+	}
+
+	p.natMu.RLock()
+	defer p.natMu.RUnlock()
+
+	return p.resourceTable[key]
+}
+
+// GetAccessLogger returns the access logger for session tracking
+func (p *ProxyHandler) GetAccessLogger() *AccessLogger {
+	if p == nil {
+		return nil
+	}
+	return p.accessLogger
+}
+
+// SetAccessLogSender configures the function used to send compressed access log
+// batches to the server. This should be called once the websocket client is available.
+func (p *ProxyHandler) SetAccessLogSender(fn SendFunc) {
+	if p == nil || !p.enabled || p.accessLogger == nil {
+		return
+	}
+	p.accessLogger.SetSendFunc(fn)
+}
+
+// GetHTTPRequestLogger returns the HTTP request logger.
+func (p *ProxyHandler) GetHTTPRequestLogger() *HTTPRequestLogger {
+	if p == nil {
+		return nil
+	}
+	return p.httpRequestLogger
+}
+
+// SetHTTPRequestLogSender configures the function used to send compressed HTTP
+// request log batches to the server. This should be called once the websocket
+// client is available.
+func (p *ProxyHandler) SetHTTPRequestLogSender(fn SendFunc) {
+	if p == nil || !p.enabled || p.httpRequestLogger == nil {
+		return
+	}
+	p.httpRequestLogger.SetSendFunc(fn)
+}
+
+// LookupDestinationRewrite looks up the rewritten destination for a connection
+// This is used by TCP/UDP handlers to find the actual target address
+func (p *ProxyHandler) LookupDestinationRewrite(srcIP, dstIP string, dstPort uint16, proto uint8) (netip.Addr, bool) {
+	if p == nil || !p.enabled {
+		return netip.Addr{}, false
+	}
+
+	key := destKey{
+		srcIP:   srcIP,
+		dstIP:   dstIP,
+		dstPort: dstPort,
+		proto:   proto,
+	}
+
+	p.natMu.RLock()
+	defer p.natMu.RUnlock()
+
+	addr, ok := p.destRewriteTable[key]
+	return addr, ok
+}
+
+// resolveRewriteAddress resolves a rewrite address which can be either:
+// - An IP address with CIDR notation (e.g., "192.168.1.1/32") - returns the IP directly
+// - A plain IP address (e.g., "192.168.1.1") - returns the IP directly
+// - A domain name (e.g., "example.com") - performs DNS lookup
+func (p *ProxyHandler) resolveRewriteAddress(rewriteTo string) (netip.Addr, error) {
+	logger.Debug("Resolving rewrite address: %s", rewriteTo)
+
+	// First, try to parse as a CIDR prefix (e.g., "192.168.1.1/32")
+	if prefix, err := netip.ParsePrefix(rewriteTo); err == nil {
+		return prefix.Addr(), nil
+	}
+
+	// Try to parse as a plain IP address (e.g., "192.168.1.1")
+	if addr, err := netip.ParseAddr(rewriteTo); err == nil {
+		return addr, nil
+	}
+
+	// Not an IP address, treat as domain name - perform DNS lookup
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip4", rewriteTo)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("failed to resolve domain %s: %w", rewriteTo, err)
+	}
+
+	if len(ips) == 0 {
+		return netip.Addr{}, fmt.Errorf("no IP addresses found for domain %s", rewriteTo)
+	}
+
+	// Use the first resolved IP address
+	ip := ips[0]
+	if ip4 := ip.To4(); ip4 != nil {
+		addr := netip.AddrFrom4([4]byte{ip4[0], ip4[1], ip4[2], ip4[3]})
+		logger.Debug("Resolved %s to %s", rewriteTo, addr)
+		return addr, nil
+	}
+
+	return netip.Addr{}, fmt.Errorf("no IPv4 address found for domain %s", rewriteTo)
+}
+
+// Initialize sets up the promiscuous NIC with the netTun's notification system
+func (p *ProxyHandler) Initialize(notifiable channel.Notification) error {
+	if p == nil || !p.enabled {
+		return nil
+	}
+
+	// Store notifiable for triggering notifications on ICMP replies
+	p.notifiable = notifiable
+
+	// Add notification handler
+	p.proxyNotifyHandle = p.proxyEp.AddNotify(notifiable)
+
+	// Create NIC with promiscuous mode
+	tcpipErr := p.proxyStack.CreateNICWithOptions(1, p.proxyEp, stack.NICOptions{
+		Disabled: false,
+		QDisc:    nil,
+	})
+	if tcpipErr != nil {
+		return fmt.Errorf("CreateNIC (proxy): %v", tcpipErr)
+	}
+
+	// Enable promiscuous mode - accepts packets for any destination IP
+	if tcpipErr := p.proxyStack.SetPromiscuousMode(1, true); tcpipErr != nil {
+		return fmt.Errorf("SetPromiscuousMode: %v", tcpipErr)
+	}
+
+	// Enable spoofing - allows sending packets from any source IP
+	if tcpipErr := p.proxyStack.SetSpoofing(1, true); tcpipErr != nil {
+		return fmt.Errorf("SetSpoofing: %v", tcpipErr)
+	}
+
+	// Add default route
+	p.proxyStack.AddRoute(tcpip.Route{
+		Destination: header.IPv4EmptySubnet,
+		NIC:         1,
+	})
+
+	return nil
+}
+
+// HandleIncomingPacket processes incoming packets and determines if they should
+// be injected into the proxy stack
+func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
+	if p == nil || !p.enabled {
+		return false
+	}
+
+	// Check minimum packet size
+	if len(packet) < header.IPv4MinimumSize {
+		return false
+	}
+
+	// Only handle IPv4 for now
+	if packet[0]>>4 != 4 {
+		return false
+	}
+
+	// Parse IPv4 header
+	ipv4Header := header.IPv4(packet)
+	srcIP := ipv4Header.SourceAddress()
+	dstIP := ipv4Header.DestinationAddress()
+
+	// Convert gvisor tcpip.Address to netip.Addr
+	srcBytes := srcIP.As4()
+	srcAddr := netip.AddrFrom4(srcBytes)
+	dstBytes := dstIP.As4()
+	dstAddr := netip.AddrFrom4(dstBytes)
+
+	// Parse transport layer to get destination port
+	var dstPort uint16
+	protocol := ipv4Header.TransportProtocol()
+	headerLen := int(ipv4Header.HeaderLength())
+
+	// Extract port based on protocol
+	switch protocol {
+	case header.TCPProtocolNumber:
+		if len(packet) < headerLen+header.TCPMinimumSize {
+			return false
+		}
+		tcpHeader := header.TCP(packet[headerLen:])
+		dstPort = tcpHeader.DestinationPort()
+	case header.UDPProtocolNumber:
+		if len(packet) < headerLen+header.UDPMinimumSize {
+			return false
+		}
+		udpHeader := header.UDP(packet[headerLen:])
+		dstPort = udpHeader.DestinationPort()
+	case header.ICMPv4ProtocolNumber:
+		// ICMP doesn't have ports, use port 0 (must match rules with no port restrictions)
+		dstPort = 0
+		logger.Debug("HandleIncomingPacket: ICMP packet from %s to %s", srcAddr, dstAddr)
+	default:
+		// For other protocols, use port 0 (must match rules with no port restrictions)
+		dstPort = 0
+		logger.Debug("HandleIncomingPacket: Unknown protocol %d from %s to %s", protocol, srcAddr, dstAddr)
+	}
+
+	// Check if the source IP, destination IP, port, and protocol match any subnet rule
+	matchedRule := p.subnetLookup.Match(srcAddr, dstAddr, dstPort, protocol)
+	if matchedRule != nil {
+		logger.Debug("HandleIncomingPacket: Matched rule for %s -> %s (proto=%d, port=%d, resourceId=%d)",
+			srcAddr, dstAddr, protocol, dstPort, matchedRule.ResourceId)
+
+		// Store resource ID for connections without DNAT as well
+		if matchedRule.ResourceId != 0 && matchedRule.RewriteTo == "" {
+			dKey := destKey{
+				srcIP:   srcAddr.String(),
+				dstIP:   dstAddr.String(),
+				dstPort: dstPort,
+				proto:   uint8(protocol),
+			}
+			p.natMu.Lock()
+			p.resourceTable[dKey] = matchedRule.ResourceId
+			p.natMu.Unlock()
+		}
+
+		// Check if we need to perform DNAT
+		if matchedRule.RewriteTo != "" {
+			// Create connection tracking key using original destination
+			// This allows us to check if we've already resolved for this connection
+			var srcPort uint16
+			switch protocol {
+			case header.TCPProtocolNumber:
+				tcpHeader := header.TCP(packet[headerLen:])
+				srcPort = tcpHeader.SourcePort()
+			case header.UDPProtocolNumber:
+				udpHeader := header.UDP(packet[headerLen:])
+				srcPort = udpHeader.SourcePort()
+			}
+
+			// Key using original destination to track the connection
+			key := connKey{
+				srcIP:   srcAddr.String(),
+				srcPort: srcPort,
+				dstIP:   dstAddr.String(),
+				dstPort: dstPort,
+				proto:   uint8(protocol),
+			}
+
+			// Key for handler lookups (doesn't include srcPort for flexibility)
+			dKey := destKey{
+				srcIP:   srcAddr.String(),
+				dstIP:   dstAddr.String(),
+				dstPort: dstPort,
+				proto:   uint8(protocol),
+			}
+
+			// Store resource ID for access logging if present
+			if matchedRule.ResourceId != 0 {
+				p.natMu.Lock()
+				p.resourceTable[dKey] = matchedRule.ResourceId
+				p.natMu.Unlock()
+			}
+
+			// Check if we already have a NAT entry for this connection
+			p.natMu.RLock()
+			existingEntry, exists := p.natTable[key]
+			p.natMu.RUnlock()
+
+			var newDst netip.Addr
+			if exists {
+				// Use the previously resolved address for this connection
+				newDst = existingEntry.rewrittenTo
+				logger.Debug("Using existing NAT entry for connection: %s -> %s", dstAddr, newDst)
+			} else {
+				// New connection - resolve the rewrite address
+				var err error
+				newDst, err = p.resolveRewriteAddress(matchedRule.RewriteTo)
+				if err != nil {
+					// Failed to resolve, skip DNAT but still proxy the packet
+					logger.Debug("Failed to resolve rewrite address: %v", err)
+					pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{
+						Payload: buffer.MakeWithData(packet),
+					})
+					p.proxyEp.InjectInbound(header.IPv4ProtocolNumber, pkb)
+					return true
+				}
+
+				// Store NAT state for this connection
+				p.natMu.Lock()
+				natEntry := &natState{
+					originalDst: dstAddr,
+					rewrittenTo: newDst,
+				}
+				p.natTable[key] = natEntry
+
+				// Create reverse lookup key for O(1) reply packet lookups
+				// Key: (rewrittenTo, originalSrcIP, originalSrcPort, originalDstPort, proto)
+				reverseKey := reverseConnKey{
+					rewrittenTo:     newDst.String(),
+					originalSrcIP:   srcAddr.String(),
+					originalSrcPort: srcPort,
+					originalDstPort: dstPort,
+					proto:           uint8(protocol),
+				}
+				p.reverseNatTable[reverseKey] = natEntry
+
+				// Store destination rewrite for handler lookups
+				p.destRewriteTable[dKey] = newDst
+
+				// Also store the resource ID under the rewritten destination key so that
+				// TCP/UDP handlers can find it after DNAT (they see the post-NAT dst IP).
+				if matchedRule.ResourceId != 0 {
+					rewrittenKey := destKey{
+						srcIP:   srcAddr.String(),
+						dstIP:   newDst.String(),
+						dstPort: dstPort,
+						proto:   uint8(protocol),
+					}
+					p.resourceTable[rewrittenKey] = matchedRule.ResourceId
+				}
+				p.natMu.Unlock()
+				logger.Debug("New NAT entry for connection: %s -> %s", dstAddr, newDst)
+			}
+
+			// Check if target is loopback - if so, don't rewrite packet destination
+			// as gVisor will drop martian packets. Instead, the handlers will use
+			// destRewriteTable to find the actual target address.
+			if !newDst.IsLoopback() {
+				// Rewrite the packet only for non-loopback destinations
+				packet = p.rewritePacketDestination(packet, newDst)
+				if packet == nil {
+					return false
+				}
+			} else {
+				logger.Debug("Target is loopback, not rewriting packet - handlers will use rewrite table")
+			}
+		}
+
+		// Inject into proxy stack
+		pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{
+			Payload: buffer.MakeWithData(packet),
+		})
+		p.proxyEp.InjectInbound(header.IPv4ProtocolNumber, pkb)
+		logger.Debug("HandleIncomingPacket: Injected packet into proxy stack (proto=%d)", protocol)
+		return true
+	}
+
+	// logger.Debug("HandleIncomingPacket: No matching rule for %s -> %s (proto=%d, port=%d)",
+	// srcAddr, dstAddr, protocol, dstPort)
+	return false
+}
+
+// rewritePacketDestination rewrites the destination IP in a packet and recalculates checksums
+func (p *ProxyHandler) rewritePacketDestination(packet []byte, newDst netip.Addr) []byte {
+	if len(packet) < header.IPv4MinimumSize {
+		return nil
+	}
+
+	// Make a copy to avoid modifying the original
+	pkt := make([]byte, len(packet))
+	copy(pkt, packet)
+
+	ipv4Header := header.IPv4(pkt)
+	headerLen := int(ipv4Header.HeaderLength())
+
+	// Rewrite destination IP
+	newDstBytes := newDst.As4()
+	newDstAddr := tcpip.AddrFrom4(newDstBytes)
+	ipv4Header.SetDestinationAddress(newDstAddr)
+
+	// Recalculate IP checksum
+	ipv4Header.SetChecksum(0)
+	ipv4Header.SetChecksum(^ipv4Header.CalculateChecksum())
+
+	// Update transport layer checksum if needed
+	protocol := ipv4Header.TransportProtocol()
+	switch protocol {
+	case header.TCPProtocolNumber:
+		if len(pkt) >= headerLen+header.TCPMinimumSize {
+			tcpHeader := header.TCP(pkt[headerLen:])
+			tcpHeader.SetChecksum(0)
+			xsum := header.PseudoHeaderChecksum(
+				header.TCPProtocolNumber,
+				ipv4Header.SourceAddress(),
+				ipv4Header.DestinationAddress(),
+				uint16(len(pkt)-headerLen),
+			)
+			xsum = checksum.Checksum(pkt[headerLen:], xsum)
+			tcpHeader.SetChecksum(^xsum)
+		}
+	case header.UDPProtocolNumber:
+		if len(pkt) >= headerLen+header.UDPMinimumSize {
+			udpHeader := header.UDP(pkt[headerLen:])
+			udpHeader.SetChecksum(0)
+			xsum := header.PseudoHeaderChecksum(
+				header.UDPProtocolNumber,
+				ipv4Header.SourceAddress(),
+				ipv4Header.DestinationAddress(),
+				uint16(len(pkt)-headerLen),
+			)
+			xsum = checksum.Checksum(pkt[headerLen:], xsum)
+			udpHeader.SetChecksum(^xsum)
+		}
+	}
+
+	return pkt
+}
+
+// rewritePacketSource rewrites the source IP in a packet and recalculates checksums (for reverse NAT)
+func (p *ProxyHandler) rewritePacketSource(packet []byte, newSrc netip.Addr) []byte {
+	if len(packet) < header.IPv4MinimumSize {
+		return nil
+	}
+
+	// Make a copy to avoid modifying the original
+	pkt := make([]byte, len(packet))
+	copy(pkt, packet)
+
+	ipv4Header := header.IPv4(pkt)
+	headerLen := int(ipv4Header.HeaderLength())
+
+	// Rewrite source IP
+	newSrcBytes := newSrc.As4()
+	newSrcAddr := tcpip.AddrFrom4(newSrcBytes)
+	ipv4Header.SetSourceAddress(newSrcAddr)
+
+	// Recalculate IP checksum
+	ipv4Header.SetChecksum(0)
+	ipv4Header.SetChecksum(^ipv4Header.CalculateChecksum())
+
+	// Update transport layer checksum if needed
+	protocol := ipv4Header.TransportProtocol()
+	switch protocol {
+	case header.TCPProtocolNumber:
+		if len(pkt) >= headerLen+header.TCPMinimumSize {
+			tcpHeader := header.TCP(pkt[headerLen:])
+			tcpHeader.SetChecksum(0)
+			xsum := header.PseudoHeaderChecksum(
+				header.TCPProtocolNumber,
+				ipv4Header.SourceAddress(),
+				ipv4Header.DestinationAddress(),
+				uint16(len(pkt)-headerLen),
+			)
+			xsum = checksum.Checksum(pkt[headerLen:], xsum)
+			tcpHeader.SetChecksum(^xsum)
+		}
+	case header.UDPProtocolNumber:
+		if len(pkt) >= headerLen+header.UDPMinimumSize {
+			udpHeader := header.UDP(pkt[headerLen:])
+			udpHeader.SetChecksum(0)
+			xsum := header.PseudoHeaderChecksum(
+				header.UDPProtocolNumber,
+				ipv4Header.SourceAddress(),
+				ipv4Header.DestinationAddress(),
+				uint16(len(pkt)-headerLen),
+			)
+			xsum = checksum.Checksum(pkt[headerLen:], xsum)
+			udpHeader.SetChecksum(^xsum)
+		}
+	}
+
+	return pkt
+}
+
+// ReadOutgoingPacket reads packets from the proxy stack that need to be
+// sent back through the tunnel
+func (p *ProxyHandler) ReadOutgoingPacket() *buffer.View {
+	if p == nil || !p.enabled {
+		return nil
+	}
+
+	// First check for ICMP reply packets (non-blocking)
+	select {
+	case icmpReply := <-p.icmpReplies:
+		logger.Debug("ReadOutgoingPacket: Returning ICMP reply packet (%d bytes)", len(icmpReply))
+		return buffer.NewViewWithData(icmpReply)
+	default:
+		// No ICMP reply available, continue to check proxy endpoint
+	}
+
+	pkt := p.proxyEp.Read()
+	if pkt != nil {
+		view := pkt.ToView()
+		pkt.DecRef()
+
+		// Check if we need to perform reverse NAT
+		packet := view.AsSlice()
+		if len(packet) >= header.IPv4MinimumSize && packet[0]>>4 == 4 {
+			ipv4Header := header.IPv4(packet)
+			srcIP := ipv4Header.SourceAddress()
+			dstIP := ipv4Header.DestinationAddress()
+			protocol := ipv4Header.TransportProtocol()
+			headerLen := int(ipv4Header.HeaderLength())
+
+			// Extract ports
+			var srcPort, dstPort uint16
+			switch protocol {
+			case header.TCPProtocolNumber:
+				if len(packet) >= headerLen+header.TCPMinimumSize {
+					tcpHeader := header.TCP(packet[headerLen:])
+					srcPort = tcpHeader.SourcePort()
+					dstPort = tcpHeader.DestinationPort()
+				}
+			case header.UDPProtocolNumber:
+				if len(packet) >= headerLen+header.UDPMinimumSize {
+					udpHeader := header.UDP(packet[headerLen:])
+					srcPort = udpHeader.SourcePort()
+					dstPort = udpHeader.DestinationPort()
+				}
+			case header.ICMPv4ProtocolNumber:
+				// ICMP packets don't need NAT translation in our implementation
+				// since we construct reply packets with the correct addresses
+				logger.Debug("ReadOutgoingPacket: ICMP packet from %s to %s", srcIP, dstIP)
+				return view
+			}
+
+			// Look up NAT state for reverse translation using O(1) reverse lookup map
+			// Key: (rewrittenTo, originalSrcIP, originalSrcPort, originalDstPort, proto)
+			// For reply packets:
+			// - reply's srcIP = rewrittenTo (the address we rewrote to)
+			// - reply's dstIP = originalSrcIP (original source IP)
+			// - reply's srcPort = originalDstPort (original destination port)
+			// - reply's dstPort = originalSrcPort (original source port)
+			p.natMu.RLock()
+			reverseKey := reverseConnKey{
+				rewrittenTo:     srcIP.String(), // Reply's source is the rewritten address
+				originalSrcIP:   dstIP.String(), // Reply's destination is the original source
+				originalSrcPort: dstPort,        // Reply's destination port is the original source port
+				originalDstPort: srcPort,        // Reply's source port is the original destination port
+				proto:           uint8(protocol),
+			}
+			natEntry := p.reverseNatTable[reverseKey]
+			p.natMu.RUnlock()
+
+			if natEntry != nil {
+				// Perform reverse NAT - rewrite source to original destination
+				packet = p.rewritePacketSource(packet, natEntry.originalDst)
+				if packet != nil {
+					return buffer.NewViewWithData(packet)
+				}
+			}
+		}
+
+		return view
+	}
+
+	return nil
+}
+
+// QueueICMPReply queues an ICMP reply packet to be sent back through the tunnel
+func (p *ProxyHandler) QueueICMPReply(packet []byte) bool {
+	if p == nil || !p.enabled {
+		return false
+	}
+
+	select {
+	case p.icmpReplies <- packet:
+		logger.Debug("QueueICMPReply: Queued ICMP reply packet (%d bytes)", len(packet))
+		// Trigger notification so WriteNotify picks up the packet
+		if p.notifiable != nil {
+			p.notifiable.WriteNotify()
+		}
+		return true
+	default:
+		logger.Info("QueueICMPReply: ICMP reply channel full, dropping packet")
+		return false
+	}
+}
+
+// Close cleans up the proxy handler resources
+func (p *ProxyHandler) Close() error {
+	if p == nil || !p.enabled {
+		return nil
+	}
+
+	// Shut down access logger
+	if p.accessLogger != nil {
+		p.accessLogger.Close()
+	}
+
+	// Shut down HTTP request logger
+	if p.httpRequestLogger != nil {
+		p.httpRequestLogger.Close()
+	}
+
+	// Shut down HTTP handler
+	if p.httpHandler != nil {
+		p.httpHandler.Close()
+	}
+
+	// Close ICMP replies channel
+	if p.icmpReplies != nil {
+		close(p.icmpReplies)
+	}
+
+	if p.proxyStack != nil {
+		p.proxyStack.RemoveNIC(1)
+		p.proxyStack.Close()
+	}
+
+	if p.proxyEp != nil {
+		if p.proxyNotifyHandle != nil {
+			p.proxyEp.RemoveNotify(p.proxyNotifyHandle)
+		}
+		p.proxyEp.Close()
+	}
+
+	return nil
+}
