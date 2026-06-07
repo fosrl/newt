@@ -18,7 +18,7 @@ COPY . .
 
 # Build the application
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.newtVersion=${VERSION}" -o /newt
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X github.com/fosrl/newt/internal/app/newt.newtVersion=${VERSION}" -o /newt ./cmd/newt
 
 FROM public.ecr.aws/docker/library/alpine:3.23 AS runner
 

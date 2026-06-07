@@ -37,6 +37,8 @@
 
             vendorHash = "sha256-X70emc3uPN2YpsbudtoeEZDHilaTvFMqfRaDmIgRVZE=";
 
+            subPackages = [ "cmd/newt" ];
+
             nativeInstallCheckInputs = [ pkgs.versionCheckHook ];
 
             env = {
@@ -46,7 +48,7 @@
             ldflags = [
               "-s"
               "-w"
-              "-X main.newtVersion=${version}"
+              "-X github.com/fosrl/newt/internal/app/newt.newtVersion=${version}"
             ];
 
             # Tests are broken due to a lack of Internet.

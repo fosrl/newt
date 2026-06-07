@@ -1,0 +1,27 @@
+package authdaemon
+
+import (
+	"github.com/fosrl/newt/pkg/logger"
+)
+
+// ProcessConnection runs the same logic as POST /connection: CA cert, user create/reconcile, principals.
+// Use this when DisableHTTPS is true (e.g. embedded in Newt) instead of calling the API.
+func (s *Server) ProcessConnection(req ConnectionRequest) {
+	logger.Info("connection: niceId=%q username=%q metadata.sudoMode=%q metadata.sudoCommands=%v metadata.homedir=%v metadata.groups=%v",
+		req.NiceId, req.Username, req.Metadata.SudoMode, req.Metadata.SudoCommands, req.Metadata.Homedir, req.Metadata.Groups)
+
+	cfg := &s.cfg
+	if cfg.CACertPath != "" {
+		if err := writeCACertIfNotExists(cfg.CACertPath, req.CaCert, cfg.Force); err != nil {
+			logger.Warn("auth-daemon: write CA cert: %v", err)
+		}
+	}
+	if err := ensureUser(req.Username, req.Metadata, s.cfg.GenerateRandomPassword); err != nil {
+		logger.Warn("auth-daemon: ensure user: %v", err)
+	}
+	if cfg.PrincipalsFilePath != "" && req.NiceId != "" {
+		if err := writePrincipals(cfg.PrincipalsFilePath, req.Username, req.NiceId); err != nil {
+			logger.Warn("auth-daemon: write principals: %v", err)
+		}
+	}
+}

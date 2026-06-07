@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/pkg/logger"
 )
 
 // Example 1: Using the default logger (works exactly as before)
