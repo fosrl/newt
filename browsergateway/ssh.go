@@ -111,8 +111,10 @@ func serveSSHSession(ctx context.Context, ws *websocket.Conn, target, username, 
 	}
 	password := authMsg.Password
 	privateKey := authMsg.PrivateKey
+	certificate := authMsg.Certificate
 
-	// Build the list of auth methods. Private key takes priority when provided.
+	// Build the list of auth methods. Certificate+private key takes priority
+	// when both are provided, then private key, then password.
 	var authMethods []ssh.AuthMethod
 	if privateKey != "" {
 		signer, err := ssh.ParsePrivateKey([]byte(privateKey))
@@ -120,7 +122,29 @@ func serveSSHSession(ctx context.Context, ws *websocket.Conn, target, username, 
 			sendSSHError(ctx, ws, fmt.Sprintf("Failed to parse private key: %v", err))
 			return fmt.Errorf("parse private key: %w", err)
 		}
-		authMethods = append(authMethods, ssh.PublicKeys(signer))
+
+		if certificate != "" {
+			certPubKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(certificate))
+			if err != nil {
+				sendSSHError(ctx, ws, fmt.Sprintf("Failed to parse certificate: %v", err))
+				return fmt.Errorf("parse certificate: %w", err)
+			}
+
+			cert, ok := certPubKey.(*ssh.Certificate)
+			if !ok {
+				sendSSHError(ctx, ws, "Provided certificate is not a valid SSH certificate")
+				return fmt.Errorf("provided certificate is not ssh certificate")
+			}
+
+			certSigner, err := ssh.NewCertSigner(cert, signer)
+			if err != nil {
+				sendSSHError(ctx, ws, fmt.Sprintf("Failed to combine private key and certificate: %v", err))
+				return fmt.Errorf("new cert signer: %w", err)
+			}
+			authMethods = append(authMethods, ssh.PublicKeys(certSigner))
+		} else {
+			authMethods = append(authMethods, ssh.PublicKeys(signer))
+		}
 	}
 	if password != "" {
 		authMethods = append(authMethods, ssh.Password(password))
