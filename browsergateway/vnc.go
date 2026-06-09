@@ -2,6 +2,7 @@ package browsergateway
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -44,6 +45,18 @@ func (g *Gateway) handleVNC(w http.ResponseWriter, r *http.Request) {
 	}
 	target := net.JoinHostPort(host, port)
 
+	// Optional HTTP probe used by the web UI to surface backend reachability
+	// failures before attempting a WebSocket session.
+	if r.URL.Query().Get("checkOnly") == "1" {
+		if err := dialVNCBackend(r.Context(), target); err != nil {
+			logger.Debug("vnc: preflight failed (%s): %v", target, err)
+			http.Error(w, fmt.Sprintf("failed to connect to VNC backend: %v", err), http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	// Accept the WebSocket. noVNC negotiates the "binary" subprotocol;
 	// fall back gracefully when the client sends "base64" as well.
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
@@ -61,6 +74,20 @@ func (g *Gateway) handleVNC(w http.ResponseWriter, r *http.Request) {
 	if err := serveVNC(ctx, ws, target); err != nil {
 		logger.Debug("vnc: session error (%s): %v", target, err)
 	}
+}
+
+func dialVNCBackend(ctx context.Context, target string) error {
+	dialer := &net.Dialer{
+		Timeout:   vncDialTimeout,
+		KeepAlive: vncKeepAlive,
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", target)
+	if err != nil {
+		return err
+	}
+	defer conn.Close() //nolint:errcheck
+
+	return nil
 }
 
 func serveVNC(ctx context.Context, ws *websocket.Conn, target string) error {
