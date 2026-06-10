@@ -1842,7 +1842,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				err = client.SendMessage("ws/round-trip/complete", map[string]interface{}{
 					"messageId": certData.MessageId,
 					"complete":  true,
-					"error":     "auth daemon server not initialized",
+					"error":     "auth daemon server not initialized (enable by running Newt site connector as root)",
 				})
 				if err != nil {
 					logger.Error("Failed to send SSH cert failure response: %v", err)
