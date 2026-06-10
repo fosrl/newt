@@ -1053,7 +1053,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			} else {
 				browserGatewayStop = func() { _ = ln.Close() }
 				go func() {
-					logger.Info("Browser gateway started on port %d", browsergateway.ListenPort)
+					logger.Debug("Browser gateway started on port %d", browsergateway.ListenPort)
 					if startErr := browserGateway.Start(ln); startErr != nil {
 						logger.Error("Browser gateway stopped with error: %v", startErr)
 					}
@@ -1776,14 +1776,15 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 		// Define the structure of the incoming message
 		type SSHCertData struct {
-			MessageId      int    `json:"messageId"`
-			AgentPort      int    `json:"agentPort"`
-			AgentHost      string `json:"agentHost"`
-			AuthDaemonMode string `json:"authDaemonMode"` // site, remote, native
-			CACert         string `json:"caCert"`
-			Username       string `json:"username"`
-			NiceID         string `json:"niceId"`
-			Metadata       struct {
+			MessageId          int    `json:"messageId"`
+			AgentPort          int    `json:"agentPort"`
+			AgentHost          string `json:"agentHost"`
+			ExternalAuthDaemon bool   `json:"externalAuthDaemon"`
+			AuthDaemonMode     string `json:"authDaemonMode"` // site, remote, native
+			CACert             string `json:"caCert"`
+			Username           string `json:"username"`
+			NiceID             string `json:"niceId"`
+			Metadata           struct {
 				SudoMode     string   `json:"sudoMode"`
 				SudoCommands []string `json:"sudoCommands"`
 				Homedir      bool     `json:"homedir"`
@@ -1805,9 +1806,15 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			logger.Error("Error unmarshaling SSH cert data: %v", err)
 			return
 		}
+		var authDaemonMode = "site"
+		if certData.AuthDaemonMode != "" {
+			authDaemonMode = certData.AuthDaemonMode
+		} else if certData.ExternalAuthDaemon { // this is for backward compatibility with older server versions that don't send authDaemonMode
+			authDaemonMode = "remote"
+		}
 
 		// Use a switch statement for AuthDaemonMode
-		switch certData.AuthDaemonMode {
+		switch authDaemonMode {
 		case "site":
 			// Call ProcessConnection directly when running internally
 			logger.Debug("Calling internal auth daemon ProcessConnection for user %s", certData.Username)
@@ -1835,7 +1842,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				err = client.SendMessage("ws/round-trip/complete", map[string]interface{}{
 					"messageId": certData.MessageId,
 					"complete":  true,
-					"error":     "auth daemon server not initialized",
+					"error":     "auth daemon server not initialized (enable by running Newt site connector as root)",
 				})
 				if err != nil {
 					logger.Error("Failed to send SSH cert failure response: %v", err)
@@ -2028,7 +2035,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			} else {
 				browserGatewayStop = func() { _ = ln.Close() }
 				go func() {
-					logger.Info("Browser gateway started on port %d", browsergateway.ListenPort)
+					logger.Debug("Browser gateway started on port %d", browsergateway.ListenPort)
 					if startErr := browserGateway.Start(ln); startErr != nil {
 						logger.Error("Browser gateway stopped with error: %v", startErr)
 					}

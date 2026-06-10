@@ -5,13 +5,19 @@ package nativessh
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
+	"os"
+	"os/exec"
+	"os/user"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
+	"github.com/fosrl/newt/logger"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -126,7 +132,7 @@ func (s *Server) Serve(ln net.Listener) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("nativessh: server listening on %s", ln.Addr())
+	logger.Debug("nativessh: server listening on %s", ln.Addr())
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -151,11 +157,11 @@ func (s *Server) handleConn(conn net.Conn, cfg *ssh.ServerConfig) {
 	defer conn.Close()
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
-		log.Printf("nativessh: handshake failed from %s: %v", conn.RemoteAddr(), err)
+		logger.Debug("nativessh: handshake failed from %s: %v", conn.RemoteAddr(), err)
 		return
 	}
 	defer sshConn.Close()
-	log.Printf("nativessh: connection from %s user=%s", conn.RemoteAddr(), sshConn.User())
+	logger.Debug("nativessh: connection from %s user=%s", conn.RemoteAddr(), sshConn.User())
 
 	go ssh.DiscardRequests(reqs)
 
@@ -166,7 +172,7 @@ func (s *Server) handleConn(conn net.Conn, cfg *ssh.ServerConfig) {
 		}
 		ch, requests, err := newChan.Accept()
 		if err != nil {
-			log.Printf("nativessh: channel accept error: %v", err)
+			logger.Debug("nativessh: channel accept error: %v", err)
 			return
 		}
 		go s.handleSession(ch, requests, sshConn.User())
@@ -190,7 +196,7 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request, use
 			if sess == nil {
 				sess, err = NewPTYSessionAs(username)
 				if err != nil {
-					log.Printf("nativessh: PTY start error: %v", err)
+					logger.Debug("nativessh: PTY start error: %v", err)
 					if req.WantReply {
 						_ = req.Reply(false, nil)
 					}
@@ -232,6 +238,16 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request, use
 				_, _ = io.Copy(sess, ch)
 			}()
 
+		case "exec":
+			if req.WantReply {
+				_ = req.Reply(true, nil)
+			}
+			cmd := parseExecPayload(req.Payload)
+			go s.runExecAs(ch, username, cmd)
+			// Drain remaining requests; the goroutine owns the channel now.
+			go ssh.DiscardRequests(requests)
+			return
+
 		case "window-change":
 			if sess != nil {
 				cols, rows := parseWindowChange(req.Payload)
@@ -253,6 +269,94 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request, use
 	}
 }
 
+// runExecAs runs command as username, wiring stdin/stdout/stderr directly to
+// the SSH channel (no PTY). This supports scp, rsync, and plain exec requests.
+func (s *Server) runExecAs(ch ssh.Channel, username, command string) {
+	defer ch.Close()
+
+	u, err := user.Lookup(username)
+	if err != nil {
+		logger.Debug("nativessh: exec user lookup %q: %v", username, err)
+		sendExitStatus(ch, 1)
+		return
+	}
+
+	uid, err := strconv.ParseUint(u.Uid, 10, 32)
+	if err != nil {
+		logger.Debug("nativessh: exec parse uid for %q: %v", username, err)
+		sendExitStatus(ch, 1)
+		return
+	}
+	gid, err := strconv.ParseUint(u.Gid, 10, 32)
+	if err != nil {
+		logger.Debug("nativessh: exec parse gid for %q: %v", username, err)
+		sendExitStatus(ch, 1)
+		return
+	}
+
+	groupIDs, _ := u.GroupIds()
+	var groups []uint32
+	for _, g := range groupIDs {
+		gval, err := strconv.ParseUint(g, 10, 32)
+		if err == nil {
+			groups = append(groups, uint32(gval))
+		}
+	}
+
+	homeDir := u.HomeDir
+	if _, err := os.Stat(homeDir); err != nil {
+		homeDir = "/"
+	}
+
+	cmd := exec.Command("/bin/sh", "-c", command)
+	cmd.Env = []string{
+		"HOME=" + u.HomeDir,
+		"USER=" + username,
+		"LOGNAME=" + username,
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+	}
+	cmd.Dir = homeDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:    uint32(uid),
+			Gid:    uint32(gid),
+			Groups: groups,
+		},
+	}
+	cmd.Stdin = ch
+	cmd.Stdout = ch
+	cmd.Stderr = ch.Stderr()
+
+	exitCode := 0
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 1
+		}
+		logger.Debug("nativessh: exec %q as %q exited: %v", command, username, err)
+	}
+
+	sendExitStatus(ch, exitCode)
+	_ = ch.CloseWrite()
+}
+
+// sendExitStatus sends an SSH exit-status request on ch.
+func sendExitStatus(ch ssh.Channel, code int) {
+	payload := ssh.Marshal(struct{ Status uint32 }{uint32(code)})
+	_, _ = ch.SendRequest("exit-status", false, payload)
+}
+
+// parseExecPayload decodes the command string from an SSH exec request payload.
+func parseExecPayload(payload []byte) string {
+	var msg struct{ Command string }
+	if err := ssh.Unmarshal(payload, &msg); err != nil {
+		return ""
+	}
+	return msg.Command
+}
+
 // makePublicKeyCallback returns a PublicKeyCallback that tries, in order:
 //  1. Host authorized_keys  – matches any key in the OS user's
 //     ~/.ssh/authorized_keys file.
@@ -264,7 +368,7 @@ func makePublicKeyCallback(store *CredentialStore) func(ssh.ConnMetadata, ssh.Pu
 	return func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 		// 1. Host authorized_keys.
 		if CheckAuthorizedKeys(meta.User(), key) {
-			log.Printf("nativessh: authorized_keys auth for user %q", meta.User())
+			logger.Debug("nativessh: authorized_keys auth for user %q", meta.User())
 			return &ssh.Permissions{}, nil
 		}
 
@@ -286,14 +390,14 @@ func makePublicKeyCallback(store *CredentialStore) func(ssh.ConnMetadata, ssh.Pu
 				for principal := range userPrincipals {
 					perms, err := checker.Authenticate(connMetaWithUser{ConnMetadata: meta, user: principal}, key)
 					if err == nil {
-						log.Printf("nativessh: CA cert auth for user %q principal=%q", meta.User(), principal)
+						logger.Debug("nativessh: CA cert auth for user %q principal=%q", meta.User(), principal)
 						return perms, nil
 					}
 					lastErr = err
 				}
 
 				if lastErr != nil {
-					log.Printf("nativessh: CA cert rejected for user %q: %v", meta.User(), lastErr)
+					logger.Debug("nativessh: CA cert rejected for user %q: %v", meta.User(), lastErr)
 				}
 			}
 		}
@@ -309,10 +413,10 @@ func makePasswordCallback() func(ssh.ConnMetadata, []byte) (*ssh.Permissions, er
 	return func(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 		if err := VerifySystemPassword(meta.User(), string(password)); err != nil {
 			// Return a generic message to the client; log the real reason.
-			log.Printf("nativessh: password auth failed for user %q: %v", meta.User(), err)
+			logger.Debug("nativessh: password auth failed for user %q: %v", meta.User(), err)
 			return nil, fmt.Errorf("permission denied")
 		}
-		log.Printf("nativessh: password auth for user %q", meta.User())
+		logger.Debug("nativessh: password auth for user %q", meta.User())
 		return &ssh.Permissions{}, nil
 	}
 }
@@ -324,7 +428,7 @@ func generateHostKey() (ssh.Signer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate host key: %w", err)
 	}
-	log.Printf("nativessh: generated ephemeral Ed25519 host key")
+	logger.Debug("nativessh: generated ephemeral Ed25519 host key")
 	return ssh.NewSignerFromKey(priv)
 }
 

@@ -212,6 +212,10 @@ func (m *Monitor) addTargetUnsafe(config Config) error {
 				return nil
 			}(),
 			Transport: &http.Transport{
+				// Disable keep-alives so each health check uses a fresh connection.
+				// Reusing idle connections causes spurious timeouts when the remote
+				// server closes the connection between long check intervals.
+				DisableKeepAlives: true,
 				TLSClientConfig: &tls.Config{
 					// Configure TLS settings based on certificate enforcement
 					InsecureSkipVerify: !m.enforceCert,
@@ -432,7 +436,9 @@ func (m *Monitor) performTCPCheck(target *Target) (bool, string) {
 	logger.Debug("Target %d: performing TCP health check to %s (timeout: %v)",
 		target.Config.ID, address, timeout)
 
-	conn, err := net.DialTimeout("tcp", address, timeout)
+	ctx, cancel := context.WithTimeout(target.ctx, timeout)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
 	if err != nil {
 		msg := fmt.Sprintf("TCP dial failed: %v", err)
 		logger.Warn("Target %d: %s", target.Config.ID, msg)
@@ -467,8 +473,9 @@ func (m *Monitor) performHTTPCheck(target *Target) (bool, string) {
 			target.Config.ID, m.enforceCert)
 	}
 
-	// Create request with timeout context
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(target.Config.Timeout)*time.Second)
+	// Create request with timeout context, derived from the target's context so
+	// that in-flight requests are cancelled immediately when the target is replaced.
+	ctx, cancel := context.WithTimeout(target.ctx, time.Duration(target.Config.Timeout)*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, target.Config.Method, url, nil)

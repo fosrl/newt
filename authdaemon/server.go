@@ -23,13 +23,13 @@ import (
 
 type Config struct {
 	// DisableHTTPS: when true, Run() does not start the HTTPS server (for embedded use inside Newt). Call ProcessConnection directly for connection events.
-	DisableHTTPS       bool
-	Port               int    // Required when DisableHTTPS is false. Listen port for the HTTPS server. No default.
-	PresharedKey       string // Required when DisableHTTPS is false. HTTP auth (Authorization: Bearer <key> or X-Preshared-Key: <key>). No default.
-	CACertPath         string // Required. Where to write the CA cert (e.g. /etc/ssh/ca.pem). No default.
-	Force                   bool   // If true, overwrite existing CA cert (and other items) when content differs. Default false.
-	PrincipalsFilePath      string // Required. Path to the principals data file (JSON: username -> array of principals). No default.
-	GenerateRandomPassword  bool   // If true, set a random password on users when they are provisioned (for SSH PermitEmptyPasswords no).
+	DisableHTTPS           bool
+	Port                   int    // Required when DisableHTTPS is false. Listen port for the HTTPS server. No default.
+	PresharedKey           string // Required when DisableHTTPS is false. HTTP auth (Authorization: Bearer <key> or X-Preshared-Key: <key>). No default.
+	CACertPath             string // Required. Where to write the CA cert (e.g. /etc/ssh/ca.pem). No default.
+	Force                  bool   // If true, overwrite existing CA cert (and other items) when content differs. Default false.
+	PrincipalsFilePath     string // Required. Path to the principals data file (JSON: username -> array of principals). No default.
+	GenerateRandomPassword bool   // If true, set a random password on users when they are provisioned (for SSH PermitEmptyPasswords no).
 }
 
 type Server struct {
@@ -136,7 +136,7 @@ func NewServer(cfg Config) (*Server, error) {
 // When DisableHTTPS is true, Run() blocks on ctx only and does not listen; use ProcessConnection for connection events.
 func (s *Server) Run(ctx context.Context) error {
 	if s.cfg.DisableHTTPS {
-		logger.Info("auth-daemon running (HTTPS disabled)")
+		logger.Debug("auth-daemon running (HTTPS disabled)")
 		<-ctx.Done()
 		s.cleanupPrincipalsFile()
 		return nil

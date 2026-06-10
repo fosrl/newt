@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -18,13 +17,13 @@ import (
 // sshClientMsg is a JSON message sent from the browser to the proxy.
 type sshClientMsg struct {
 	// type: "auth" | "data" | "resize"
-	Type       string `json:"type"`
-	Password   string `json:"password,omitempty"`   // used when type="auth"
-	PrivateKey string `json:"privateKey,omitempty"` // used when type="auth"
+	Type        string `json:"type"`
+	Password    string `json:"password,omitempty"`    // used when type="auth"
+	PrivateKey  string `json:"privateKey,omitempty"`  // used when type="auth"
 	Certificate string `json:"certificate,omitempty"` // used when type="auth"
-	Data       string `json:"data,omitempty"`       // used when type="data"
-	Cols       uint32 `json:"cols,omitempty"`       // used when type="resize"
-	Rows       uint32 `json:"rows,omitempty"`       // used when type="resize"
+	Data        string `json:"data,omitempty"`        // used when type="data"
+	Cols        uint32 `json:"cols,omitempty"`        // used when type="resize"
+	Rows        uint32 `json:"rows,omitempty"`        // used when type="resize"
 }
 
 // sshServerMsg is a JSON message sent from the proxy back to the browser.
@@ -83,7 +82,7 @@ func (g *Gateway) HandleSSH(w http.ResponseWriter, r *http.Request) {
 		Subprotocols:       []string{"ssh"},
 	})
 	if err != nil {
-		log.Printf("SSH websocket upgrade failed: %v", err)
+		logger.Debug("SSH websocket upgrade failed: %v", err)
 		return
 	}
 	ws.SetReadLimit(-1)
@@ -91,11 +90,11 @@ func (g *Gateway) HandleSSH(w http.ResponseWriter, r *http.Request) {
 
 	if nativeSSH {
 		if err := serveNativeSSHSession(ctx, ws, username, g.sshCreds); err != nil {
-			log.Printf("SSH native session error: %v", err)
+			logger.Debug("SSH native session error: %v", err)
 		}
 	} else {
 		if err := serveSSHSession(ctx, ws, target, username, g.authToken); err != nil {
-			log.Printf("SSH session error: %v", err)
+			logger.Debug("SSH session error: %v", err)
 		}
 	}
 }
@@ -112,8 +111,10 @@ func serveSSHSession(ctx context.Context, ws *websocket.Conn, target, username, 
 	}
 	password := authMsg.Password
 	privateKey := authMsg.PrivateKey
+	certificate := authMsg.Certificate
 
-	// Build the list of auth methods. Private key takes priority when provided.
+	// Build the list of auth methods. Certificate+private key takes priority
+	// when both are provided, then private key, then password.
 	var authMethods []ssh.AuthMethod
 	if privateKey != "" {
 		signer, err := ssh.ParsePrivateKey([]byte(privateKey))
@@ -121,7 +122,29 @@ func serveSSHSession(ctx context.Context, ws *websocket.Conn, target, username, 
 			sendSSHError(ctx, ws, fmt.Sprintf("Failed to parse private key: %v", err))
 			return fmt.Errorf("parse private key: %w", err)
 		}
-		authMethods = append(authMethods, ssh.PublicKeys(signer))
+
+		if certificate != "" {
+			certPubKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(certificate))
+			if err != nil {
+				sendSSHError(ctx, ws, fmt.Sprintf("Failed to parse certificate: %v", err))
+				return fmt.Errorf("parse certificate: %w", err)
+			}
+
+			cert, ok := certPubKey.(*ssh.Certificate)
+			if !ok {
+				sendSSHError(ctx, ws, "Provided certificate is not a valid SSH certificate")
+				return fmt.Errorf("provided certificate is not ssh certificate")
+			}
+
+			certSigner, err := ssh.NewCertSigner(cert, signer)
+			if err != nil {
+				sendSSHError(ctx, ws, fmt.Sprintf("Failed to combine private key and certificate: %v", err))
+				return fmt.Errorf("new cert signer: %w", err)
+			}
+			authMethods = append(authMethods, ssh.PublicKeys(certSigner))
+		} else {
+			authMethods = append(authMethods, ssh.PublicKeys(signer))
+		}
 	}
 	if password != "" {
 		authMethods = append(authMethods, ssh.Password(password))
@@ -130,7 +153,7 @@ func serveSSHSession(ctx context.Context, ws *websocket.Conn, target, username, 
 		sendSSHError(ctx, ws, "No authentication credentials provided")
 		return fmt.Errorf("no auth credentials")
 	}
-	log.Printf("SSH: connecting to %s as %s", target, username)
+	logger.Debug("SSH: connecting to %s as %s", target, username)
 	sshCfg := &ssh.ClientConfig{
 		User: username,
 		Auth: authMethods,
@@ -183,7 +206,7 @@ func serveSSHSession(ctx context.Context, ws *websocket.Conn, target, username, 
 		return fmt.Errorf("ssh shell: %w", err)
 	}
 
-	log.Printf("SSH: session established with %s", target)
+	logger.Debug("SSH: session established with %s", target)
 
 	// -- Pump SSH stdout/stderr → WebSocket --
 	sessCtx, cancelSess := context.WithCancel(ctx)
@@ -253,7 +276,7 @@ func serveSSHSession(ctx context.Context, ws *websocket.Conn, target, username, 
 
 // sendSSHError sends an error message to the browser and logs it.
 func sendSSHError(ctx context.Context, ws *websocket.Conn, msg string) {
-	log.Printf("SSH error: %s", msg)
+	logger.Debug("SSH error: %s", msg)
 	b, _ := json.Marshal(sshServerMsg{Type: "error", Error: msg})
 	_ = ws.Write(ctx, websocket.MessageText, b)
 }

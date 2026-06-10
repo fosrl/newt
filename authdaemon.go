@@ -63,7 +63,7 @@ func startAuthDaemon(ctx context.Context) error {
 
 	// Start the auth daemon in a goroutine so it runs alongside newt
 	go func() {
-		logger.Info("Auth daemon starting (native mode, no HTTP server)")
+		logger.Debug("Auth daemon starting (native mode, no HTTP server)")
 		if err := srv.Run(ctx); err != nil {
 			logger.Error("Auth daemon error: %v", err)
 		}
