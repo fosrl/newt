@@ -62,13 +62,14 @@ type Target struct {
 	Status               Health    `json:"status"`
 	LastCheck            time.Time `json:"lastCheck"`
 	LastError            string    `json:"lastError,omitempty"`
+	LastLatencyMs        int64     `json:"latencyMs,omitempty"`
 	CheckCount           int       `json:"checkCount"`
 	timer                *time.Timer
 	ctx                  context.Context
 	cancel               context.CancelFunc
 	client               *http.Client
-	consecutiveSuccesses int
-	consecutiveFailures  int
+	consecutiveSuccesses  int
+	consecutiveFailures   int
 }
 
 // StatusChangeCallback is called when any target's status changes
@@ -377,10 +378,13 @@ func (m *Monitor) monitorTarget(target *Target) {
 			// Reset timer for next check with current interval
 			target.timer.Reset(interval)
 
-			// Notify callback if status changed
-			if oldStatus != target.Status && m.callback != nil {
-				logger.Info("Target %d status changed: %s -> %s",
-					target.Config.ID, oldStatus.String(), target.Status.String())
+			// Notify callback on every check so downstream systems receive fresh
+			// latency telemetry even when health status is unchanged.
+			if m.callback != nil {
+				if oldStatus != target.Status {
+					logger.Info("Target %d status changed: %s -> %s",
+						target.Config.ID, oldStatus.String(), target.Status.String())
+				}
 				go m.callback(m.GetTargets())
 			}
 		}
@@ -391,6 +395,8 @@ func (m *Monitor) monitorTarget(target *Target) {
 func (m *Monitor) performHealthCheck(target *Target) {
 	target.CheckCount++
 	target.LastCheck = time.Now()
+	target.LastError = ""
+	target.LastLatencyMs = 0
 
 	var passed bool
 	var checkErr string
@@ -496,6 +502,7 @@ func (m *Monitor) performHTTPCheck(target *Target) (bool, string) {
 	}
 
 	// Perform request
+	requestStart := time.Now()
 	resp, err := target.client.Do(req)
 	if err != nil {
 		msg := fmt.Sprintf("request failed: %v", err)
@@ -503,6 +510,7 @@ func (m *Monitor) performHTTPCheck(target *Target) (bool, string) {
 		return false, msg
 	}
 	defer resp.Body.Close()
+	target.LastLatencyMs = time.Since(requestStart).Milliseconds()
 
 	// Check response status
 	if target.Config.Status > 0 {
