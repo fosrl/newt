@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,6 +50,10 @@ type versionResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 }
+
+// ErrAutoUpdateUnsupportedInOfficialContainer indicates auto-update is not
+// available when running inside official Fossorial container images.
+var ErrAutoUpdateUnsupportedInOfficialContainer = errors.New("auto-update unsupported in official Fossorial container images")
 
 // isOfficialContainer returns true when the process is running inside an
 // official Fossorial-built container image.  The image sets
@@ -113,7 +118,7 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 
 	if isOfficialContainer() {
 		logger.Debug("checkAndSelfUpdate: running inside official container, skipping auto-update")
-		return fmt.Errorf("auto-update is not supported in official Fossorial container images; pull a new image tag instead")
+		return fmt.Errorf("%w; pull a new image tag instead", ErrAutoUpdateUnsupportedInOfficialContainer)
 	}
 
 	if cfg.CurrentVersion == "version_replaceme" {

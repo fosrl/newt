@@ -691,6 +691,10 @@ func runNewtMain(ctx context.Context) {
 			Platform:       newtPlatform,
 			TLSConfig:      tlsCfg,
 		}); err != nil {
+			if errors.Is(err, updates.ErrAutoUpdateUnsupportedInOfficialContainer) {
+				logger.Debug("checkAndSelfUpdate: auto-update skipped: %v", err)
+				return
+			}
 			logger.Error("Auto-update check failed: %v", err)
 		}
 	}
