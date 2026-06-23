@@ -38,6 +38,7 @@ type Client struct {
 	isConnected       bool
 	reconnectMux      sync.RWMutex
 	pingInterval      time.Duration
+	pongWait          time.Duration // read deadline window; if no pong/message arrives within it, the connection is considered dead
 	onConnect         func() error
 	onTokenUpdate     func(token string)
 	writeMux          sync.Mutex
@@ -141,6 +142,14 @@ func NewClient(clientType string, ID, secret string, endpoint string, pingInterv
 		Endpoint: endpoint,
 	}
 
+	// Read deadline window: must exceed pingInterval so a healthy connection
+	// (which gets a pong/message at least every pingInterval) is never torn
+	// down, but a dead/half-open one is detected within ~2 ping cycles.
+	pongWait := pingInterval * 2
+	if pongWait < 20*time.Second {
+		pongWait = 20 * time.Second
+	}
+
 	client := &Client{
 		config:            config,
 		baseURL:           endpoint, // default value
@@ -149,6 +158,7 @@ func NewClient(clientType string, ID, secret string, endpoint string, pingInterv
 		reconnectInterval: 3 * time.Second,
 		isConnected:       false,
 		pingInterval:      pingInterval,
+		pongWait:          pongWait,
 		clientType:        clientType,
 	}
 
@@ -607,16 +617,28 @@ func (c *Client) establishConnection() error {
 	telemetry.SetWSConnectionState(true)
 	c.setMetricsContext(ctx)
 	sessionStart := time.Now()
-	// Wire up pong handler for metrics
+
+	// Per-connection lifecycle channel. The read pump closes it when this
+	// connection ends so the matching ping monitor stops (avoids leaking a
+	// ping-monitor goroutine on every reconnect).
+	connClosed := make(chan struct{})
+
+	// Arm a read deadline and refresh it whenever a pong arrives. Combined with
+	// the protocol-level pings sent by the ping monitor, this detects a dead or
+	// half-open connection (e.g. a cloud load balancer keeping the socket open
+	// after the backend API server died/restarted) instead of blocking on
+	// ReadMessage forever — which previously required restarting newt by hand.
+	_ = c.conn.SetReadDeadline(time.Now().Add(c.pongWait))
 	c.conn.SetPongHandler(func(appData string) error {
+		_ = c.conn.SetReadDeadline(time.Now().Add(c.pongWait))
 		telemetry.IncWSMessage(c.metricsContext(), "in", "pong")
 		return nil
 	})
 
 	// Start the ping monitor
-	go c.pingMonitor()
+	go c.pingMonitor(connClosed)
 	// Start the read pump with disconnect detection
-	go c.readPumpWithDisconnectDetection(sessionStart)
+	go c.readPumpWithDisconnectDetection(sessionStart, connClosed)
 
 	if c.onConnect != nil {
 		err := c.saveConfig()
@@ -727,11 +749,16 @@ func (c *Client) sendPing() {
 	err := c.conn.WriteJSON(pingMsg)
 	if err == nil {
 		telemetry.IncWSMessage(c.metricsContext(), "out", "ping")
+		// Protocol-level ping: a standards-compliant server replies with a PONG,
+		// which refreshes the read deadline. This is what lets us notice a
+		// half-open connection where writes still succeed (buffered) but the
+		// peer is gone.
+		_ = c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second))
 	}
 	c.writeMux.Unlock()
 
 	if err != nil {
-		// Check if we're shutting down before logging error and reconnecting
+		// Check if we're shutting down before logging error
 		select {
 		case <-c.done:
 			// Expected during shutdown
@@ -740,13 +767,19 @@ func (c *Client) sendPing() {
 			logger.Error("Ping failed: %v", err)
 			telemetry.IncWSKeepaliveFailure(c.metricsContext(), "ping_write")
 			telemetry.IncWSReconnect(c.metricsContext(), "ping_write")
-			c.reconnect()
+			// Close the connection and let the read pump trigger a single
+			// reconnect (avoids racing two reconnects from here and the pump).
+			c.writeMux.Lock()
+			if c.conn != nil {
+				_ = c.conn.Close()
+			}
+			c.writeMux.Unlock()
 			return
 		}
 	}
 }
 
-func (c *Client) pingMonitor() {
+func (c *Client) pingMonitor(connClosed <-chan struct{}) {
 	// Send an immediate ping as soon as we connect
 	c.sendPing()
 
@@ -757,6 +790,10 @@ func (c *Client) pingMonitor() {
 		select {
 		case <-c.done:
 			return
+		case <-connClosed:
+			// This connection ended; stop pinging it. A new monitor is started
+			// for the next connection by establishConnection.
+			return
 		case <-ticker.C:
 			c.sendPing()
 		}
@@ -764,12 +801,14 @@ func (c *Client) pingMonitor() {
 }
 
 // readPumpWithDisconnectDetection reads messages and triggers reconnect on error
-func (c *Client) readPumpWithDisconnectDetection(started time.Time) {
+func (c *Client) readPumpWithDisconnectDetection(started time.Time, connClosed chan struct{}) {
 	ctx := c.metricsContext()
 	disconnectReason := "shutdown"
 	disconnectResult := "success"
 
 	defer func() {
+		// Signal the ping monitor for this connection to stop.
+		close(connClosed)
 		if c.conn != nil {
 			c.conn.Close()
 		}
@@ -797,6 +836,10 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time) {
 		default:
 			msgType, p, err := c.conn.ReadMessage()
 			if err == nil {
+				// Any inbound traffic means the peer is alive — extend the
+				// read deadline (also covers servers that answer the app-level
+				// "newt/ping" with a message rather than a protocol pong).
+				_ = c.conn.SetReadDeadline(time.Now().Add(c.pongWait))
 				if msgType == websocket.BinaryMessage {
 					telemetry.IncWSMessage(c.metricsContext(), "in", "binary")
 				} else {
