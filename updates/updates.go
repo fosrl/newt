@@ -9,11 +9,19 @@ import (
 	"time"
 )
 
-// GitHubRelease represents the GitHub API response for a release
-type GitHubRelease struct {
-	TagName string `json:"tag_name"`
-	Name    string `json:"name"`
-	HTMLURL string `json:"html_url"`
+// VersionsAPIEntry represents one component's version payload.
+type VersionsAPIEntry struct {
+	LatestVersion string `json:"latestVersion"`
+	ReleaseNotes  string `json:"releaseNotes"`
+}
+
+// VersionsAPIResponse represents the versions API response.
+type VersionsAPIResponse struct {
+	Data    map[string]VersionsAPIEntry `json:"data"`
+	Success bool                        `json:"success"`
+	Error   bool                        `json:"error"`
+	Message string                      `json:"message"`
+	Status  int                         `json:"status"`
 }
 
 // Version represents a semantic version
@@ -75,14 +83,15 @@ func (v Version) String() string {
 	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
 }
 
-// CheckForUpdate checks GitHub for a newer version and prints an update banner if found
+// CheckForUpdate checks the Fossorial versions API for a newer version and prints an update banner if found.
 func CheckForUpdate(owner, repo, currentVersion string) error {
 	if currentVersion == "version_replaceme" {
 		return nil
 	}
+	_ = owner
 
-	// GitHub API URL for latest release
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
+	// Versions API URL
+	url := "https://api.fossorial.io/api/v1/versions"
 
 	// Create HTTP client with timeout
 	client := &http.Client{
@@ -97,13 +106,18 @@ func CheckForUpdate(owner, repo, currentVersion string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GitHub API returned status: %d", resp.StatusCode)
+		return fmt.Errorf("versions API returned status: %d", resp.StatusCode)
 	}
 
-	// Parse the JSON response
-	var release GitHubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return fmt.Errorf("failed to parse release info: %w", err)
+	// Parse the JSON response.
+	var versionsResp VersionsAPIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&versionsResp); err != nil {
+		return fmt.Errorf("failed to parse versions response: %w", err)
+	}
+
+	componentVersion, ok := versionsResp.Data[repo]
+	if !ok {
+		return fmt.Errorf("component %q not found in versions API response", repo)
 	}
 
 	// Parse current and latest versions
@@ -112,14 +126,18 @@ func CheckForUpdate(owner, repo, currentVersion string) error {
 		return fmt.Errorf("invalid current version: %w", err)
 	}
 
-	latestVer, err := parseVersion(release.TagName)
+	latestVer, err := parseVersion(componentVersion.LatestVersion)
 	if err != nil {
 		return fmt.Errorf("invalid latest version: %w", err)
 	}
 
 	// Check if update is available
 	if currentVer.isNewer(latestVer) {
-		printUpdateBanner(currentVer.String(), latestVer.String(), "curl -fsSL https://static.pangolin.net/get-newt.sh | bash")
+		releaseNotes := componentVersion.ReleaseNotes
+		if releaseNotes == "" {
+			releaseNotes = "curl -fsSL https://static.pangolin.net/get-newt.sh | bash"
+		}
+		printUpdateBanner(currentVer.String(), latestVer.String(), releaseNotes)
 	}
 
 	return nil
