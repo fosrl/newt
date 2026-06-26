@@ -27,17 +27,17 @@ type ExitNode struct {
 
 // Manager handles UDP hole punching operations
 type Manager struct {
-	mu          sync.Mutex
-	running     bool
-	stopChan    chan struct{}
-	sharedBind  *bind.SharedBind
-	ID          string
-	token       string
-	publicKey   string
-	clientType  string
-	exitNodes   map[string]ExitNode // key is endpoint
-	updateChan  chan struct{}        // signals the goroutine to refresh exit nodes
-	publicDNS []string
+	mu         sync.Mutex
+	running    bool
+	stopChan   chan struct{}
+	sharedBind *bind.SharedBind
+	ID         string
+	token      string
+	publicKey  string
+	clientType string
+	exitNodes  map[string]ExitNode // key is endpoint
+	updateChan chan struct{}       // signals the goroutine to refresh exit nodes
+	publicDNS  []string
 
 	sendHolepunchInterval    time.Duration
 	sendHolepunchIntervalMin time.Duration
@@ -56,7 +56,7 @@ func NewManager(sharedBind *bind.SharedBind, ID string, clientType string, publi
 		ID:                       ID,
 		clientType:               clientType,
 		publicKey:                publicKey,
-		publicDNS:              publicDNS,
+		publicDNS:                publicDNS,
 		exitNodes:                make(map[string]ExitNode),
 		sendHolepunchInterval:    defaultSendHolepunchIntervalMin,
 		sendHolepunchIntervalMin: defaultSendHolepunchIntervalMin,
@@ -71,6 +71,14 @@ func (m *Manager) SetToken(token string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.token = token
+}
+
+// SetPublicDNS replaces the list of DNS servers used to resolve exit-node
+// endpoints.  The servers must be in "host:port" format (e.g. "8.8.8.8:53").
+func (m *Manager) SetPublicDNS(servers []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.publicDNS = servers
 }
 
 // IsRunning returns whether hole punching is currently active
