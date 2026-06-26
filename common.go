@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -24,6 +25,36 @@ import (
 	"golang.zx2c4.com/wireguard/tun/netstack"
 	"gopkg.in/yaml.v3"
 )
+
+// pingFunc is a function that sends one ICMP echo to dst and returns the RTT.
+type pingFunc func(dst string, timeout time.Duration) (time.Duration, error)
+
+// pingNative tests reachability of dst using the host OS ping command.
+// Used when the main tunnel is a native TUN interface with no netstack.
+func pingNative(dst string, timeout time.Duration) (time.Duration, error) {
+	timeoutSecs := int(timeout.Seconds())
+	if timeoutSecs < 1 {
+		timeoutSecs = 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Second)
+	defer cancel()
+
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.CommandContext(ctx, "ping", "-n", "1", "-w", fmt.Sprintf("%d", int(timeout.Milliseconds())), dst)
+	case "darwin":
+		cmd = exec.CommandContext(ctx, "ping", "-c", "1", "-W", fmt.Sprintf("%d", int(timeout.Milliseconds())), dst)
+	default:
+		cmd = exec.CommandContext(ctx, "ping", "-c", "1", "-W", fmt.Sprintf("%d", timeoutSecs), dst)
+	}
+
+	start := time.Now()
+	if err := cmd.Run(); err != nil {
+		return 0, fmt.Errorf("native ping to %s failed: %w", dst, err)
+	}
+	return time.Since(start), nil
+}
 
 const msgHealthFileWriteFailed = "Failed to write health file: %v"
 
@@ -93,7 +124,7 @@ func ping(tnet *netstack.Net, dst string, timeout time.Duration) (time.Duration,
 }
 
 // reliablePing performs multiple ping attempts with adaptive timeout
-func reliablePing(tnet *netstack.Net, dst string, baseTimeout time.Duration, maxAttempts int) (time.Duration, error) {
+func reliablePing(fn pingFunc, dst string, baseTimeout time.Duration, maxAttempts int) (time.Duration, error) {
 	var lastErr error
 	var totalLatency time.Duration
 	successCount := 0
@@ -106,7 +137,7 @@ func reliablePing(tnet *netstack.Net, dst string, baseTimeout time.Duration, max
 		jitter := time.Duration(rand.Intn(100)) * time.Millisecond
 		timeout += jitter
 
-		latency, err := ping(tnet, dst, timeout)
+		latency, err := fn(dst, timeout)
 		if err != nil {
 			lastErr = err
 			logger.Debug("Ping attempt %d/%d failed: %v", attempt, maxAttempts, err)
@@ -129,7 +160,7 @@ func reliablePing(tnet *netstack.Net, dst string, baseTimeout time.Duration, max
 	return 0, fmt.Errorf("all %d ping attempts failed, last error: %v", maxAttempts, lastErr)
 }
 
-func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopChan chan struct{}, err error) {
+func pingWithRetry(fn pingFunc, dst string, timeout time.Duration) (stopChan chan struct{}, err error) {
 
 	if healthFile != "" {
 		err = os.Remove(healthFile)
@@ -150,7 +181,7 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 
 	// First try with the initial parameters
 	logger.Debug("Ping attempt %d", attempt)
-	if latency, err := ping(tnet, dst, timeout); err == nil {
+	if latency, err := fn(dst, timeout); err == nil {
 		// Successful ping
 		logger.Debug("Ping latency: %v", latency)
 		logger.Info("Tunnel connection to server established successfully!")
@@ -176,7 +207,7 @@ func pingWithRetry(tnet *netstack.Net, dst string, timeout time.Duration) (stopC
 			default:
 				logger.Debug("Ping attempt %d", attempt)
 
-				if latency, err := ping(tnet, dst, timeout); err != nil {
+				if latency, err := fn(dst, timeout); err != nil {
 					logger.Warn("Ping attempt %d failed: %v", attempt, err)
 
 					// Increase delay after certain thresholds but cap it
@@ -233,7 +264,7 @@ func shouldFireRecovery(consecutiveFailures, failureThreshold int, connectionLos
 	return consecutiveFailures >= failureThreshold && !connectionLost
 }
 
-func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Client, tunnelID string) chan struct{} {
+func startPingCheck(fn pingFunc, serverIP string, client *websocket.Client, tunnelID string) chan struct{} {
 	maxInterval := 6 * time.Second
 	currentInterval := pingInterval
 	consecutiveFailures := 0
@@ -274,7 +305,7 @@ func startPingCheck(tnet *netstack.Net, serverIP string, client *websocket.Clien
 					maxAttempts = 4 // More attempts when connection is unstable
 				}
 
-				latency, err := reliablePing(tnet, serverIP, adaptiveTimeout, maxAttempts)
+				latency, err := reliablePing(fn, serverIP, adaptiveTimeout, maxAttempts)
 				if err != nil {
 					consecutiveFailures++
 

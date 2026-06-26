@@ -1007,10 +1007,8 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			if cfgErr := network.ConfigureInterface(nativeMainInterfaceName, wgData.TunnelIP+"/32", mtuInt); cfgErr != nil {
 				logger.Error("Failed to configure native main tunnel interface: %v", cfgErr)
 			}
-			if runtime.GOOS == "darwin" {
-				if routeErr := network.AddRoutes([]string{wgData.ServerIP + "/32"}, nativeMainInterfaceName); routeErr != nil {
-					logger.Warn("Failed to add route for main tunnel server IP: %v", routeErr)
-				}
+			if routeErr := network.AddRoutes([]string{wgData.ServerIP + "/32"}, nativeMainInterfaceName); routeErr != nil {
+				logger.Warn("Failed to add route for main tunnel server IP: %v", routeErr)
 			}
 			// Set up UAPI so wg(8) can inspect the main tunnel interface
 			if fileUAPI, uapiErr := newtDevice.UapiOpen(nativeMainInterfaceName); uapiErr != nil {
@@ -1040,35 +1038,36 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			pingWithRetryStopChan = nil
 		}
 
-		if !useNativeMainInterface {
-			// Use reliable ping for initial connection test
-			logger.Debug("Testing initial connection with reliable ping...")
-			lat, err := reliablePing(tnet, wgData.ServerIP, pingTimeout, 5)
-			if err == nil && wgData.PublicKey != "" {
-				telemetry.ObserveTunnelLatency(ctx, wgData.PublicKey, "wireguard", lat.Seconds())
-			}
-			if err != nil {
-				logger.Warn("Initial reliable ping failed, but continuing: %v", err)
-				regResult = "failure"
-			} else {
-				logger.Debug("Initial connection test successful")
-			}
-
-			pingWithRetryStopChan, _ = pingWithRetry(tnet, wgData.ServerIP, pingTimeout)
-
-			// Always mark as connected and start the proxy manager regardless of initial ping result
-			// as the pings will continue in the background
-			if !connected {
-				logger.Debug("Starting ping check")
-				pingStopChan = startPingCheck(tnet, wgData.ServerIP, client, wgData.PublicKey)
-			}
+		// Choose ping implementation: native OS ping for native-main, netstack for normal.
+		var pinger pingFunc
+		if useNativeMainInterface {
+			pinger = pingNative
 		} else {
-			// Native main: no netstack-based ping; write health file directly.
-			if healthFile != "" {
-				if writeErr := os.WriteFile(healthFile, []byte("ok"), 0644); writeErr != nil {
-					logger.Warn(msgHealthFileWriteFailed, writeErr)
-				}
+			pinger = func(dst string, timeout time.Duration) (time.Duration, error) {
+				return ping(tnet, dst, timeout)
 			}
+		}
+
+		// Use reliable ping for initial connection test
+		logger.Debug("Testing initial connection with reliable ping...")
+		lat, err := reliablePing(pinger, wgData.ServerIP, pingTimeout, 5)
+		if err == nil && wgData.PublicKey != "" {
+			telemetry.ObserveTunnelLatency(ctx, wgData.PublicKey, "wireguard", lat.Seconds())
+		}
+		if err != nil {
+			logger.Warn("Initial reliable ping failed, but continuing: %v", err)
+			regResult = "failure"
+		} else {
+			logger.Debug("Initial connection test successful")
+		}
+
+		pingWithRetryStopChan, _ = pingWithRetry(pinger, wgData.ServerIP, pingTimeout)
+
+		// Always mark as connected and start the proxy manager regardless of initial ping result
+		// as the pings will continue in the background
+		if !connected {
+			logger.Debug("Starting ping check")
+			pingStopChan = startPingCheck(pinger, wgData.ServerIP, client, wgData.PublicKey)
 		}
 
 		// Create proxy manager
