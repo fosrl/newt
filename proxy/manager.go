@@ -18,7 +18,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"golang.zx2c4.com/wireguard/tun/netstack"
-	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
 const (
@@ -56,13 +55,14 @@ type Target struct {
 
 // ProxyManager handles the creation and management of proxy connections
 type ProxyManager struct {
-	tnet       *netstack.Net
-	tcpTargets map[string]map[int]string // map[listenIP]map[port]targetAddress
-	udpTargets map[string]map[int]string
-	listeners  []*gonet.TCPListener
-	udpConns   []*gonet.UDPConn
-	running    bool
-	mutex      sync.RWMutex
+	tnet           *netstack.Net
+	tcpTargets     map[string]map[int]string // map[listenIP]map[port]targetAddress
+	udpTargets     map[string]map[int]string
+	listeners      []net.Listener
+	udpConns       []net.PacketConn
+	running        bool
+	mutex          sync.RWMutex
+	nativeListenIP string // when non-empty, use native OS listeners instead of netstack
 
 	// telemetry (multi-tunnel)
 	currentTunnelID string
@@ -149,14 +149,28 @@ func classifyProxyError(err error) string {
 	}
 }
 
-// NewProxyManager creates a new proxy manager instance
+// NewProxyManager creates a new proxy manager instance backed by a netstack.
 func NewProxyManager(tnet *netstack.Net) *ProxyManager {
 	return &ProxyManager{
 		tnet:           tnet,
 		tcpTargets:     make(map[string]map[int]string),
 		udpTargets:     make(map[string]map[int]string),
-		listeners:      make([]*gonet.TCPListener, 0),
-		udpConns:       make([]*gonet.UDPConn, 0),
+		listeners:      make([]net.Listener, 0),
+		udpConns:       make([]net.PacketConn, 0),
+		tunnels:        make(map[string]*tunnelEntry),
+		udpIdleTimeout: defaultUDPIdleTimeout,
+	}
+}
+
+// NewProxyManagerNative creates a proxy manager that binds listeners directly
+// to the host network stack on the given IP address.
+func NewProxyManagerNative(listenIP string) *ProxyManager {
+	return &ProxyManager{
+		nativeListenIP: listenIP,
+		tcpTargets:     make(map[string]map[int]string),
+		udpTargets:     make(map[string]map[int]string),
+		listeners:      make([]net.Listener, 0),
+		udpConns:       make([]net.PacketConn, 0),
 		tunnels:        make(map[string]*tunnelEntry),
 		udpIdleTimeout: defaultUDPIdleTimeout,
 	}
@@ -229,13 +243,14 @@ func (pm *ProxyManager) ClearTunnelID() {
 	pm.currentTunnelID = ""
 }
 
-// init function without tnet
+// NewProxyManagerWithoutTNet creates a proxy manager with no backing network.
+// Call SetTNet before starting.
 func NewProxyManagerWithoutTNet() *ProxyManager {
 	return &ProxyManager{
 		tcpTargets:     make(map[string]map[int]string),
 		udpTargets:     make(map[string]map[int]string),
-		listeners:      make([]*gonet.TCPListener, 0),
-		udpConns:       make([]*gonet.UDPConn, 0),
+		listeners:      make([]net.Listener, 0),
+		udpConns:       make([]net.PacketConn, 0),
 		udpIdleTimeout: defaultUDPIdleTimeout,
 	}
 }
@@ -496,21 +511,42 @@ func (pm *ProxyManager) Stop() error {
 func (pm *ProxyManager) startTarget(proto, listenIP string, port int, targetAddr string) error {
 	switch proto {
 	case "tcp":
-		listener, err := pm.tnet.ListenTCP(&net.TCPAddr{Port: port})
-		if err != nil {
-			return fmt.Errorf("failed to create TCP listener: %v", err)
+		var listener net.Listener
+		if pm.tnet != nil {
+			l, err := pm.tnet.ListenTCP(&net.TCPAddr{Port: port})
+			if err != nil {
+				return fmt.Errorf("failed to create TCP listener: %v", err)
+			}
+			listener = l
+		} else if pm.nativeListenIP != "" {
+			l, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP(pm.nativeListenIP), Port: port})
+			if err != nil {
+				return fmt.Errorf("failed to create native TCP listener on %s:%d: %v", pm.nativeListenIP, port, err)
+			}
+			listener = l
+		} else {
+			return fmt.Errorf("proxy manager has no tnet or native IP configured")
 		}
-
 		pm.listeners = append(pm.listeners, listener)
 		go pm.handleTCPProxy(listener, targetAddr)
 
 	case "udp":
-		addr := &net.UDPAddr{Port: port}
-		conn, err := pm.tnet.ListenUDP(addr)
-		if err != nil {
-			return fmt.Errorf("failed to create UDP listener: %v", err)
+		var conn net.PacketConn
+		if pm.tnet != nil {
+			c, err := pm.tnet.ListenUDP(&net.UDPAddr{Port: port})
+			if err != nil {
+				return fmt.Errorf("failed to create UDP listener: %v", err)
+			}
+			conn = c
+		} else if pm.nativeListenIP != "" {
+			c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(pm.nativeListenIP), Port: port})
+			if err != nil {
+				return fmt.Errorf("failed to create native UDP listener on %s:%d: %v", pm.nativeListenIP, port, err)
+			}
+			conn = c
+		} else {
+			return fmt.Errorf("proxy manager has no tnet or native IP configured")
 		}
-
 		pm.udpConns = append(pm.udpConns, conn)
 		go pm.handleUDPProxy(conn, targetAddr)
 
@@ -611,7 +647,7 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 	}
 }
 
-func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
+func (pm *ProxyManager) handleUDPProxy(conn net.PacketConn, targetAddr string) {
 	bufPtr := getUDPBuffer()
 	defer putUDPBuffer(bufPtr)
 	buffer := *bufPtr

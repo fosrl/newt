@@ -15,6 +15,12 @@ import (
 var wgService *clients.WireGuardService
 var ready bool
 
+// checkNativeMainPermissions returns an error if the process lacks the
+// privileges needed to create a native TUN interface for the main tunnel.
+func checkNativeMainPermissions() error {
+	return permissions.CheckNativeInterfacePermissions()
+}
+
 func setupClients(client *websocket.Client, credStore *nativessh.CredentialStore) {
 	var host = endpoint
 	if strings.HasPrefix(host, "http://") {

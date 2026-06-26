@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -24,9 +25,11 @@ import (
 
 	"github.com/fosrl/newt/authdaemon"
 	"github.com/fosrl/newt/browsergateway"
+	newtDevice "github.com/fosrl/newt/device"
 	"github.com/fosrl/newt/docker"
 	"github.com/fosrl/newt/healthcheck"
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/network"
 	"github.com/fosrl/newt/nativessh"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/updates"
@@ -38,7 +41,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun"
+	wtun "golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
@@ -191,6 +194,10 @@ var (
 
 	// Path to config file (overrides CONFIG_FILE env var and default location)
 	configFile string
+
+	// Native main tunnel flags
+	useNativeMainInterface  bool
+	nativeMainInterfaceName string
 )
 
 // generateChainId generates a random chain ID for deduplicating round-trip messages.
@@ -273,6 +280,9 @@ func runNewtMain(ctx context.Context) {
 	disableSSH = disableSSHEnv == "true"
 	useNativeInterfaceEnv := os.Getenv("USE_NATIVE_INTERFACE")
 	useNativeInterface = useNativeInterfaceEnv == "true"
+	useNativeMainInterfaceEnv := os.Getenv("USE_NATIVE_MAIN_INTERFACE")
+	useNativeMainInterface = useNativeMainInterfaceEnv == "true"
+	nativeMainInterfaceName = os.Getenv("INTERFACE_MAIN")
 	enforceHealthcheckCertEnv := os.Getenv("ENFORCE_HC_CERT")
 	enforceHealthcheckCert = enforceHealthcheckCertEnv == "true"
 	dockerSocket = os.Getenv("DOCKER_SOCKET")
@@ -338,7 +348,13 @@ func runNewtMain(ctx context.Context) {
 		flag.StringVar(&portStr, "port", "", "Port for client WireGuard interface")
 	}
 	if useNativeInterfaceEnv == "" {
-		flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface")
+		flag.BoolVar(&useNativeInterface, "native", false, "Use native WireGuard interface for client tunnels")
+	}
+	if useNativeMainInterfaceEnv == "" {
+		flag.BoolVar(&useNativeMainInterface, "native-main", false, "Use native WireGuard interface for the main tunnel (instead of netstack)")
+	}
+	if nativeMainInterfaceName == "" {
+		flag.StringVar(&nativeMainInterfaceName, "interface-main", "newtm", "Name of the native main tunnel WireGuard interface (used with --native-main)")
 	}
 	if disableClientsEnv == "" {
 		flag.BoolVar(&disableClients, "disable-clients", false, "Disable clients on the WireGuard interface")
@@ -526,6 +542,12 @@ func runNewtMain(ctx context.Context) {
 		os.Exit(0)
 	} else {
 		logger.Info("Newt version %s", newtVersion)
+	}
+
+	if useNativeMainInterface {
+		if err := checkNativeMainPermissions(); err != nil {
+			logger.Fatal("Insufficient permissions for native main tunnel interface: %v", err)
+		}
 	}
 
 	logger.Init(nil)
@@ -748,7 +770,7 @@ func runNewtMain(ctx context.Context) {
 	}
 
 	// Create TUN device and network stack
-	var tun tun.Device
+	var tun wtun.Device
 	var tnet *netstack.Net
 	var dev *device.Device
 	var pm *proxy.ProxyManager
@@ -897,13 +919,37 @@ func runNewtMain(ctx context.Context) {
 		}
 
 		logger.Debug(fmtReceivedMsg, msg)
-		tun, tnet, err = netstack.CreateNetTUN(
-			[]netip.Addr{netip.MustParseAddr(wgData.TunnelIP)},
-			[]netip.Addr{netip.MustParseAddr(dns)},
-			mtuInt)
-		if err != nil {
-			logger.Error("Failed to create TUN device: %v", err)
-			regResult = "failure"
+
+		if useNativeMainInterface {
+			mainIfName := nativeMainInterfaceName
+			if runtime.GOOS == "darwin" {
+				mainIfName, err = network.FindUnusedUTUN()
+				if err != nil {
+					logger.Error("Failed to find unused utun for main tunnel: %v", err)
+					regResult = "failure"
+					return
+				}
+			}
+			tun, err = wtun.CreateTUN(mainIfName, mtuInt)
+			if err != nil {
+				logger.Error("Failed to create native main TUN device: %v", err)
+				regResult = "failure"
+				return
+			}
+			if realName, nameErr := tun.Name(); nameErr == nil {
+				mainIfName = realName
+			}
+			tnet = nil
+			nativeMainInterfaceName = mainIfName
+		} else {
+			tun, tnet, err = netstack.CreateNetTUN(
+				[]netip.Addr{netip.MustParseAddr(wgData.TunnelIP)},
+				[]netip.Addr{netip.MustParseAddr(dns)},
+				mtuInt)
+			if err != nil {
+				logger.Error("Failed to create TUN device: %v", err)
+				regResult = "failure"
+			}
 		}
 
 		setDownstreamTNetstack(tnet)
@@ -957,6 +1003,34 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			regResult = "failure"
 		}
 
+		if useNativeMainInterface {
+			if cfgErr := network.ConfigureInterface(nativeMainInterfaceName, wgData.TunnelIP+"/32", mtuInt); cfgErr != nil {
+				logger.Error("Failed to configure native main tunnel interface: %v", cfgErr)
+			}
+			if runtime.GOOS == "darwin" {
+				if routeErr := network.AddRoutes([]string{wgData.ServerIP + "/32"}, nativeMainInterfaceName); routeErr != nil {
+					logger.Warn("Failed to add route for main tunnel server IP: %v", routeErr)
+				}
+			}
+			// Set up UAPI so wg(8) can inspect the main tunnel interface
+			if fileUAPI, uapiErr := newtDevice.UapiOpen(nativeMainInterfaceName); uapiErr != nil {
+				logger.Warn("Main tunnel UAPI open error: %v", uapiErr)
+			} else if uapiListener, uapiListenErr := newtDevice.UapiListen(nativeMainInterfaceName, fileUAPI); uapiListenErr != nil {
+				logger.Warn("Main tunnel UAPI listen error: %v", uapiListenErr)
+			} else {
+				go func() {
+					for {
+						c, aErr := uapiListener.Accept()
+						if aErr != nil {
+							return
+						}
+						go dev.IpcHandle(c)
+					}
+				}()
+				logger.Debug("Main tunnel UAPI listener started on %s", nativeMainInterfaceName)
+			}
+		}
+
 		logger.Debug("WireGuard device created. Lets ping the server now...")
 
 		// Even if pingWithRetry returns an error, it will continue trying in the background
@@ -965,30 +1039,44 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			close(pingWithRetryStopChan)
 			pingWithRetryStopChan = nil
 		}
-		// Use reliable ping for initial connection test
-		logger.Debug("Testing initial connection with reliable ping...")
-		lat, err := reliablePing(tnet, wgData.ServerIP, pingTimeout, 5)
-		if err == nil && wgData.PublicKey != "" {
-			telemetry.ObserveTunnelLatency(ctx, wgData.PublicKey, "wireguard", lat.Seconds())
-		}
-		if err != nil {
-			logger.Warn("Initial reliable ping failed, but continuing: %v", err)
-			regResult = "failure"
+
+		if !useNativeMainInterface {
+			// Use reliable ping for initial connection test
+			logger.Debug("Testing initial connection with reliable ping...")
+			lat, err := reliablePing(tnet, wgData.ServerIP, pingTimeout, 5)
+			if err == nil && wgData.PublicKey != "" {
+				telemetry.ObserveTunnelLatency(ctx, wgData.PublicKey, "wireguard", lat.Seconds())
+			}
+			if err != nil {
+				logger.Warn("Initial reliable ping failed, but continuing: %v", err)
+				regResult = "failure"
+			} else {
+				logger.Debug("Initial connection test successful")
+			}
+
+			pingWithRetryStopChan, _ = pingWithRetry(tnet, wgData.ServerIP, pingTimeout)
+
+			// Always mark as connected and start the proxy manager regardless of initial ping result
+			// as the pings will continue in the background
+			if !connected {
+				logger.Debug("Starting ping check")
+				pingStopChan = startPingCheck(tnet, wgData.ServerIP, client, wgData.PublicKey)
+			}
 		} else {
-			logger.Debug("Initial connection test successful")
-		}
-
-		pingWithRetryStopChan, _ = pingWithRetry(tnet, wgData.ServerIP, pingTimeout)
-
-		// Always mark as connected and start the proxy manager regardless of initial ping result
-		// as the pings will continue in the background
-		if !connected {
-			logger.Debug("Starting ping check")
-			pingStopChan = startPingCheck(tnet, wgData.ServerIP, client, wgData.PublicKey)
+			// Native main: no netstack-based ping; write health file directly.
+			if healthFile != "" {
+				if writeErr := os.WriteFile(healthFile, []byte("ok"), 0644); writeErr != nil {
+					logger.Warn(msgHealthFileWriteFailed, writeErr)
+				}
+			}
 		}
 
 		// Create proxy manager
-		pm = proxy.NewProxyManager(tnet)
+		if useNativeMainInterface {
+			pm = proxy.NewProxyManagerNative(wgData.TunnelIP)
+		} else {
+			pm = proxy.NewProxyManager(tnet)
+		}
 		pm.SetAsyncBytes(metricsAsyncBytes)
 		pm.SetUDPIdleTimeout(udpProxyIdleTimeout)
 		// Set tunnel_id for metrics (WireGuard peer public key)
@@ -1015,8 +1103,11 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			// }
 		}
 
-		// Start direct UDP relay from main tunnel to clients' WireGuard (bypasses proxy)
-		clientsStartDirectRelay(wgData.TunnelIP)
+		// Start direct UDP relay from main tunnel to clients' WireGuard (bypasses proxy).
+		// Not needed for native main – the kernel routes UDP packets directly.
+		if !useNativeMainInterface {
+			clientsStartDirectRelay(wgData.TunnelIP)
+		}
 
 		if err := healthMonitor.AddTargets(wgData.HealthCheckTargets); err != nil {
 			logger.Error("Failed to bulk add health check targets: %v", err)
@@ -1051,7 +1142,13 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			browserGateway = browsergateway.New(browsergateway.Config{SSHCredentials: sshCredStore})
 			browserGateway.SetTargets(bgTargets)
 
-			ln, bgErr := tnet.ListenTCP(&net.TCPAddr{Port: browsergateway.ListenPort})
+			var ln net.Listener
+			var bgErr error
+			if useNativeMainInterface {
+				ln, bgErr = net.Listen("tcp", fmt.Sprintf("%s:%d", wgData.TunnelIP, browsergateway.ListenPort))
+			} else {
+				ln, bgErr = tnet.ListenTCP(&net.TCPAddr{Port: browsergateway.ListenPort})
+			}
 			if bgErr != nil {
 				logger.Error("Failed to start browser gateway listener: %v", bgErr)
 			} else {
@@ -2030,9 +2127,15 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
 
 		// If the gateway doesn't exist yet but we have a tunnel, start it
-		if browserGateway == nil && tnet != nil {
+		if browserGateway == nil && (tnet != nil || useNativeMainInterface) {
 			browserGateway = browsergateway.New(browsergateway.Config{SSHCredentials: sshCredStore})
-			ln, bgErr := tnet.ListenTCP(&net.TCPAddr{Port: browsergateway.ListenPort})
+			var ln net.Listener
+			var bgErr error
+			if useNativeMainInterface {
+				ln, bgErr = net.Listen("tcp", fmt.Sprintf("%s:%d", wgData.TunnelIP, browsergateway.ListenPort))
+			} else {
+				ln, bgErr = tnet.ListenTCP(&net.TCPAddr{Port: browsergateway.ListenPort})
+			}
 			if bgErr != nil {
 				logger.Error("Failed to start browser gateway listener: %v", bgErr)
 				browserGateway = nil
