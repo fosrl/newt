@@ -43,17 +43,17 @@ func DefaultTestOptions() TestConnectionOptions {
 
 // cachedAddr holds a cached resolved UDP address
 type cachedAddr struct {
-	addr      *net.UDPAddr
+	addr       *net.UDPAddr
 	resolvedAt time.Time
 }
 
 // HolepunchTester monitors holepunch connectivity using magic packets
 type HolepunchTester struct {
-	sharedBind  *bind.SharedBind
-	publicDNS []string
-	mu          sync.RWMutex
-	running     bool
-	stopChan    chan struct{}
+	sharedBind *bind.SharedBind
+	publicDNS  []string
+	mu         sync.RWMutex
+	running    bool
+	stopChan   chan struct{}
 
 	// Pending requests waiting for responses (key: echo data as string)
 	pendingRequests sync.Map // map[string]*pendingRequest
@@ -88,10 +88,22 @@ type pendingRequest struct {
 func NewHolepunchTester(sharedBind *bind.SharedBind, publicDNS []string) *HolepunchTester {
 	return &HolepunchTester{
 		sharedBind:   sharedBind,
-		publicDNS:  publicDNS,
+		publicDNS:    publicDNS,
 		addrCache:    make(map[string]*cachedAddr),
 		addrCacheTTL: 5 * time.Minute, // Cache addresses for 5 minutes
 	}
+}
+
+// SetPublicDNS replaces the list of DNS servers used to resolve peer endpoints.
+// The servers must be in "host:port" format (e.g. "8.8.8.8:53").
+func (t *HolepunchTester) SetPublicDNS(servers []string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.publicDNS = servers
+	// Invalidate the address cache so endpoints are re-resolved with the new DNS.
+	t.addrCacheMu.Lock()
+	t.addrCache = make(map[string]*cachedAddr)
+	t.addrCacheMu.Unlock()
 }
 
 // SetCallback sets the callback for connection status changes
