@@ -55,15 +55,16 @@ type BrowserGatewayTarget struct {
 }
 
 type WgData struct {
-	Endpoint              string                 `json:"endpoint"`
-	RelayPort             uint16                 `json:"relayPort"`
-	PublicKey             string                 `json:"publicKey"`
-	ServerIP              string                 `json:"serverIP"`
-	TunnelIP              string                 `json:"tunnelIP"`
-	Targets               TargetsByType          `json:"targets"`
-	HealthCheckTargets    []healthcheck.Config   `json:"healthCheckTargets"`
-	BrowserGatewayTargets []BrowserGatewayTarget `json:"browserGatewayTargets"`
-	ChainId               string                 `json:"chainId"`
+	Endpoint                string                 `json:"endpoint"`
+	RelayPort               uint16                 `json:"relayPort"`
+	PublicKey               string                 `json:"publicKey"`
+	ServerIP                string                 `json:"serverIP"`
+	TunnelIP                string                 `json:"tunnelIP"`
+	Targets                 TargetsByType          `json:"targets"`
+	HealthCheckTargets      []healthcheck.Config   `json:"healthCheckTargets"`
+	BrowserGatewayTargets   []BrowserGatewayTarget `json:"browserGatewayTargets"`
+	RemoteExitNodeSubnets   []string               `json:"remoteExitNodeSubnets"`
+	ChainId                 string                 `json:"chainId"`
 }
 
 type TargetsByType struct {
@@ -198,6 +199,9 @@ var (
 	// Native main tunnel flags
 	useNativeMainInterface  bool
 	nativeMainInterfaceName string
+
+	// Subnets currently routed through the main tunnel (beyond the server IP)
+	activeRemoteSubnets []string
 )
 
 // generateChainId generates a random chain ID for deduplicating round-trip messages.
@@ -848,6 +852,21 @@ func runNewtMain(ctx context.Context) {
 			pm = nil
 		}
 
+		// Remove native main tunnel routes before closing the device
+		if useNativeMainInterface {
+			toRemove := make([]string, 0, len(activeRemoteSubnets)+1)
+			if wgData.ServerIP != "" {
+				toRemove = append(toRemove, wgData.ServerIP+"/32")
+			}
+			toRemove = append(toRemove, activeRemoteSubnets...)
+			if len(toRemove) > 0 {
+				if err := network.RemoveRoutes(toRemove); err != nil {
+					logger.Warn("Failed to remove native main tunnel routes: %v", err)
+				}
+			}
+			activeRemoteSubnets = nil
+		}
+
 		// Close WireGuard device first - this will automatically close the TUN device
 		if dev != nil {
 			dev.Close()
@@ -1027,6 +1046,25 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				}()
 				logger.Debug("Main tunnel UAPI listener started on %s", nativeMainInterfaceName)
 			}
+		}
+
+		// Add remote exit node subnets: update WireGuard AllowedIPs and (for native
+		// mode) add kernel routes via the tunnel interface.
+		activeRemoteSubnets = nil
+		if len(wgData.RemoteExitNodeSubnets) > 0 {
+			for _, subnet := range wgData.RemoteExitNodeSubnets {
+				subnetCfg := fmt.Sprintf("public_key=%s\nallowed_ip=%s", util.FixKey(wgData.PublicKey), subnet)
+				if err := dev.IpcSet(subnetCfg); err != nil {
+					logger.Warn("Failed to add AllowedIP %s to main tunnel: %v", subnet, err)
+				}
+			}
+			if useNativeMainInterface {
+				if routeErr := network.AddRoutes(wgData.RemoteExitNodeSubnets, nativeMainInterfaceName); routeErr != nil {
+					logger.Warn("Failed to add routes for remote exit node subnets: %v", routeErr)
+				}
+			}
+			activeRemoteSubnets = append([]string{}, wgData.RemoteExitNodeSubnets...)
+			logger.Debug("Added %d remote exit node subnets", len(wgData.RemoteExitNodeSubnets))
 		}
 
 		logger.Debug("WireGuard device created. Lets ping the server now...")
@@ -1508,6 +1546,166 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 			// 	updateTargets(wgService.GetProxyManager(), "remove", wgData.TunnelIP, "tcp", targetData)
 			// }
 		}
+	})
+
+	client.RegisterHandler("newt/wg/subnets/add", func(msg websocket.WSMessage) {
+		logger.Debug("Received subnet add message")
+
+		var data struct {
+			Subnets []string `json:"subnets"`
+		}
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling subnet add data: %v", err)
+			return
+		}
+		if err := json.Unmarshal(jsonData, &data); err != nil {
+			logger.Error("Error unmarshaling subnet add data: %v", err)
+			return
+		}
+		if len(data.Subnets) == 0 || dev == nil {
+			return
+		}
+
+		for _, subnet := range data.Subnets {
+			subnetCfg := fmt.Sprintf("public_key=%s\nallowed_ip=%s", util.FixKey(wgData.PublicKey), subnet)
+			if err := dev.IpcSet(subnetCfg); err != nil {
+				logger.Warn("Failed to add AllowedIP %s to main tunnel: %v", subnet, err)
+			}
+		}
+		if useNativeMainInterface {
+			if err := network.AddRoutes(data.Subnets, nativeMainInterfaceName); err != nil {
+				logger.Warn("Failed to add routes for subnets: %v", err)
+			}
+		}
+		activeRemoteSubnets = append(activeRemoteSubnets, data.Subnets...)
+		logger.Info("Added %d remote exit node subnets", len(data.Subnets))
+	})
+
+	// newt/wg/subnets/update replaces the entire remote subnet list atomically.
+	// Matches the server-side "set resources" semantics used by setRemoteExitNodeResources.
+	client.RegisterHandler("newt/wg/subnets/update", func(msg websocket.WSMessage) {
+		logger.Debug("Received subnet update message")
+
+		var data struct {
+			Subnets []string `json:"subnets"`
+		}
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling subnet update data: %v", err)
+			return
+		}
+		if err := json.Unmarshal(jsonData, &data); err != nil {
+			logger.Error("Error unmarshaling subnet update data: %v", err)
+			return
+		}
+		if dev == nil {
+			return
+		}
+
+		// Remove kernel routes for subnets no longer in the list (native mode)
+		if useNativeMainInterface && len(activeRemoteSubnets) > 0 {
+			toRemove := make([]string, 0)
+			newSet := make(map[string]bool, len(data.Subnets))
+			for _, s := range data.Subnets {
+				newSet[s] = true
+			}
+			for _, s := range activeRemoteSubnets {
+				if !newSet[s] {
+					toRemove = append(toRemove, s)
+				}
+			}
+			if len(toRemove) > 0 {
+				if err := network.RemoveRoutes(toRemove); err != nil {
+					logger.Warn("Failed to remove old subnet routes: %v", err)
+				}
+			}
+		}
+
+		// Replace WireGuard AllowedIPs with serverIP/32 + new subnet list
+		if wgData.PublicKey != "" {
+			lines := fmt.Sprintf("public_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s/32",
+				util.FixKey(wgData.PublicKey), wgData.ServerIP)
+			for _, s := range data.Subnets {
+				lines += "\nallowed_ip=" + s
+			}
+			if err := dev.IpcSet(lines); err != nil {
+				logger.Warn("Failed to update WireGuard AllowedIPs: %v", err)
+			}
+		}
+
+		// Add kernel routes for any newly added subnets (native mode)
+		if useNativeMainInterface && len(data.Subnets) > 0 {
+			existing := make(map[string]bool, len(activeRemoteSubnets))
+			for _, s := range activeRemoteSubnets {
+				existing[s] = true
+			}
+			toAdd := make([]string, 0)
+			for _, s := range data.Subnets {
+				if !existing[s] {
+					toAdd = append(toAdd, s)
+				}
+			}
+			if len(toAdd) > 0 {
+				if err := network.AddRoutes(toAdd, nativeMainInterfaceName); err != nil {
+					logger.Warn("Failed to add new subnet routes: %v", err)
+				}
+			}
+		}
+
+		activeRemoteSubnets = append([]string{}, data.Subnets...)
+		logger.Info("Updated remote exit node subnets: %d total", len(data.Subnets))
+	})
+
+	client.RegisterHandler("newt/wg/subnets/remove", func(msg websocket.WSMessage) {
+		logger.Debug("Received subnet remove message")
+
+		var data struct {
+			Subnets []string `json:"subnets"`
+		}
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error("Error marshaling subnet remove data: %v", err)
+			return
+		}
+		if err := json.Unmarshal(jsonData, &data); err != nil {
+			logger.Error("Error unmarshaling subnet remove data: %v", err)
+			return
+		}
+		if len(data.Subnets) == 0 {
+			return
+		}
+
+		if useNativeMainInterface {
+			if err := network.RemoveRoutes(data.Subnets); err != nil {
+				logger.Warn("Failed to remove routes for subnets: %v", err)
+			}
+		}
+
+		// Rebuild WireGuard AllowedIPs without the removed subnets
+		toRemove := make(map[string]bool, len(data.Subnets))
+		for _, s := range data.Subnets {
+			toRemove[s] = true
+		}
+		remaining := activeRemoteSubnets[:0]
+		for _, s := range activeRemoteSubnets {
+			if !toRemove[s] {
+				remaining = append(remaining, s)
+			}
+		}
+		activeRemoteSubnets = remaining
+
+		if dev != nil && wgData.PublicKey != "" {
+			lines := fmt.Sprintf("public_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s/32",
+				util.FixKey(wgData.PublicKey), wgData.ServerIP)
+			for _, s := range remaining {
+				lines += "\nallowed_ip=" + s
+			}
+			if err := dev.IpcSet(lines); err != nil {
+				logger.Warn("Failed to update WireGuard AllowedIPs after subnet removal: %v", err)
+			}
+		}
+		logger.Info("Removed %d remote exit node subnets", len(data.Subnets))
 	})
 
 	// Register handler for syncing targets (TCP, UDP, and health checks)
