@@ -785,36 +785,7 @@ persistent_keepalive_interval=5`, util.FixKey(n.privateKey.String()), util.FixKe
 		logger.Info("Removed %d remote exit node subnets", len(data.Subnets))
 	})
 
-	n.client.RegisterHandler("newt/sync", func(msg websocket.WSMessage) {
-		logger.Info("Received sync message")
-
-		if n.wgData.TunnelIP == "" || n.pm == nil {
-			logger.Info(msgNoTunnelOrProxy)
-			return
-		}
-
-		type SyncData struct {
-			Targets            TargetsByType        `json:"targets"`
-			HealthCheckTargets []healthcheck.Config `json:"healthCheckTargets"`
-		}
-
-		var syncData SyncData
-		jsonData, err := json.Marshal(msg.Data)
-		if err != nil {
-			logger.Error("Error marshaling sync data: %v", err)
-			return
-		}
-
-		if err := json.Unmarshal(jsonData, &syncData); err != nil {
-			logger.Error("Error unmarshaling sync data: %v", err)
-			return
-		}
-
-		logger.Debug("Sync data received: TCP targets=%d, UDP targets=%d, health check targets=%d",
-			len(syncData.Targets.TCP), len(syncData.Targets.UDP), len(syncData.HealthCheckTargets))
-
-		logger.Info("Sync complete")
-	})
+	n.client.RegisterHandler("newt/sync", n.handleSync)
 
 	n.client.RegisterHandler("newt/socket/check", func(msg websocket.WSMessage) {
 		logger.Debug("Received Docker socket check request")
