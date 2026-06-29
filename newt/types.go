@@ -59,3 +59,9 @@ type BlueprintResult struct {
 	Success bool   `json:"success"`
 	Message string `json:"message,omitempty"`
 }
+
+// Define the sync data structure
+type SyncData struct {
+	Targets            TargetsByType        `json:"targets"`
+	HealthCheckTargets []healthcheck.Config `json:"healthCheckTargets"`
+}
