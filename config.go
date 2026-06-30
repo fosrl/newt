@@ -213,7 +213,8 @@ func loadNewtConfig() newtpkg.Config {
 		flag.BoolVar(&cfg.UseNativeMainInterface, "native-main", false, "Use native WireGuard interface for the main tunnel (instead of netstack)")
 	}
 	if cfg.NativeMainInterfaceName == "" {
-		flag.StringVar(&cfg.NativeMainInterfaceName, "interface-main", "newtm", "Name of the native main tunnel WireGuard interface (used with --native-main)")
+		// makeing this the same as above should prevent them from running together
+		flag.StringVar(&cfg.NativeMainInterfaceName, "interface-main", "newt", "Name of the native main tunnel WireGuard interface (used with --native-main)")
 	}
 	if disableClientsEnv == "" {
 		flag.BoolVar(&cfg.DisableClients, "disable-clients", false, "Disable clients on the WireGuard interface")

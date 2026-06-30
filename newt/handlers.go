@@ -352,6 +352,7 @@ persistent_keepalive_interval=5`, util.FixKey(n.privateKey.String()), util.FixKe
 	})
 
 	n.client.RegisterHandler("newt/wg/restart", func(msg websocket.WSMessage) {
+		logger.Info("Received restart message")
 		n.closeWgTunnel()
 		n.closeClients()
 		if n.healthMonitor != nil {
