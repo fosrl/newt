@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"software.sslmate.com/src/go-pkcs12"
@@ -50,10 +51,11 @@ type Client struct {
 	serverVersion     string
 	configVersion     int64 // Latest config version received from server
 	configVersionMux  sync.RWMutex
-	processingMessage bool           // Flag to track if a message is currently being processed
-	processingMux     sync.RWMutex   // Protects processingMessage
-	processingWg      sync.WaitGroup // WaitGroup to wait for message processing to complete
-	justProvisioned   bool           // Set to true when provisionIfNeeded exchanges a key for permanent credentials
+	processingMessage   bool           // Flag to track if a message is currently being processed
+	processingMux       sync.RWMutex   // Protects processingMessage
+	processingWg        sync.WaitGroup // WaitGroup to wait for message processing to complete
+	justProvisioned     bool           // Set to true when provisionIfNeeded exchanges a key for permanent credentials
+	consecutiveFailures atomic.Int32   // Counts consecutive connection failures for log suppression
 }
 
 type ClientOption func(*Client)
@@ -409,7 +411,7 @@ func (c *Client) getToken() (string, error) {
 	logger.Debug("Token response body: %s", string(body))
 
 	if resp.StatusCode != http.StatusOK {
-		logger.Error("Failed to get token with status code: %d", resp.StatusCode)
+		logger.Debug("Failed to get token with status code: %d", resp.StatusCode)
 		telemetry.IncConnAttempt(ctx, "auth", "failure")
 		etype := "io_error"
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
@@ -492,6 +494,12 @@ func classifyWSDisconnect(err error) (result, reason string) {
 	}
 }
 
+// consecutiveFailureThreshold is the number of consecutive failures before
+// connection errors are promoted from Debug to Error. This suppresses the noisy
+// transient errors that occur during routine server updates while still surfacing
+// genuine connectivity problems.
+const consecutiveFailureThreshold = 3
+
 func (c *Client) connectWithRetry() {
 	for {
 		select {
@@ -500,10 +508,16 @@ func (c *Client) connectWithRetry() {
 		default:
 			err := c.establishConnection()
 			if err != nil {
-				logger.Error("Failed to connect: %v. Retrying in %v...", err, c.reconnectInterval)
+				n := c.consecutiveFailures.Add(1)
+				if n >= consecutiveFailureThreshold {
+					logger.Error("Failed to connect: %v. Retrying in %v...", err, c.reconnectInterval)
+				} else {
+					logger.Debug("Failed to connect (attempt %d): %v. Retrying in %v...", n, err, c.reconnectInterval)
+				}
 				time.Sleep(c.reconnectInterval)
 				continue
 			}
+			c.consecutiveFailures.Store(0)
 			return
 		}
 	}
