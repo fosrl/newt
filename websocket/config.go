@@ -19,6 +19,10 @@ import (
 	"github.com/fosrl/newt/logger"
 )
 
+// getConfigPath returns the resolved config/credentials file path. Path
+// resolution (CLI flag / env var / OS default) is now owned by the calling
+// binary's root config loader; this is a fallback used only when a caller
+// (e.g. a test) doesn't supply an explicit path via WithConfigFile.
 func getConfigPath(clientType string, overridePath string) string {
 	if overridePath != "" {
 		return overridePath
@@ -46,21 +50,14 @@ func getConfigPath(clientType string, overridePath string) string {
 	return configFile
 }
 
+// loadConfig no longer merges credentials in from the file: the caller
+// resolves ID/Secret/Endpoint/TlsClientCert/ProvisioningKey/Name (from its
+// own settings file, env, and CLI flags) before constructing the Client. This
+// only figures out whether the file needs to be (re)written so that the
+// caller-provided values get cached to disk on first successful connect.
 func (c *Client) loadConfig() error {
-	originalConfig := *c.config // Store original config to detect changes
 	configPath := getConfigPath(c.clientType, c.configFilePath)
 
-	if c.config.ID != "" && c.config.Secret != "" && c.config.Endpoint != "" {
-		logger.Debug("Config already provided, skipping loading from file")
-		// Check if config file exists, if not, we should save it
-		if _, err := os.Stat(configPath); os.IsNotExist(err) {
-			logger.Info("Config file does not exist at %s, will create it", configPath)
-			c.configNeedsSave = true
-		}
-		return nil
-	}
-
-	logger.Info("Loading config from: %s", configPath)
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -73,57 +70,16 @@ func (c *Client) loadConfig() error {
 	if len(bytes.TrimSpace(data)) == 0 {
 		logger.Info("Config file at %s is empty, will initialize it with provided values", configPath)
 		c.configNeedsSave = true
-		return nil
 	}
-
-	var config Config
-	if err := json.Unmarshal(data, &config); err != nil {
-		return err
-	}
-
-	// Track what was loaded from file vs provided by CLI
-	fileHadID := c.config.ID == ""
-	fileHadSecret := c.config.Secret == ""
-	fileHadCert := c.config.TlsClientCert == ""
-	fileHadEndpoint := c.config.Endpoint == ""
-
-	if c.config.ID == "" {
-		c.config.ID = config.ID
-	}
-	if c.config.Secret == "" {
-		c.config.Secret = config.Secret
-	}
-	if c.config.TlsClientCert == "" {
-		c.config.TlsClientCert = config.TlsClientCert
-	}
-	if c.config.Endpoint == "" {
-		c.config.Endpoint = config.Endpoint
-		c.baseURL = config.Endpoint
-	}
-	// Always load the provisioning key from the file if not already set
-	if c.config.ProvisioningKey == "" {
-		c.config.ProvisioningKey = config.ProvisioningKey
-	}
-	// Always load the name from the file if not already set
-	if c.config.Name == "" {
-		c.config.Name = config.Name
-	}
-
-	// Check if CLI args provided values that override file values
-	if (!fileHadID && originalConfig.ID != "") ||
-		(!fileHadSecret && originalConfig.Secret != "") ||
-		(!fileHadCert && originalConfig.TlsClientCert != "") ||
-		(!fileHadEndpoint && originalConfig.Endpoint != "") {
-		logger.Info("CLI arguments provided, config will be updated")
-		c.configNeedsSave = true
-	}
-
-	logger.Debug("Loaded config from %s", configPath)
-	logger.Debug("Config: %+v", c.config)
 
 	return nil
 }
 
+// saveConfig persists the credential fields (id, secret, endpoint,
+// tlsClientCert, provisioningKey, name) into the config file. It's a
+// read-modify-write against the raw JSON so that any other settings a user
+// has placed in the same file (mtu, dns, etc.) are preserved rather than
+// clobbered.
 func (c *Client) saveConfig() error {
 	if !c.configNeedsSave {
 		logger.Debug("Config has not changed, skipping save")
@@ -131,7 +87,31 @@ func (c *Client) saveConfig() error {
 	}
 
 	configPath := getConfigPath(c.clientType, c.configFilePath)
-	data, err := json.MarshalIndent(c.config, "", "  ")
+
+	existing := map[string]interface{}{}
+	if data, err := os.ReadFile(configPath); err == nil && len(bytes.TrimSpace(data)) > 0 {
+		if err := json.Unmarshal(data, &existing); err != nil {
+			logger.Warn("Existing config file at %s is not valid JSON, other settings in it will be lost: %v", configPath, err)
+			existing = map[string]interface{}{}
+		}
+	}
+
+	existing["id"] = c.config.ID
+	existing["secret"] = c.config.Secret
+	existing["endpoint"] = c.config.Endpoint
+
+	setOrDelete := func(key, value string) {
+		if value != "" {
+			existing[key] = value
+		} else {
+			delete(existing, key)
+		}
+	}
+	setOrDelete("tlsClientCert", c.config.TlsClientCert)
+	setOrDelete("provisioningKey", c.config.ProvisioningKey)
+	setOrDelete("name", c.config.Name)
+
+	data, err := json.MarshalIndent(existing, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -157,6 +137,15 @@ func interpolateString(s string) string {
 		}
 		return match
 	})
+}
+
+// EnsureProvisioned exchanges a provisioning key for permanent credentials
+// synchronously, if one is configured and credentials aren't already present.
+// Callers that need the resolved ID/Secret before Connect() runs (which only
+// provisions lazily, in the background, on first connection attempt) should
+// call this first.
+func (c *Client) EnsureProvisioned() error {
+	return c.provisionIfNeeded()
 }
 
 // provisionIfNeeded checks whether a provisioning key is present and, if so,

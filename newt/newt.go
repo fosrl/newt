@@ -133,11 +133,15 @@ func Init(ctx context.Context, cfg Config) (*Newt, error) {
 	}
 	n.client = client
 
-	if cfg.ProvisioningKey != "" && client.GetConfig().ProvisioningKey == "" {
-		client.GetConfig().ProvisioningKey = cfg.ProvisioningKey
-	}
-	if cfg.NewtName != "" && client.GetConfig().Name == "" {
-		client.GetConfig().Name = cfg.NewtName
+	client.GetConfig().ProvisioningKey = cfg.ProvisioningKey
+	client.GetConfig().Name = cfg.NewtName
+
+	// Resolve provisioning synchronously so ID/Secret are final before
+	// setupClients() bakes them into the WireGuard service / hole-punch
+	// manager. Connect() only provisions lazily in the background, which
+	// would otherwise race setupClients() on first run.
+	if err := client.EnsureProvisioned(); err != nil {
+		return nil, fmt.Errorf("provision newt credentials: %w", err)
 	}
 
 	// Update config from resolved client values (provisioning / config file).
