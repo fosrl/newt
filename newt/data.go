@@ -137,6 +137,11 @@ func (n *Newt) handleSync(msg websocket.WSMessage) {
 		}
 	}
 
+	// Sync remote exit node subnets
+	if n.dev != nil {
+		n.updateRemoteExitNodeSubnets(syncData.RemoteExitNodeSubnets)
+	}
+
 	// Sync health check targets
 	if err := n.healthMonitor.SyncTargets(syncData.HealthCheckTargets); err != nil {
 		logger.Error("Failed to sync health check targets: %v", err)

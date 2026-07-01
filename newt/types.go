@@ -62,6 +62,7 @@ type BlueprintResult struct {
 
 // Define the sync data structure
 type SyncData struct {
-	Targets            TargetsByType        `json:"targets"`
-	HealthCheckTargets []healthcheck.Config `json:"healthCheckTargets"`
+	Targets               TargetsByType        `json:"targets"`
+	HealthCheckTargets    []healthcheck.Config `json:"healthCheckTargets"`
+	RemoteExitNodeSubnets []string             `json:"remoteExitNodeSubnets"`
 }

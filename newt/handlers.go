@@ -405,55 +405,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 			return
 		}
 
-		if n.config.UseNativeMainInterface && len(n.activeRemoteSubnets) > 0 {
-			toRemove := make([]string, 0)
-			newSet := make(map[string]bool, len(data.Subnets))
-			for _, s := range data.Subnets {
-				newSet[s] = true
-			}
-			for _, s := range n.activeRemoteSubnets {
-				if !newSet[s] {
-					toRemove = append(toRemove, s)
-				}
-			}
-			if len(toRemove) > 0 {
-				if err := network.RemoveRoutes(toRemove); err != nil {
-					logger.Warn("Failed to remove old subnet routes: %v", err)
-				}
-			}
-		}
-
-		if n.wgData.PublicKey != "" {
-			lines := fmt.Sprintf("public_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s/32",
-				util.FixKey(n.wgData.PublicKey), n.wgData.ServerIP)
-			for _, s := range data.Subnets {
-				lines += "\nallowed_ip=" + s
-			}
-			if err := n.dev.IpcSet(lines); err != nil {
-				logger.Warn("Failed to update WireGuard AllowedIPs: %v", err)
-			}
-		}
-
-		if n.config.UseNativeMainInterface && len(data.Subnets) > 0 {
-			existing := make(map[string]bool, len(n.activeRemoteSubnets))
-			for _, s := range n.activeRemoteSubnets {
-				existing[s] = true
-			}
-			toAdd := make([]string, 0)
-			for _, s := range data.Subnets {
-				if !existing[s] {
-					toAdd = append(toAdd, s)
-				}
-			}
-			if len(toAdd) > 0 {
-				if err := network.AddRoutes(toAdd, n.config.NativeMainInterfaceName); err != nil {
-					logger.Warn("Failed to add new subnet routes: %v", err)
-				}
-			}
-		}
-
-		n.activeRemoteSubnets = append([]string{}, data.Subnets...)
-		logger.Info("Updated remote exit node subnets: %d total", len(data.Subnets))
+		n.updateRemoteExitNodeSubnets(data.Subnets)
 	})
 
 	n.client.RegisterHandler("newt/wg/subnets/remove", func(msg websocket.WSMessage) {
