@@ -8,11 +8,21 @@ import (
 	"os/exec"
 )
 
-// reexec spawns a new copy of the current process with the same arguments and
-// environment, then exits the current process. On Windows, execve is not
-// available, so we start a child process and exit. On success it never returns
-// (os.Exit terminates the current process). On failure it returns an error.
+// reexec restarts newt. On Windows, execve is not available, so outside of
+// service mode we start a child process and exit (on success this never
+// returns since os.Exit terminates the current process).
+//
+// When running as a Windows service, spawning a detached child would orphan
+// it from the Service Control Manager (the SCM only tracks processes it
+// started itself), and os.Exit would end the process without ever reporting
+// a clean status transition, making the service look like it crashed. So in
+// that case we instead delegate to requestServiceRestart, which asks the SCM
+// itself to relaunch the service.
 func reexec() error {
+	if isWindowsService() {
+		return requestServiceRestart()
+	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)

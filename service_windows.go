@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -85,9 +86,43 @@ type newtService struct {
 	args []string
 }
 
+// activeService points at the newtService currently running under the SCM,
+// so that requestServiceRestart (called from deep inside the app via
+// cfg.OnRestart) can signal it without threading a reference through the
+// newt package. restartRequested tells Execute's completion path whether the
+// tunnel shut down because of a real Stop/Shutdown control request (report
+// success) or because the app asked to be restarted (report a non-zero exit
+// code so the SCM's configured recovery action relaunches the service as a
+// fresh, SCM-tracked process).
+var (
+	activeService    *newtService
+	restartRequested atomic.Bool
+)
+
+// requestServiceRestart asks the Windows Service Control Manager to relaunch
+// the service. Unlike reexec on other platforms, a Windows service cannot
+// replace its own process image or spawn a detached child that the SCM would
+// recognize - the SCM only respawns processes it started itself. So instead
+// we gracefully stop the current run (same as a real Stop control request)
+// and report a failure exit code on the way out, which - combined with the
+// recovery actions configured in configureRecoveryActions - causes the SCM
+// to start a brand new, properly tracked instance of the service.
+func requestServiceRestart() error {
+	if activeService == nil || activeService.stop == nil {
+		return fmt.Errorf("newt service is not running")
+	}
+	restartRequested.Store(true)
+	activeService.elog.Info(1, "Restart requested; stopping tunnel and asking the service control manager to relaunch")
+	activeService.stop()
+	return nil
+}
+
 func (s *newtService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
 	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown
 	changes <- svc.Status{State: svc.StartPending}
+
+	activeService = s
+	restartRequested.Store(false)
 
 	s.elog.Info(1, fmt.Sprintf("Service Execute called with args: %v", args))
 
@@ -169,8 +204,12 @@ func (s *newtService) Execute(args []string, r <-chan svc.ChangeRequest, changes
 				s.elog.Error(1, fmt.Sprintf("Unexpected control request #%d", c))
 			}
 		case <-newtDone:
-			s.elog.Info(1, "Main newt logic completed, stopping service")
 			changes <- svc.Status{State: svc.StopPending}
+			if restartRequested.Load() {
+				s.elog.Info(1, "Main newt logic stopped for restart, reporting failure exit code so the SCM relaunches the service")
+				return false, 1
+			}
+			s.elog.Info(1, "Main newt logic completed, stopping service")
 			return false, 0
 		}
 	}
@@ -207,6 +246,52 @@ func (s *newtService) runNewt() {
 	}
 }
 
+// configureRecoveryActions tells the Service Control Manager to relaunch the
+// service automatically when it stops with a non-zero exit code. This is
+// what makes requestServiceRestart's approach (report failure, let the SCM
+// respawn us) actually result in a restart.
+func configureRecoveryActions(s *mgr.Service) error {
+	actions := []mgr.RecoveryAction{
+		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
+	}
+	if err := s.SetRecoveryActions(actions, 24*60*60); err != nil {
+		return fmt.Errorf("failed to set recovery actions: %v", err)
+	}
+	// By default the SCM only runs recovery actions when a service crashes.
+	// A restart-via-OnRestart is a controlled stop that merely reports a
+	// non-zero exit code, so this flag must be enabled for it to count.
+	if err := s.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
+		return fmt.Errorf("failed to enable recovery actions on non-crash failures: %v", err)
+	}
+	return nil
+}
+
+// ensureRecoveryActionsConfigured is a best-effort check run at service
+// startup so that services installed by older versions of newt (before
+// recovery actions existed) get them configured on their next start, without
+// requiring a reinstall.
+func ensureRecoveryActionsConfigured(name string, elog debug.Log) {
+	m, err := mgr.Connect()
+	if err != nil {
+		elog.Warning(1, fmt.Sprintf("Could not connect to service manager to verify recovery actions: %v", err))
+		return
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(name)
+	if err != nil {
+		elog.Warning(1, fmt.Sprintf("Could not open service to verify recovery actions: %v", err))
+		return
+	}
+	defer s.Close()
+
+	if err := configureRecoveryActions(s); err != nil {
+		elog.Warning(1, fmt.Sprintf("Could not configure recovery actions: %v", err))
+	}
+}
+
 func runService(name string, isDebug bool, args []string) {
 	var err error
 	var elog debug.Log
@@ -224,6 +309,7 @@ func runService(name string, isDebug bool, args []string) {
 	defer elog.Close()
 
 	elog.Info(1, fmt.Sprintf("Starting %s service", name))
+	ensureRecoveryActionsConfigured(name, elog)
 	run := svc.Run
 	if isDebug {
 		run = debug.Run
@@ -281,6 +367,13 @@ func installService() error {
 	if err != nil {
 		s.Delete()
 		return fmt.Errorf("failed to install event log: %v", err)
+	}
+
+	if err := configureRecoveryActions(s); err != nil {
+		// Non-fatal: the service is installed and usable, it just won't
+		// auto-relaunch on an app-initiated restart until this is retried
+		// (ensureRecoveryActionsConfigured does so on every service start).
+		fmt.Printf("Warning: failed to configure service recovery actions: %v\n", err)
 	}
 
 	return nil
