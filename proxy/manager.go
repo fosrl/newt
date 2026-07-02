@@ -53,6 +53,50 @@ type Target struct {
 	Port    int
 }
 
+// managedListener wraps a net.Listener so an intentional Close() can be
+// detected reliably by the accept loop. gVisor's netstack (unlike the
+// stdlib) does not return net.ErrClosed from Accept() after Close() - it
+// returns a generic "endpoint is in invalid state" error - so relying on
+// errors.Is(err, net.ErrClosed) leaves the accept loop spinning forever.
+type managedListener struct {
+	net.Listener
+	closed chan struct{}
+}
+
+func newManagedListener(l net.Listener) *managedListener {
+	return &managedListener{Listener: l, closed: make(chan struct{})}
+}
+
+func (m *managedListener) Close() error {
+	err := m.Listener.Close()
+	select {
+	case <-m.closed:
+	default:
+		close(m.closed)
+	}
+	return err
+}
+
+// managedPacketConn is the net.PacketConn equivalent of managedListener.
+type managedPacketConn struct {
+	net.PacketConn
+	closed chan struct{}
+}
+
+func newManagedPacketConn(c net.PacketConn) *managedPacketConn {
+	return &managedPacketConn{PacketConn: c, closed: make(chan struct{})}
+}
+
+func (m *managedPacketConn) Close() error {
+	err := m.PacketConn.Close()
+	select {
+	case <-m.closed:
+	default:
+		close(m.closed)
+	}
+	return err
+}
+
 // ProxyManager handles the creation and management of proxy connections
 type ProxyManager struct {
 	tnet           *netstack.Net
@@ -527,8 +571,9 @@ func (pm *ProxyManager) startTarget(proto, listenIP string, port int, targetAddr
 		} else {
 			return fmt.Errorf("proxy manager has no tnet or native IP configured")
 		}
-		pm.listeners = append(pm.listeners, listener)
-		go pm.handleTCPProxy(listener, targetAddr)
+		ml := newManagedListener(listener)
+		pm.listeners = append(pm.listeners, ml)
+		go pm.handleTCPProxy(ml, targetAddr)
 
 	case "udp":
 		var conn net.PacketConn
@@ -547,8 +592,9 @@ func (pm *ProxyManager) startTarget(proto, listenIP string, port int, targetAddr
 		} else {
 			return fmt.Errorf("proxy manager has no tnet or native IP configured")
 		}
-		pm.udpConns = append(pm.udpConns, conn)
-		go pm.handleUDPProxy(conn, targetAddr)
+		mc := newManagedPacketConn(conn)
+		pm.udpConns = append(pm.udpConns, mc)
+		go pm.handleUDPProxy(mc, targetAddr)
 
 	default:
 		return fmt.Errorf(errUnsupportedProtoFmt, proto)
@@ -568,11 +614,17 @@ func (pm *ProxyManager) getEntry(id string) *tunnelEntry {
 	return e
 }
 
-func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string) {
+func (pm *ProxyManager) handleTCPProxy(listener *managedListener, targetAddr string) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			telemetry.IncProxyAccept(context.Background(), pm.currentTunnelID, "tcp", "failure", classifyProxyError(err))
+			select {
+			case <-listener.closed:
+				logger.Info("TCP listener closed, stopping proxy handler for %v", listener.Addr())
+				return
+			default:
+			}
 			if !pm.running {
 				return
 			}
@@ -647,7 +699,7 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 	}
 }
 
-func (pm *ProxyManager) handleUDPProxy(conn net.PacketConn, targetAddr string) {
+func (pm *ProxyManager) handleUDPProxy(conn *managedPacketConn, targetAddr string) {
 	bufPtr := getUDPBuffer()
 	defer putUDPBuffer(bufPtr)
 	buffer := *bufPtr
@@ -657,33 +709,41 @@ func (pm *ProxyManager) handleUDPProxy(conn net.PacketConn, targetAddr string) {
 	for {
 		n, remoteAddr, err := conn.ReadFrom(buffer)
 		if err != nil {
-			if !pm.running {
-				// Clean up all connections when stopping
+			closeAllClients := func() {
 				clientsMutex.Lock()
 				for _, targetConn := range clientConns {
 					targetConn.Close()
 				}
 				clientConns = nil
 				clientsMutex.Unlock()
+			}
+
+			// Check for intentional closure first: netstack does not
+			// surface net.ErrClosed/io.EOF from ReadFrom() after Close(),
+			// so this channel is the only reliable signal.
+			select {
+			case <-conn.closed:
+				logger.Info("UDP connection closed, stopping proxy handler")
+				closeAllClients()
+				return
+			default:
+			}
+
+			if !pm.running {
+				closeAllClients()
 				return
 			}
 
 			// Check for connection closed conditions
 			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 				logger.Info("UDP connection closed, stopping proxy handler")
-
-				// Clean up existing client connections
-				clientsMutex.Lock()
-				for _, targetConn := range clientConns {
-					targetConn.Close()
-				}
-				clientConns = nil
-				clientsMutex.Unlock()
-
+				closeAllClients()
 				return
 			}
 
 			logger.Error("Error reading UDP packet: %v", err)
+			// Avoid a tight busy-loop if this error persists.
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
