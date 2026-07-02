@@ -190,12 +190,12 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 
 	// Register websocket handlers
 	wsClient.RegisterHandler("newt/wg/receive-config", service.handleConfig)
-	// wsClient.RegisterHandler("newt/wg/peer/add", service.handleAddPeer)
-	// wsClient.RegisterHandler("newt/wg/peer/remove", service.handleRemovePeer)
-	// wsClient.RegisterHandler("newt/wg/peer/update", service.handleUpdatePeer)
-	// wsClient.RegisterHandler("newt/wg/targets/add", service.handleAddTarget)
-	// wsClient.RegisterHandler("newt/wg/targets/remove", service.handleRemoveTarget)
-	// wsClient.RegisterHandler("newt/wg/targets/update", service.handleUpdateTarget)
+	wsClient.RegisterHandler("newt/wg/peer/add", service.handleAddPeer)
+	wsClient.RegisterHandler("newt/wg/peer/remove", service.handleRemovePeer)
+	wsClient.RegisterHandler("newt/wg/peer/update", service.handleUpdatePeer)
+	wsClient.RegisterHandler("newt/wg/targets/add", service.handleAddTarget)
+	wsClient.RegisterHandler("newt/wg/targets/remove", service.handleRemoveTarget)
+	wsClient.RegisterHandler("newt/wg/targets/update", service.handleUpdateTarget)
 
 	return service, nil
 }
