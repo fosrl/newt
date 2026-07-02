@@ -1,6 +1,6 @@
 .gitignore
 .dockerignore
-newt
+bin/
 *.json
 README.md
 Makefile
