@@ -196,7 +196,6 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 	wsClient.RegisterHandler("newt/wg/targets/add", service.handleAddTarget)
 	wsClient.RegisterHandler("newt/wg/targets/remove", service.handleRemoveTarget)
 	wsClient.RegisterHandler("newt/wg/targets/update", service.handleUpdateTarget)
-	wsClient.RegisterHandler("newt/wg/sync", service.handleSyncConfig)
 
 	return service, nil
 }
@@ -568,37 +567,15 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	logger.Info("Client connectivity setup. Ready to accept connections from clients!")
 }
 
-// SyncConfig represents the configuration sent from server for syncing
-type SyncConfig struct {
-	Targets []Target `json:"targets"`
-	Peers   []Peer   `json:"peers"`
-}
-
-func (s *WireGuardService) handleSyncConfig(msg websocket.WSMessage) {
-	var syncConfig SyncConfig
-
-	logger.Debug("Received sync message: %v", msg)
-	logger.Info("Received sync configuration from remote server")
-
-	jsonData, err := json.Marshal(msg.Data)
-	if err != nil {
-		logger.Error("Error marshaling sync data: %v", err)
-		return
+// Sync synchronizes the clients WireGuard peers and targets with the desired state
+// received as part of the main newt/sync message.
+func (s *WireGuardService) Sync(peers []Peer, targets []Target) {
+	if err := s.syncPeers(peers); err != nil {
+		logger.Error("Failed to sync client peers: %v", err)
 	}
 
-	if err := json.Unmarshal(jsonData, &syncConfig); err != nil {
-		logger.Error("Error unmarshaling sync data: %v", err)
-		return
-	}
-
-	// Sync peers
-	if err := s.syncPeers(syncConfig.Peers); err != nil {
-		logger.Error("Failed to sync peers: %v", err)
-	}
-
-	// Sync targets
-	if err := s.syncTargets(syncConfig.Targets); err != nil {
-		logger.Error("Failed to sync targets: %v", err)
+	if err := s.syncTargets(targets); err != nil {
+		logger.Error("Failed to sync client targets: %v", err)
 	}
 }
 
@@ -665,8 +642,12 @@ func (s *WireGuardService) syncPeers(desiredPeers []Peer) error {
 	return nil
 }
 
-// syncTargets synchronizes the current targets with the desired state
-// It removes targets not in the desired list and adds missing ones
+// syncTargets synchronizes the current targets with the desired state.
+// A sync represents the full authoritative state from the server, so rather
+// than diffing against the currently installed rules (which can miss
+// changes to a rule's contents when its source/dest prefix key is
+// unchanged - e.g. a RewriteTo update), we just rebuild the entire rule set
+// from scratch on every sync. This guarantees no stale rule can survive.
 func (s *WireGuardService) syncTargets(desiredTargets []Target) error {
 	if s.tnet == nil {
 		// Native interface mode - proxy features not available, skip silently
@@ -674,70 +655,31 @@ func (s *WireGuardService) syncTargets(desiredTargets []Target) error {
 		return nil
 	}
 
-	// Get current rules from the proxy handler
-	currentRules := s.tnet.GetProxySubnetRules()
-
-	// Build a map of current rules by source+dest prefix
-	type ruleKey struct {
-		sourcePrefix string
-		destPrefix   string
-	}
-	currentRuleMap := make(map[ruleKey]bool)
-	for _, rule := range currentRules {
-		key := ruleKey{
-			sourcePrefix: rule.SourcePrefix.String(),
-			destPrefix:   rule.DestPrefix.String(),
-		}
-		currentRuleMap[key] = true
-	}
-
-	// Build a map of desired targets
-	desiredTargetMap := make(map[ruleKey]Target)
+	var rules []netstack2.SubnetRule
 	for _, target := range desiredTargets {
-		key := ruleKey{
-			sourcePrefix: target.SourcePrefix,
-			destPrefix:   target.DestPrefix,
+		destPrefix, err := netip.ParsePrefix(target.DestPrefix)
+		if err != nil {
+			logger.Warn("Invalid dest prefix %s during sync: %v", target.DestPrefix, err)
+			continue
 		}
-		desiredTargetMap[key] = target
-	}
 
-	// Remove targets that are not in the desired list
-	for _, rule := range currentRules {
-		key := ruleKey{
-			sourcePrefix: rule.SourcePrefix.String(),
-			destPrefix:   rule.DestPrefix.String(),
+		var portRanges []netstack2.PortRange
+		for _, pr := range target.PortRange {
+			portRanges = append(portRanges, netstack2.PortRange{
+				Min:      pr.Min,
+				Max:      pr.Max,
+				Protocol: pr.Protocol,
+			})
 		}
-		if _, exists := desiredTargetMap[key]; !exists {
-			s.tnet.RemoveProxySubnetRule(rule.SourcePrefix, rule.DestPrefix)
-			logger.Info("Removed target %s -> %s during sync", rule.SourcePrefix.String(), rule.DestPrefix.String())
-		}
-	}
 
-	// Add targets that are missing
-	for key, target := range desiredTargetMap {
-		if _, exists := currentRuleMap[key]; !exists {
-			sourcePrefix, err := netip.ParsePrefix(target.SourcePrefix)
+		for _, sp := range resolveSourcePrefixes(target) {
+			sourcePrefix, err := netip.ParsePrefix(sp)
 			if err != nil {
-				logger.Warn("Invalid source prefix %s during sync: %v", target.SourcePrefix, err)
+				logger.Warn("Invalid source prefix %s during sync: %v", sp, err)
 				continue
 			}
 
-			destPrefix, err := netip.ParsePrefix(target.DestPrefix)
-			if err != nil {
-				logger.Warn("Invalid dest prefix %s during sync: %v", target.DestPrefix, err)
-				continue
-			}
-
-			var portRanges []netstack2.PortRange
-			for _, pr := range target.PortRange {
-				portRanges = append(portRanges, netstack2.PortRange{
-					Min:      pr.Min,
-					Max:      pr.Max,
-					Protocol: pr.Protocol,
-				})
-			}
-
-			s.tnet.AddProxySubnetRule(netstack2.SubnetRule{
+			rules = append(rules, netstack2.SubnetRule{
 				SourcePrefix: sourcePrefix,
 				DestPrefix:   destPrefix,
 				RewriteTo:    target.RewriteTo,
@@ -749,9 +691,11 @@ func (s *WireGuardService) syncTargets(desiredTargets []Target) error {
 				TLSCert:      target.TLSCert,
 				TLSKey:       target.TLSKey,
 			})
-			logger.Info("Added target %s -> %s during sync", target.SourcePrefix, target.DestPrefix)
 		}
 	}
+
+	s.tnet.ReplaceProxySubnetRules(rules)
+	logger.Info("Synced targets: %d rules installed", len(rules))
 
 	return nil
 }

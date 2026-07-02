@@ -18,7 +18,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"golang.zx2c4.com/wireguard/tun/netstack"
-	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
 const (
@@ -54,15 +53,60 @@ type Target struct {
 	Port    int
 }
 
+// managedListener wraps a net.Listener so an intentional Close() can be
+// detected reliably by the accept loop. gVisor's netstack (unlike the
+// stdlib) does not return net.ErrClosed from Accept() after Close() - it
+// returns a generic "endpoint is in invalid state" error - so relying on
+// errors.Is(err, net.ErrClosed) leaves the accept loop spinning forever.
+type managedListener struct {
+	net.Listener
+	closed chan struct{}
+}
+
+func newManagedListener(l net.Listener) *managedListener {
+	return &managedListener{Listener: l, closed: make(chan struct{})}
+}
+
+func (m *managedListener) Close() error {
+	err := m.Listener.Close()
+	select {
+	case <-m.closed:
+	default:
+		close(m.closed)
+	}
+	return err
+}
+
+// managedPacketConn is the net.PacketConn equivalent of managedListener.
+type managedPacketConn struct {
+	net.PacketConn
+	closed chan struct{}
+}
+
+func newManagedPacketConn(c net.PacketConn) *managedPacketConn {
+	return &managedPacketConn{PacketConn: c, closed: make(chan struct{})}
+}
+
+func (m *managedPacketConn) Close() error {
+	err := m.PacketConn.Close()
+	select {
+	case <-m.closed:
+	default:
+		close(m.closed)
+	}
+	return err
+}
+
 // ProxyManager handles the creation and management of proxy connections
 type ProxyManager struct {
-	tnet       *netstack.Net
-	tcpTargets map[string]map[int]string // map[listenIP]map[port]targetAddress
-	udpTargets map[string]map[int]string
-	listeners  []*gonet.TCPListener
-	udpConns   []*gonet.UDPConn
-	running    bool
-	mutex      sync.RWMutex
+	tnet           *netstack.Net
+	tcpTargets     map[string]map[int]string // map[listenIP]map[port]targetAddress
+	udpTargets     map[string]map[int]string
+	listeners      []net.Listener
+	udpConns       []net.PacketConn
+	running        bool
+	mutex          sync.RWMutex
+	nativeListenIP string // when non-empty, use native OS listeners instead of netstack
 
 	// telemetry (multi-tunnel)
 	currentTunnelID string
@@ -149,14 +193,28 @@ func classifyProxyError(err error) string {
 	}
 }
 
-// NewProxyManager creates a new proxy manager instance
+// NewProxyManager creates a new proxy manager instance backed by a netstack.
 func NewProxyManager(tnet *netstack.Net) *ProxyManager {
 	return &ProxyManager{
 		tnet:           tnet,
 		tcpTargets:     make(map[string]map[int]string),
 		udpTargets:     make(map[string]map[int]string),
-		listeners:      make([]*gonet.TCPListener, 0),
-		udpConns:       make([]*gonet.UDPConn, 0),
+		listeners:      make([]net.Listener, 0),
+		udpConns:       make([]net.PacketConn, 0),
+		tunnels:        make(map[string]*tunnelEntry),
+		udpIdleTimeout: defaultUDPIdleTimeout,
+	}
+}
+
+// NewProxyManagerNative creates a proxy manager that binds listeners directly
+// to the host network stack on the given IP address.
+func NewProxyManagerNative(listenIP string) *ProxyManager {
+	return &ProxyManager{
+		nativeListenIP: listenIP,
+		tcpTargets:     make(map[string]map[int]string),
+		udpTargets:     make(map[string]map[int]string),
+		listeners:      make([]net.Listener, 0),
+		udpConns:       make([]net.PacketConn, 0),
 		tunnels:        make(map[string]*tunnelEntry),
 		udpIdleTimeout: defaultUDPIdleTimeout,
 	}
@@ -229,13 +287,14 @@ func (pm *ProxyManager) ClearTunnelID() {
 	pm.currentTunnelID = ""
 }
 
-// init function without tnet
+// NewProxyManagerWithoutTNet creates a proxy manager with no backing network.
+// Call SetTNet before starting.
 func NewProxyManagerWithoutTNet() *ProxyManager {
 	return &ProxyManager{
 		tcpTargets:     make(map[string]map[int]string),
 		udpTargets:     make(map[string]map[int]string),
-		listeners:      make([]*gonet.TCPListener, 0),
-		udpConns:       make([]*gonet.UDPConn, 0),
+		listeners:      make([]net.Listener, 0),
+		udpConns:       make([]net.PacketConn, 0),
 		udpIdleTimeout: defaultUDPIdleTimeout,
 	}
 }
@@ -496,23 +555,46 @@ func (pm *ProxyManager) Stop() error {
 func (pm *ProxyManager) startTarget(proto, listenIP string, port int, targetAddr string) error {
 	switch proto {
 	case "tcp":
-		listener, err := pm.tnet.ListenTCP(&net.TCPAddr{Port: port})
-		if err != nil {
-			return fmt.Errorf("failed to create TCP listener: %v", err)
+		var listener net.Listener
+		if pm.tnet != nil {
+			l, err := pm.tnet.ListenTCP(&net.TCPAddr{Port: port})
+			if err != nil {
+				return fmt.Errorf("failed to create TCP listener: %v", err)
+			}
+			listener = l
+		} else if pm.nativeListenIP != "" {
+			l, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP(pm.nativeListenIP), Port: port})
+			if err != nil {
+				return fmt.Errorf("failed to create native TCP listener on %s:%d: %v", pm.nativeListenIP, port, err)
+			}
+			listener = l
+		} else {
+			return fmt.Errorf("proxy manager has no tnet or native IP configured")
 		}
-
-		pm.listeners = append(pm.listeners, listener)
-		go pm.handleTCPProxy(listener, targetAddr)
+		ml := newManagedListener(listener)
+		pm.listeners = append(pm.listeners, ml)
+		go pm.handleTCPProxy(ml, targetAddr)
 
 	case "udp":
-		addr := &net.UDPAddr{Port: port}
-		conn, err := pm.tnet.ListenUDP(addr)
-		if err != nil {
-			return fmt.Errorf("failed to create UDP listener: %v", err)
+		var conn net.PacketConn
+		if pm.tnet != nil {
+			c, err := pm.tnet.ListenUDP(&net.UDPAddr{Port: port})
+			if err != nil {
+				return fmt.Errorf("failed to create UDP listener: %v", err)
+			}
+			conn = c
+		} else if pm.nativeListenIP != "" {
+			c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(pm.nativeListenIP), Port: port})
+			if err != nil {
+				return fmt.Errorf("failed to create native UDP listener on %s:%d: %v", pm.nativeListenIP, port, err)
+			}
+			conn = c
+		} else {
+			return fmt.Errorf("proxy manager has no tnet or native IP configured")
 		}
-
-		pm.udpConns = append(pm.udpConns, conn)
-		go pm.handleUDPProxy(conn, targetAddr)
+		mc := newManagedPacketConn(conn)
+		pm.udpConns = append(pm.udpConns, mc)
+		go pm.handleUDPProxy(mc, targetAddr)
 
 	default:
 		return fmt.Errorf(errUnsupportedProtoFmt, proto)
@@ -532,11 +614,17 @@ func (pm *ProxyManager) getEntry(id string) *tunnelEntry {
 	return e
 }
 
-func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string) {
+func (pm *ProxyManager) handleTCPProxy(listener *managedListener, targetAddr string) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			telemetry.IncProxyAccept(context.Background(), pm.currentTunnelID, "tcp", "failure", classifyProxyError(err))
+			select {
+			case <-listener.closed:
+				logger.Info("TCP listener closed, stopping proxy handler for %v", listener.Addr())
+				return
+			default:
+			}
 			if !pm.running {
 				return
 			}
@@ -611,7 +699,7 @@ func (pm *ProxyManager) handleTCPProxy(listener net.Listener, targetAddr string)
 	}
 }
 
-func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
+func (pm *ProxyManager) handleUDPProxy(conn *managedPacketConn, targetAddr string) {
 	bufPtr := getUDPBuffer()
 	defer putUDPBuffer(bufPtr)
 	buffer := *bufPtr
@@ -621,33 +709,41 @@ func (pm *ProxyManager) handleUDPProxy(conn *gonet.UDPConn, targetAddr string) {
 	for {
 		n, remoteAddr, err := conn.ReadFrom(buffer)
 		if err != nil {
-			if !pm.running {
-				// Clean up all connections when stopping
+			closeAllClients := func() {
 				clientsMutex.Lock()
 				for _, targetConn := range clientConns {
 					targetConn.Close()
 				}
 				clientConns = nil
 				clientsMutex.Unlock()
+			}
+
+			// Check for intentional closure first: netstack does not
+			// surface net.ErrClosed/io.EOF from ReadFrom() after Close(),
+			// so this channel is the only reliable signal.
+			select {
+			case <-conn.closed:
+				logger.Info("UDP connection closed, stopping proxy handler")
+				closeAllClients()
+				return
+			default:
+			}
+
+			if !pm.running {
+				closeAllClients()
 				return
 			}
 
 			// Check for connection closed conditions
 			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 				logger.Info("UDP connection closed, stopping proxy handler")
-
-				// Clean up existing client connections
-				clientsMutex.Lock()
-				for _, targetConn := range clientConns {
-					targetConn.Close()
-				}
-				clientConns = nil
-				clientsMutex.Unlock()
-
+				closeAllClients()
 				return
 			}
 
 			logger.Error("Error reading UDP packet: %v", err)
+			// Avoid a tight busy-loop if this error persists.
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 

@@ -364,6 +364,15 @@ func (net *Net) RemoveProxySubnetRule(sourcePrefix, destPrefix netip.Prefix) {
 	}
 }
 
+// ReplaceProxySubnetRules atomically replaces the full set of subnet rules
+// on the proxy handler with the given rules.
+func (net *Net) ReplaceProxySubnetRules(rules []SubnetRule) {
+	tun := (*netTun)(net)
+	if tun.proxyHandler != nil {
+		tun.proxyHandler.ReplaceAllSubnetRules(rules)
+	}
+}
+
 // GetProxySubnetRules returns all subnet rules from the proxy handler
 func (net *Net) GetProxySubnetRules() []SubnetRule {
 	tun := (*netTun)(net)

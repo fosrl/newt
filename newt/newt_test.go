@@ -1,4 +1,4 @@
-package main
+package newt
 
 import (
 	"context"
@@ -317,7 +317,6 @@ func TestParseTargetString(t *testing.T) {
 	}
 }
 
-// TestParseTargetStringNetDialCompatibility verifies that the output is compatible with net.Dial.
 func TestParseTargetStringNetDialCompatibility(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -345,18 +344,7 @@ func TestParseTargetStringNetDialCompatibility(t *testing.T) {
 
 // TestShouldFireRecovery is the regression guard for the broken trigger gate
 // that prevented data-plane recovery from ever firing under default settings
-// (fosrl/newt#284, #310, pangolin#1004). The pre-fix condition was
-//
-//	consecutiveFailures >= failureThreshold && currentInterval < maxInterval
-//
-// which became permanently false once pingInterval's default was bumped from
-// 3s to 15s in commit 8161fa6 — currentInterval starts at pingInterval=15s,
-// maxInterval stayed at 6s, so 15<6 is false and the recovery branch never
-// executed.
-//
-// The fix is to drop currentInterval from the trigger condition entirely;
-// backoff is a separate concern computed in the caller. The cases below
-// exercise the documented contract.
+// (fosrl/newt#284, #310, pangolin#1004).
 func TestShouldFireRecovery(t *testing.T) {
 	const threshold = 4
 	cases := []struct {
