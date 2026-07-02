@@ -261,42 +261,91 @@ persistent_keepalive_interval=5`, util.FixKey(n.privateKey.String()), util.FixKe
 	}
 
 	if len(n.wgData.BrowserGatewayTargets) > 0 {
+		// The netstack is fresh on (re)connect, so any previously running
+		// gateway listener is bound to a now-defunct interface - tear it down.
 		if n.browserGatewayStop != nil {
 			n.browserGatewayStop()
 			n.browserGatewayStop = nil
+			n.browserGateway = nil
 		}
 
-		bgTargets := make([]browsergateway.Target, 0, len(n.wgData.BrowserGatewayTargets))
-		for _, t := range n.wgData.BrowserGatewayTargets {
-			bgTargets = append(bgTargets, browsergateway.Target{
-				ID:              t.ID,
-				Type:            t.Type,
-				Destination:     t.Destination,
-				DestinationPort: t.DestinationPort,
-				AuthToken:       t.AuthToken,
-			})
-		}
-
-		n.browserGateway = browsergateway.New(browsergateway.Config{SSHCredentials: n.sshCredStore})
-		n.browserGateway.SetTargets(bgTargets)
-
-		var ln net.Listener
-		var bgErr error
-		if n.config.UseNativeMainInterface {
-			ln, bgErr = net.Listen("tcp", fmt.Sprintf("%s:%d", n.wgData.TunnelIP, browsergateway.ListenPort))
+		if err := n.startBrowserGateway(); err != nil {
+			logger.Error("Failed to start browser gateway listener: %v", err)
 		} else {
-			ln, bgErr = n.tnet.ListenTCP(&net.TCPAddr{Port: browsergateway.ListenPort})
-		}
-		if bgErr != nil {
-			logger.Error("Failed to start browser gateway listener: %v", bgErr)
-		} else {
-			n.browserGatewayStop = func() { _ = ln.Close() }
-			go func() {
-				logger.Debug("Browser gateway started on port %d", browsergateway.ListenPort)
-				if startErr := n.browserGateway.Start(ln); startErr != nil {
-					logger.Error("Browser gateway stopped with error: %v", startErr)
-				}
-			}()
+			n.browserGateway.SetTargets(toBrowserGatewayTargets(n.wgData.BrowserGatewayTargets))
 		}
 	}
+}
+
+// startBrowserGateway creates the browser gateway and its listener if one
+// isn't already running. Callers that need to rebind to a fresh netstack
+// (e.g. on reconnect) must stop and clear any existing gateway first.
+func (n *Newt) startBrowserGateway() error {
+	if n.browserGateway != nil {
+		return nil
+	}
+	if n.tnet == nil && !n.config.UseNativeMainInterface {
+		return fmt.Errorf("netstack not ready")
+	}
+
+	gateway := browsergateway.New(browsergateway.Config{SSHCredentials: n.sshCredStore})
+
+	var ln net.Listener
+	var err error
+	if n.config.UseNativeMainInterface {
+		ln, err = net.Listen("tcp", fmt.Sprintf("%s:%d", n.wgData.TunnelIP, browsergateway.ListenPort))
+	} else {
+		ln, err = n.tnet.ListenTCP(&net.TCPAddr{Port: browsergateway.ListenPort})
+	}
+	if err != nil {
+		return err
+	}
+
+	n.browserGateway = gateway
+	n.browserGatewayStop = func() { _ = ln.Close() }
+	go func() {
+		logger.Debug("Browser gateway started on port %d", browsergateway.ListenPort)
+		if startErr := gateway.Start(ln); startErr != nil {
+			logger.Error("Browser gateway stopped with error: %v", startErr)
+		}
+	}()
+
+	return nil
+}
+
+// syncBrowserGatewayTargets reconciles the browser gateway's allowed
+// destinations with the desired state received from a sync message.
+// It lazily starts the gateway if targets are present and it isn't running
+// yet, and clears the allow-list (without tearing down the listener) when
+// no targets are desired.
+func (n *Newt) syncBrowserGatewayTargets(targets []BrowserGatewayTarget) {
+	bgTargets := toBrowserGatewayTargets(targets)
+
+	if len(bgTargets) == 0 {
+		if n.browserGateway != nil {
+			n.browserGateway.SetTargets(nil)
+		}
+		return
+	}
+
+	if err := n.startBrowserGateway(); err != nil {
+		logger.Error("Failed to start browser gateway: %v", err)
+		return
+	}
+
+	n.browserGateway.SetTargets(bgTargets)
+}
+
+func toBrowserGatewayTargets(targets []BrowserGatewayTarget) []browsergateway.Target {
+	bgTargets := make([]browsergateway.Target, 0, len(targets))
+	for _, t := range targets {
+		bgTargets = append(bgTargets, browsergateway.Target{
+			ID:              t.ID,
+			Type:            t.Type,
+			Destination:     t.Destination,
+			DestinationPort: t.DestinationPort,
+			AuthToken:       t.AuthToken,
+		})
+	}
+	return bgTargets
 }

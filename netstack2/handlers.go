@@ -166,6 +166,13 @@ func (h *TCPHandler) handleTCPConn(netstackConn *gonet.TCPConn, id stack.Transpo
 
 	defer netstackConn.Close()
 
+	// Release this connection's NAT state once it fully closes, so a rule
+	// change (e.g. RewriteTo) takes effect for the next connection on this
+	// tuple instead of being masked by a stale cached resolution forever.
+	if h.proxyHandler != nil {
+		defer h.proxyHandler.releaseConnectionState(srcIP, srcPort, dstIP, dstPort, uint8(tcp.ProtocolNumber))
+	}
+
 	logger.Info("TCP Forwarder: Handling connection %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
 
 	// Check if there's a destination rewrite for this connection (e.g., localhost targets)
@@ -314,6 +321,13 @@ func (h *UDPHandler) handleUDPConn(netstackConn *gonet.UDPConn, id stack.Transpo
 	srcPort := id.RemotePort
 	dstIP := id.LocalAddress.String()
 	dstPort := id.LocalPort
+
+	// Release this session's NAT state once it fully closes (session end or
+	// idle timeout), so a rule change takes effect for the next session on
+	// this tuple instead of being masked by a stale cached resolution.
+	if h.proxyHandler != nil {
+		defer h.proxyHandler.releaseConnectionState(srcIP, srcPort, dstIP, dstPort, uint8(udp.ProtocolNumber))
+	}
 
 	logger.Info("UDP Forwarder: Handling connection %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
 

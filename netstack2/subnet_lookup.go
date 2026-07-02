@@ -52,6 +52,13 @@ func (sl *SubnetLookup) AddSubnet(rule SubnetRule) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
+	sl.addSubnetLocked(rule)
+}
+
+// addSubnetLocked is the lock-free body of AddSubnet, factored out so
+// ReplaceAll can insert many rules under a single lock acquisition.
+// Callers must hold sl.mu for writing.
+func (sl *SubnetLookup) addSubnetLocked(rule SubnetRule) {
 	rulePtr := &rule
 
 	// Canonicalize source prefix to handle host bits correctly
@@ -87,6 +94,21 @@ func (sl *SubnetLookup) AddSubnet(rule SubnetRule) {
 	}
 	newRules = append(newRules, rulePtr)
 	destTriePtr.rules = newRules
+}
+
+// ReplaceAll atomically replaces the entire rule set with the given rules.
+// This guarantees no stale rule can survive a sync, even when a rule's key
+// (SourcePrefix, DestPrefix) is unchanged but other fields (e.g. RewriteTo)
+// differ - a case that an add/remove diff keyed only on prefixes would miss.
+func (sl *SubnetLookup) ReplaceAll(rules []SubnetRule) {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+
+	sl.sourceTrie = &bart.Table[*destTrie]{}
+
+	for _, rule := range rules {
+		sl.addSubnetLocked(rule)
+	}
 }
 
 // RemoveSubnet removes a subnet rule from the lookup table

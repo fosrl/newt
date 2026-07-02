@@ -276,6 +276,8 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		logger.Debug("Sent exit node ping results to cloud for selection: pingResults=%+v", pingResults)
 	})
 
+	n.client.RegisterHandler("newt/sync", n.handleSync)
+
 	n.client.RegisterHandler("newt/tcp/add", func(msg websocket.WSMessage) {
 		logger.Debug(fmtReceivedMsg, msg)
 
@@ -457,8 +459,6 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 		logger.Info("Removed %d remote exit node subnets", len(data.Subnets))
 	})
-
-	n.client.RegisterHandler("newt/sync", n.handleSync)
 
 	n.client.RegisterHandler("newt/socket/check", func(msg websocket.WSMessage) {
 		logger.Debug("Received Docker socket check request")

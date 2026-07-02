@@ -272,6 +272,18 @@ func (p *ProxyHandler) RemoveSubnetRule(sourcePrefix, destPrefix netip.Prefix) {
 	p.subnetLookup.RemoveSubnet(sourcePrefix, destPrefix)
 }
 
+// ReplaceAllSubnetRules atomically replaces the full set of subnet rules.
+// Intended for full-state syncs where the desired rule set is authoritative,
+// so any stale rule is guaranteed to be cleared even if its key
+// (SourcePrefix, DestPrefix) matches a still-desired rule but its contents
+// (e.g. RewriteTo) have changed.
+func (p *ProxyHandler) ReplaceAllSubnetRules(rules []SubnetRule) {
+	if p == nil || !p.enabled {
+		return
+	}
+	p.subnetLookup.ReplaceAll(rules)
+}
+
 // GetAllRules returns all subnet rules from the proxy handler
 func (p *ProxyHandler) GetAllRules() []SubnetRule {
 	if p == nil || !p.enabled {
@@ -333,6 +345,51 @@ func (p *ProxyHandler) SetHTTPRequestLogSender(fn SendFunc) {
 		return
 	}
 	p.httpRequestLogger.SetSendFunc(fn)
+}
+
+// releaseConnectionState removes the per-connection NAT state for a single
+// (srcIP, srcPort, dstIP, dstPort, proto) tuple. Callers must only invoke
+// this once that exact connection has fully closed (both directions torn
+// down), since a new connection can never be accepted on the same 5-tuple
+// before then.
+//
+// This intentionally does NOT touch destRewriteTable/resourceTable: those
+// are keyed without srcPort (destKey), so they are shared across every
+// concurrent connection from the same source to the same destination
+// service. They don't need connection-scoped cleanup - each new connection's
+// first packet already refreshes them via HandleIncomingPacket - and
+// deleting them here on a single connection's close could break other
+// connections still in flight to the same destination.
+func (p *ProxyHandler) releaseConnectionState(srcIP string, srcPort uint16, dstIP string, dstPort uint16, proto uint8) {
+	if p == nil || !p.enabled {
+		return
+	}
+
+	key := connKey{
+		srcIP:   srcIP,
+		srcPort: srcPort,
+		dstIP:   dstIP,
+		dstPort: dstPort,
+		proto:   proto,
+	}
+
+	p.natMu.Lock()
+	defer p.natMu.Unlock()
+
+	entry, ok := p.natTable[key]
+	if !ok {
+		return
+	}
+	delete(p.natTable, key)
+
+	reverseKey := reverseConnKey{
+		rewrittenTo:     entry.rewrittenTo.String(),
+		originalSrcIP:   srcIP,
+		originalSrcPort: srcPort,
+		originalDstPort: dstPort,
+		proto:           proto,
+	}
+	delete(p.reverseNatTable, reverseKey)
 }
 
 // LookupDestinationRewrite looks up the rewritten destination for a connection

@@ -142,6 +142,14 @@ func (n *Newt) handleSync(msg websocket.WSMessage) {
 		n.updateRemoteExitNodeSubnets(syncData.RemoteExitNodeSubnets)
 	}
 
+	// Sync clients WireGuard peers and targets, if clients are set up
+	if n.wgService != nil {
+		n.wgService.Sync(syncData.Peers, syncData.ClientTargets)
+	}
+
+	// Sync browser gateway targets
+	n.syncBrowserGatewayTargets(syncData.BrowserGatewayTargets)
+
 	// Sync health check targets
 	if err := n.healthMonitor.SyncTargets(syncData.HealthCheckTargets); err != nil {
 		logger.Error("Failed to sync health check targets: %v", err)

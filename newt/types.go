@@ -1,6 +1,9 @@
 package newt
 
-import "github.com/fosrl/newt/healthcheck"
+import (
+	wgclients "github.com/fosrl/newt/clients"
+	"github.com/fosrl/newt/healthcheck"
+)
 
 type BrowserGatewayTarget struct {
 	ID              int    `json:"id"`
@@ -62,7 +65,10 @@ type BlueprintResult struct {
 
 // Define the sync data structure
 type SyncData struct {
-	Targets               TargetsByType        `json:"targets"`
-	HealthCheckTargets    []healthcheck.Config `json:"healthCheckTargets"`
-	RemoteExitNodeSubnets []string             `json:"remoteExitNodeSubnets"`
+	Targets               TargetsByType          `json:"proxyTargets"`
+	HealthCheckTargets    []healthcheck.Config   `json:"healthCheckTargets"`
+	RemoteExitNodeSubnets []string               `json:"remoteExitNodeSubnets"`
+	Peers                 []wgclients.Peer       `json:"peers"`
+	ClientTargets         []wgclients.Target     `json:"clientTargets"`
+	BrowserGatewayTargets []BrowserGatewayTarget `json:"browserGatewayTargets"`
 }
