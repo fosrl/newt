@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
-	github.com/fsnotify/fsnotify v1.9.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gaissmai/bart v0.28.0
 	github.com/go-crypt/crypt v0.14.15
 	github.com/go-crypt/x v0.4.16
