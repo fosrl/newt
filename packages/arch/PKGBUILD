@@ -1,0 +1,30 @@
+# Maintainer: Fossorial <hello@fossorial.io>
+pkgname=newt
+pkgver=1.13.0
+pkgrel=1
+pkgdesc="Fully user space WireGuard tunnel client and TCP/UDP proxy for Pangolin"
+arch=('x86_64' 'aarch64' 'armv7h' 'armv6h' 'riscv64')
+url="https://github.com/fosrl/newt"
+license=('AGPL3')
+makedepends=('go')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/fosrl/newt/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+	cd "$pkgname-$pkgver"
+	export CGO_ENABLED=0
+	export GOFLAGS="-trimpath -mod=readonly -modcacherw"
+	go build -ldflags "-X main.newtVersion=$pkgver -X main.newtPlatform=linux_$(go env GOARCH)" -o "$pkgname" .
+}
+
+check() {
+	cd "$pkgname-$pkgver"
+	go test ./... || true
+}
+
+package() {
+	cd "$pkgname-$pkgver"
+	install -Dm755 "$pkgname" "$pkgdir/usr/bin/$pkgname"
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+	install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
