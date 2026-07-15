@@ -1,6 +1,7 @@
 package network
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os/exec"
@@ -59,69 +60,112 @@ func LinuxAddRoute(destination string, gateway string, interfaceName string) err
 		return nil
 	}
 
-	// Parse destination CIDR
+	metric := linuxDefaultTunnelRouteMetric
+	if gateway == "" && interfaceName != "" {
+		if m, overlap, err := linuxTunnelRouteMetric(destination, interfaceName); err != nil {
+			logger.Warn("Failed to check local subnet overlap for %s: %v; using high metric", destination, err)
+			metric = linuxOverlapTunnelRouteMetric
+		} else {
+			metric = m
+			if overlap {
+				logger.Warn("Remote subnet %s overlaps a local LAN subnet; adding tunnel route with metric %d", destination, metric)
+			}
+		}
+	}
+
 	_, ipNet, err := net.ParseCIDR(destination)
 	if err != nil {
 		return fmt.Errorf("invalid destination address: %v", err)
 	}
 
-	// Create route
-	route := &netlink.Route{
-		Dst: ipNet,
-	}
+	route := &netlink.Route{Dst: ipNet, Priority: metric}
 
 	if gateway != "" {
-		// Route with specific gateway
 		gw := net.ParseIP(gateway)
 		if gw == nil {
 			return fmt.Errorf("invalid gateway address: %s", gateway)
 		}
 		route.Gw = gw
-		logger.Info("Adding route to %s via gateway %s", destination, gateway)
+		logger.Info("Adding route to %s via gateway %s (metric %d)", destination, gateway, metric)
 	} else if interfaceName != "" {
-		// Route via interface
 		link, err := netlink.LinkByName(interfaceName)
 		if err != nil {
 			return fmt.Errorf("failed to get interface %s: %v", interfaceName, err)
 		}
 		route.LinkIndex = link.Attrs().Index
-		logger.Info("Adding route to %s via interface %s", destination, interfaceName)
+		logger.Info("Adding route to %s via interface %s (metric %d)", destination, interfaceName, metric)
 	} else {
 		return fmt.Errorf("either gateway or interface must be specified")
 	}
 
-	// Add the route
 	if err := netlink.RouteAdd(route); err != nil {
 		return fmt.Errorf("failed to add route: %v", err)
 	}
-
 	return nil
 }
 
-func LinuxRemoveRoute(destination string) error {
+func LinuxRemoveRoute(destination string, interfaceName ...string) error {
 	if runtime.GOOS != "linux" {
 		return nil
 	}
 
-	// Parse destination CIDR
 	_, ipNet, err := net.ParseCIDR(destination)
 	if err != nil {
 		return fmt.Errorf("invalid destination address: %v", err)
 	}
 
-	// Create route to delete
-	route := &netlink.Route{
-		Dst: ipNet,
+	routes, err := netlink.RouteList(nil, linuxRouteFamily(ipNet))
+	if err != nil {
+		return fmt.Errorf("failed to list routes: %w", err)
+	}
+
+	targetLinkIndex := 0
+	if len(interfaceName) > 0 && interfaceName[0] != "" {
+		link, err := netlink.LinkByName(interfaceName[0])
+		if err != nil {
+			return fmt.Errorf("failed to get interface %s: %w", interfaceName[0], err)
+		}
+		targetLinkIndex = link.Attrs().Index
 	}
 
 	logger.Info("Removing route to %s", destination)
-
-	// Delete the route
-	if err := netlink.RouteDel(route); err != nil {
-		return fmt.Errorf("failed to delete route: %v", err)
+	var matches []netlink.Route
+	linkIndexes := make(map[int]struct{})
+	for _, route := range routes {
+		if route.Dst == nil || route.Dst.String() != ipNet.String() {
+			continue
+		}
+		if route.Priority != linuxDefaultTunnelRouteMetric && route.Priority != linuxOverlapTunnelRouteMetric {
+			continue
+		}
+		if targetLinkIndex != 0 && route.LinkIndex != targetLinkIndex {
+			continue
+		}
+		matches = append(matches, route)
+		linkIndexes[route.LinkIndex] = struct{}{}
+	}
+	if targetLinkIndex == 0 && len(linkIndexes) > 1 {
+		return fmt.Errorf("multiple tunnel routes to %s found; interface name is required", destination)
 	}
 
-	return nil
+	var delErr error
+	removed := 0
+	for _, route := range matches {
+		del := &netlink.Route{
+			Dst:       route.Dst,
+			LinkIndex: route.LinkIndex,
+			Priority:  route.Priority,
+		}
+		if err := netlink.RouteDel(del); err != nil {
+			delErr = errors.Join(delErr, fmt.Errorf("failed to delete route: %w", err))
+			continue
+		}
+		removed++
+	}
+	if removed == 0 && delErr == nil {
+		return fmt.Errorf("tunnel route to %s not found", destination)
+	}
+	return delErr
 }
 
 // addRouteForServerIP adds an OS-specific route for the server IP
@@ -243,7 +287,7 @@ func AddRoutes(remoteSubnets []string, interfaceName string) error {
 }
 
 // removeRoutesForRemoteSubnets removes routes for each subnet in RemoteSubnets
-func RemoveRoutes(remoteSubnets []string) error {
+func RemoveRoutes(remoteSubnets []string, interfaceName ...string) error {
 	if len(remoteSubnets) == 0 {
 		return nil
 	}
@@ -271,7 +315,7 @@ func RemoveRoutes(remoteSubnets []string) error {
 				logger.Error("Failed to remove Windows route for subnet %s: %v", subnet, err)
 			}
 		case "linux":
-			if err := LinuxRemoveRoute(subnet); err != nil {
+			if err := LinuxRemoveRoute(subnet, interfaceName...); err != nil {
 				logger.Error("Failed to remove Linux route for subnet %s: %v", subnet, err)
 			}
 		case "android", "ios":
