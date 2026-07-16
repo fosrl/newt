@@ -4,6 +4,7 @@ import (
 	"net"
 	"regexp"
 	"sort"
+	"strconv"
 
 	"github.com/fosrl/newt/logger"
 )
@@ -86,9 +87,9 @@ func interfaceScore(name string) int {
 	return scoreUnknown
 }
 
-// GetLocalEndpoints returns IP address strings for every usable,
-// non-loopback IP address bound to a network interface on this host. The
-// list is ordered with interfaces most
+// GetLocalEndpoints returns "ip:port" strings (bracketed for IPv6, e.g.
+// "[fe80::1]:51820") for every usable, non-loopback IP address bound to a
+// network interface on this host. The list is ordered with interfaces most
 // likely to be a genuine host network (wired/Wi-Fi) first, and interfaces
 // that are typically synthetic (Docker, VPN tunnels, hypervisor bridges,
 // etc.) last, so callers should try the results roughly in order.
@@ -99,7 +100,7 @@ func interfaceScore(name string) int {
 //
 // If interfaces cannot be enumerated (e.g. insufficient OS permissions),
 // an info message is logged and an empty slice is returned.
-func GetLocalEndpoints(excludeInterface string) []string {
+func GetLocalEndpoints(port uint16, excludeInterface string) []string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		logger.Info("Unable to enumerate local network interfaces, localEndpoints will not be reported: %v", err)
@@ -154,9 +155,10 @@ func GetLocalEndpoints(excludeInterface string) []string {
 		return candidates[i].score < candidates[j].score
 	})
 
+	portStr := strconv.Itoa(int(port))
 	endpoints := make([]string, 0, len(candidates))
 	for _, c := range candidates {
-		endpoints = append(endpoints, c.ip)
+		endpoints = append(endpoints, net.JoinHostPort(c.ip, portStr))
 	}
 	return endpoints
 }

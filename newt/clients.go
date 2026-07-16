@@ -6,7 +6,6 @@ import (
 	wgnetstack "github.com/fosrl/newt/clients"
 	"github.com/fosrl/newt/clients/permissions"
 	"github.com/fosrl/newt/logger"
-	"github.com/fosrl/newt/network"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
@@ -101,13 +100,6 @@ func (n *Newt) clientsOnConnect() {
 	if n.wgService != nil {
 		n.wgService.LoadRemoteConfig()
 	}
-}
-
-// localEndpoints returns candidate IP addresses on this host that could
-// potentially be used to reach our WireGuard listen port, ranked with the
-// most likely genuine host interfaces first.
-func (n *Newt) localEndpoints() []string {
-	return network.GetLocalEndpoints(n.config.InterfaceName)
 }
 
 func (n *Newt) clientsStartDirectRelay(tunnelIP string) {

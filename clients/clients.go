@@ -504,9 +504,10 @@ func (s *WireGuardService) LoadRemoteConfig() error {
 	chainId := generateChainId()
 	s.pendingConfigChainId = chainId
 	s.stopGetConfig = s.client.SendMessageInterval("newt/wg/get-config", map[string]interface{}{
-		"publicKey": s.key.PublicKey().String(),
-		"port":      s.Port,
-		"chainId":   chainId,
+		"publicKey":      s.key.PublicKey().String(),
+		"port":           s.Port,
+		"chainId":        chainId,
+		"localEndpoints": network.GetLocalEndpoints(s.Port, s.interfaceName),
 	}, 2*time.Second)
 
 	logger.Debug("Requesting WireGuard configuration from remote server")

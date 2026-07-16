@@ -167,11 +167,10 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 			chainId := generateChainId()
 			n.pendingRegisterChainId = chainId
 			n.stopFunc = n.client.SendMessageInterval(topicWGRegister, map[string]interface{}{
-				"publicKey":      n.publicKey.String(),
-				"pingResults":    pingResults,
-				"newtVersion":    n.config.Version,
-				"chainId":        chainId,
-				"localEndpoints": n.localEndpoints(),
+				"publicKey":   n.publicKey.String(),
+				"pingResults": pingResults,
+				"newtVersion": n.config.Version,
+				"chainId":     chainId,
 			}, 2*time.Second)
 
 			return
@@ -268,11 +267,10 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		chainId := generateChainId()
 		n.pendingRegisterChainId = chainId
 		n.stopFunc = n.client.SendMessageInterval(topicWGRegister, map[string]interface{}{
-			"publicKey":      n.publicKey.String(),
-			"pingResults":    pingResults,
-			"newtVersion":    n.config.Version,
-			"chainId":        chainId,
-			"localEndpoints": n.localEndpoints(),
+			"publicKey":   n.publicKey.String(),
+			"pingResults": pingResults,
+			"newtVersion": n.config.Version,
+			"chainId":     chainId,
 		}, 2*time.Second)
 
 		logger.Debug("Sent exit node ping results to cloud for selection: pingResults=%+v", pingResults)
@@ -1018,7 +1016,6 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 			"newtVersion":         n.config.Version,
 			"backwardsCompatible": true,
 			"chainId":             bcChainId,
-			"localEndpoints":      n.localEndpoints(),
 		}); err != nil {
 			logger.Error("Failed to send registration message: %v", err)
 			return err
