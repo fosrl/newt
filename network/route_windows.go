@@ -84,8 +84,11 @@ func WindowsAddRoute(destination string, gateway string, interfaceName string) e
 		return fmt.Errorf("either gateway or interface must be specified")
 	}
 
-	// Add the route using winipcfg
-	err = luid.AddRoute(prefix, nextHop, 1)
+	// Add the route using winipcfg. Metric is set explicitly (rather than a
+	// low value like 1, which would nearly always outrank local routes) so
+	// that an overlapping local/connected route is preferred over this VPN
+	// route - see VPNRouteMetric.
+	err = luid.AddRoute(prefix, nextHop, VPNRouteMetric)
 	if err != nil {
 		return fmt.Errorf("failed to add route: %v", err)
 	}

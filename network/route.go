@@ -11,6 +11,24 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+// VPNRouteMetric is the route metric/priority assigned to routes we add for
+// the tunnel, so that an overlapping local/connected route is always
+// preferred over the VPN route to the same destination rather than the two
+// silently racing based on insertion order. It needs to be higher than any
+// metric a local route is realistically going to have: on Linux, automatic
+// metrics assigned by NetworkManager (which also apply to the connected
+// subnet route, not just the default route) go up to 600 for Wi-Fi; on
+// Windows, automatic interface metrics plus route metric rarely exceed a few
+// hundred. 9999 comfortably clears both without needing to query the local
+// routing table at add-time.
+const VPNRouteMetric = 9999
+
+// DarwinAddRoute adds a route via the BSD routing table. Unlike Linux/Windows,
+// BSD's routing table has no per-route metric - preference between an
+// overlapping local route and this VPN route is instead resolved by
+// longest-prefix-match, and `route add` (as opposed to `route change`) fails
+// rather than replacing an existing route to the same destination, so a local
+// route is never displaced by one we add here.
 func DarwinAddRoute(destination string, gateway string, interfaceName string) error {
 	if runtime.GOOS != "darwin" {
 		return nil
@@ -65,9 +83,12 @@ func LinuxAddRoute(destination string, gateway string, interfaceName string) err
 		return fmt.Errorf("invalid destination address: %v", err)
 	}
 
-	// Create route
+	// Create route. Priority is set explicitly (rather than left at the
+	// default of 0) so that this route never outranks a local/connected
+	// route to the same destination - see VPNRouteMetric.
 	route := &netlink.Route{
-		Dst: ipNet,
+		Dst:      ipNet,
+		Priority: VPNRouteMetric,
 	}
 
 	if gateway != "" {
