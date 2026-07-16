@@ -103,11 +103,11 @@ func (n *Newt) clientsOnConnect() {
 	}
 }
 
-// localEndpoints returns "ip:port" candidates on this host that could
+// localEndpoints returns candidate IP addresses on this host that could
 // potentially be used to reach our WireGuard listen port, ranked with the
 // most likely genuine host interfaces first.
 func (n *Newt) localEndpoints() []string {
-	return network.GetLocalEndpoints(n.config.Port, n.config.InterfaceName)
+	return network.GetLocalEndpoints(n.config.InterfaceName)
 }
 
 func (n *Newt) clientsStartDirectRelay(tunnelIP string) {
