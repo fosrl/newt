@@ -119,7 +119,7 @@ func LinuxAddRoute(destination string, gateway string, interfaceName string) err
 	return nil
 }
 
-func LinuxRemoveRoute(destination string) error {
+func LinuxRemoveRoute(destination string, interfaceName string) error {
 	if runtime.GOOS != "linux" {
 		return nil
 	}
@@ -130,12 +130,24 @@ func LinuxRemoveRoute(destination string) error {
 		return fmt.Errorf("invalid destination address: %v", err)
 	}
 
-	// Create route to delete
+	// Create route to delete. LinkIndex and Priority are set to match the
+	// route we added exactly, so this only ever deletes the route we own -
+	// a local/native route to the same destination on a different
+	// interface (or with a different metric) must never be touched.
 	route := &netlink.Route{
-		Dst: ipNet,
+		Dst:      ipNet,
+		Priority: VPNRouteMetric,
 	}
 
-	logger.Info("Removing route to %s", destination)
+	if interfaceName != "" {
+		link, err := netlink.LinkByName(interfaceName)
+		if err != nil {
+			return fmt.Errorf("failed to get interface %s: %v", interfaceName, err)
+		}
+		route.LinkIndex = link.Attrs().Index
+	}
+
+	logger.Info("Removing route to %s via interface %s", destination, interfaceName)
 
 	// Delete the route
 	if err := netlink.RouteDel(route); err != nil {
@@ -178,9 +190,9 @@ func RemoveRouteForServerIP(serverIP string, interfaceName string) error {
 		return DarwinRemoveRoute(serverIP)
 	}
 	// else if runtime.GOOS == "windows" {
-	// 	return WindowsRemoveRoute(serverIP)
+	// 	return WindowsRemoveRoute(serverIP, interfaceName)
 	// } else if runtime.GOOS == "linux" {
-	// 	return LinuxRemoveRoute(serverIP)
+	// 	return LinuxRemoveRoute(serverIP, interfaceName)
 	// }
 	return nil
 }
@@ -263,8 +275,11 @@ func AddRoutes(remoteSubnets []string, interfaceName string) error {
 	return nil
 }
 
-// removeRoutesForRemoteSubnets removes routes for each subnet in RemoteSubnets
-func RemoveRoutes(remoteSubnets []string) error {
+// removeRoutesForRemoteSubnets removes routes for each subnet in RemoteSubnets.
+// interfaceName must match the interface the routes were added on (see
+// AddRoutes) so that only the routes we own are deleted, never an unrelated
+// local/native route to the same destination on another interface.
+func RemoveRoutes(remoteSubnets []string, interfaceName string) error {
 	if len(remoteSubnets) == 0 {
 		return nil
 	}
@@ -288,11 +303,11 @@ func RemoveRoutes(remoteSubnets []string) error {
 				logger.Error("Failed to remove Darwin route for subnet %s: %v", subnet, err)
 			}
 		case "windows":
-			if err := WindowsRemoveRoute(subnet); err != nil {
+			if err := WindowsRemoveRoute(subnet, interfaceName); err != nil {
 				logger.Error("Failed to remove Windows route for subnet %s: %v", subnet, err)
 			}
 		case "linux":
-			if err := LinuxRemoveRoute(subnet); err != nil {
+			if err := LinuxRemoveRoute(subnet, interfaceName); err != nil {
 				logger.Error("Failed to remove Linux route for subnet %s: %v", subnet, err)
 			}
 		case "android", "ios":

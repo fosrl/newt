@@ -96,7 +96,7 @@ func WindowsAddRoute(destination string, gateway string, interfaceName string) e
 	return nil
 }
 
-func WindowsRemoveRoute(destination string) error {
+func WindowsRemoveRoute(destination string, interfaceName string) error {
 	// Parse destination CIDR
 	_, ipNet, err := net.ParseCIDR(destination)
 	if err != nil {
@@ -120,8 +120,25 @@ func WindowsRemoveRoute(destination string) error {
 	}
 	prefix := netip.PrefixFrom(addr, maskBits)
 
+	// Resolve the LUID of the interface we added the route on, so we only
+	// ever delete the route we own rather than any route matching the
+	// destination - a local/native route to the same destination on a
+	// different interface must never be touched.
+	var luid winipcfg.LUID
+	var haveLuid bool
+	if interfaceName != "" {
+		iface, err := net.InterfaceByName(interfaceName)
+		if err != nil {
+			return fmt.Errorf("failed to get interface %s: %v", interfaceName, err)
+		}
+		luid, err = winipcfg.LUIDFromIndex(uint32(iface.Index))
+		if err != nil {
+			return fmt.Errorf("failed to get LUID for interface %s: %v", interfaceName, err)
+		}
+		haveLuid = true
+	}
+
 	// Get all routes and find the one to delete
-	// We need to get the LUID from the existing route
 	var family winipcfg.AddressFamily
 	if addr.Is4() {
 		family = 2 // AF_INET
@@ -134,17 +151,23 @@ func WindowsRemoveRoute(destination string) error {
 		return fmt.Errorf("failed to get route table: %v", err)
 	}
 
-	// Find and delete matching route
+	// Find and delete matching route. When we know which interface we added
+	// the route on, only delete the entry on that interface with our
+	// VPNRouteMetric so we never remove an unrelated local/native route to
+	// the same destination.
 	for _, route := range routes {
 		routePrefix := route.DestinationPrefix.Prefix()
-		if routePrefix == prefix {
-			logger.Info("Removing route to %s", destination)
-			err = route.Delete()
-			if err != nil {
-				return fmt.Errorf("failed to delete route: %v", err)
-			}
-			return nil
+		if routePrefix != prefix {
+			continue
 		}
+		if haveLuid && (route.InterfaceLUID != luid || route.Metric != VPNRouteMetric) {
+			continue
+		}
+		logger.Info("Removing route to %s on interface %s", destination, interfaceName)
+		if err := route.Delete(); err != nil {
+			return fmt.Errorf("failed to delete route: %v", err)
+		}
+		return nil
 	}
 
 	return fmt.Errorf("route to %s not found", destination)

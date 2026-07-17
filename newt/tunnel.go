@@ -24,7 +24,7 @@ func (n *Newt) updateRemoteExitNodeSubnets(subnets []string) {
 			}
 		}
 		if len(toRemove) > 0 {
-			if err := network.RemoveRoutes(toRemove); err != nil {
+			if err := network.RemoveRoutes(toRemove, n.config.NativeMainInterfaceName); err != nil {
 				logger.Warn("Failed to remove old subnet routes: %v", err)
 			}
 		}
@@ -88,7 +88,7 @@ func (n *Newt) closeWgTunnel() {
 		}
 		toRemove = append(toRemove, n.activeRemoteSubnets...)
 		if len(toRemove) > 0 {
-			if err := network.RemoveRoutes(toRemove); err != nil {
+			if err := network.RemoveRoutes(toRemove, n.config.NativeMainInterfaceName); err != nil {
 				logger.Warn("Failed to remove native main tunnel routes: %v", err)
 			}
 		}
