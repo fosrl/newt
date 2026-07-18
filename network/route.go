@@ -23,6 +23,15 @@ import (
 // routing table at add-time.
 const VPNRouteMetric = 9999
 
+// PreferLocalRoutes controls whether routes added by AddRoutes are given the
+// explicit high VPNRouteMetric priority, so that an overlapping local/
+// connected route always takes precedence over the VPN route to the same
+// destination. Defaults to false (routes are added with the OS default
+// metric/priority, matching behavior prior to the introduction of
+// VPNRouteMetric); callers that want local routes to win opt in by setting
+// this to true (e.g. from a config value) before routes are added.
+var PreferLocalRoutes = false
+
 // DarwinAddRoute adds a route via the BSD routing table. Unlike Linux/Windows,
 // BSD's routing table has no per-route metric - preference between an
 // overlapping local route and this VPN route is instead resolved by
@@ -83,12 +92,15 @@ func LinuxAddRoute(destination string, gateway string, interfaceName string) err
 		return fmt.Errorf("invalid destination address: %v", err)
 	}
 
-	// Create route. Priority is set explicitly (rather than left at the
-	// default of 0) so that this route never outranks a local/connected
-	// route to the same destination - see VPNRouteMetric.
+	// Create route. When PreferLocalRoutes is enabled, Priority is set
+	// explicitly (rather than left at the default of 0) so that this route
+	// never outranks a local/connected route to the same destination - see
+	// VPNRouteMetric.
 	route := &netlink.Route{
-		Dst:      ipNet,
-		Priority: VPNRouteMetric,
+		Dst: ipNet,
+	}
+	if PreferLocalRoutes {
+		route.Priority = VPNRouteMetric
 	}
 
 	if gateway != "" {
@@ -135,8 +147,10 @@ func LinuxRemoveRoute(destination string, interfaceName string) error {
 	// a local/native route to the same destination on a different
 	// interface (or with a different metric) must never be touched.
 	route := &netlink.Route{
-		Dst:      ipNet,
-		Priority: VPNRouteMetric,
+		Dst: ipNet,
+	}
+	if PreferLocalRoutes {
+		route.Priority = VPNRouteMetric
 	}
 
 	if interfaceName != "" {

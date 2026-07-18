@@ -84,11 +84,15 @@ func WindowsAddRoute(destination string, gateway string, interfaceName string) e
 		return fmt.Errorf("either gateway or interface must be specified")
 	}
 
-	// Add the route using winipcfg. Metric is set explicitly (rather than a
-	// low value like 1, which would nearly always outrank local routes) so
-	// that an overlapping local/connected route is preferred over this VPN
-	// route - see VPNRouteMetric.
-	err = luid.AddRoute(prefix, nextHop, VPNRouteMetric)
+	// Add the route using winipcfg. When PreferLocalRoutes is enabled,
+	// metric is set explicitly (rather than a low value like 1, which would
+	// nearly always outrank local routes) so that an overlapping local/
+	// connected route is preferred over this VPN route - see VPNRouteMetric.
+	var metric uint32
+	if PreferLocalRoutes {
+		metric = VPNRouteMetric
+	}
+	err = luid.AddRoute(prefix, nextHop, metric)
 	if err != nil {
 		return fmt.Errorf("failed to add route: %v", err)
 	}
@@ -152,15 +156,19 @@ func WindowsRemoveRoute(destination string, interfaceName string) error {
 	}
 
 	// Find and delete matching route. When we know which interface we added
-	// the route on, only delete the entry on that interface with our
-	// VPNRouteMetric so we never remove an unrelated local/native route to
-	// the same destination.
+	// the route on, only delete the entry on that interface with the metric
+	// we added it with (see PreferLocalRoutes) so we never remove an
+	// unrelated local/native route to the same destination.
+	var wantMetric uint32
+	if PreferLocalRoutes {
+		wantMetric = VPNRouteMetric
+	}
 	for _, route := range routes {
 		routePrefix := route.DestinationPrefix.Prefix()
 		if routePrefix != prefix {
 			continue
 		}
-		if haveLuid && (route.InterfaceLUID != luid || route.Metric != VPNRouteMetric) {
+		if haveLuid && (route.InterfaceLUID != luid || route.Metric != wantMetric) {
 			continue
 		}
 		logger.Info("Removing route to %s on interface %s", destination, interfaceName)
