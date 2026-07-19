@@ -430,7 +430,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 
 		if n.config.UseNativeMainInterface {
-			if err := network.RemoveRoutes(data.Subnets); err != nil {
+			if err := network.RemoveRoutes(data.Subnets, n.config.NativeMainInterfaceName); err != nil {
 				logger.Warn("Failed to remove routes for subnets: %v", err)
 			}
 		}

@@ -6,6 +6,6 @@ func WindowsAddRoute(destination string, gateway string, interfaceName string) e
 	return nil
 }
 
-func WindowsRemoveRoute(destination string) error {
+func WindowsRemoveRoute(destination string, interfaceName string) error {
 	return nil
 }

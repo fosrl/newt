@@ -11,6 +11,33 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+// VPNRouteMetric is the route metric/priority assigned to routes we add for
+// the tunnel, so that an overlapping local/connected route is always
+// preferred over the VPN route to the same destination rather than the two
+// silently racing based on insertion order. It needs to be higher than any
+// metric a local route is realistically going to have: on Linux, automatic
+// metrics assigned by NetworkManager (which also apply to the connected
+// subnet route, not just the default route) go up to 600 for Wi-Fi; on
+// Windows, automatic interface metrics plus route metric rarely exceed a few
+// hundred. 9999 comfortably clears both without needing to query the local
+// routing table at add-time.
+const VPNRouteMetric = 9999
+
+// PreferLocalRoutes controls whether routes added by AddRoutes are given the
+// explicit high VPNRouteMetric priority, so that an overlapping local/
+// connected route always takes precedence over the VPN route to the same
+// destination. Defaults to false (routes are added with the OS default
+// metric/priority, matching behavior prior to the introduction of
+// VPNRouteMetric); callers that want local routes to win opt in by setting
+// this to true (e.g. from a config value) before routes are added.
+var PreferLocalRoutes = false
+
+// DarwinAddRoute adds a route via the BSD routing table. Unlike Linux/Windows,
+// BSD's routing table has no per-route metric - preference between an
+// overlapping local route and this VPN route is instead resolved by
+// longest-prefix-match, and `route add` (as opposed to `route change`) fails
+// rather than replacing an existing route to the same destination, so a local
+// route is never displaced by one we add here.
 func DarwinAddRoute(destination string, gateway string, interfaceName string) error {
 	if runtime.GOOS != "darwin" {
 		return nil
@@ -65,9 +92,15 @@ func LinuxAddRoute(destination string, gateway string, interfaceName string) err
 		return fmt.Errorf("invalid destination address: %v", err)
 	}
 
-	// Create route
+	// Create route. When PreferLocalRoutes is enabled, Priority is set
+	// explicitly (rather than left at the default of 0) so that this route
+	// never outranks a local/connected route to the same destination - see
+	// VPNRouteMetric.
 	route := &netlink.Route{
 		Dst: ipNet,
+	}
+	if PreferLocalRoutes {
+		route.Priority = VPNRouteMetric
 	}
 
 	if gateway != "" {
@@ -98,7 +131,7 @@ func LinuxAddRoute(destination string, gateway string, interfaceName string) err
 	return nil
 }
 
-func LinuxRemoveRoute(destination string) error {
+func LinuxRemoveRoute(destination string, interfaceName string) error {
 	if runtime.GOOS != "linux" {
 		return nil
 	}
@@ -109,12 +142,26 @@ func LinuxRemoveRoute(destination string) error {
 		return fmt.Errorf("invalid destination address: %v", err)
 	}
 
-	// Create route to delete
+	// Create route to delete. LinkIndex and Priority are set to match the
+	// route we added exactly, so this only ever deletes the route we own -
+	// a local/native route to the same destination on a different
+	// interface (or with a different metric) must never be touched.
 	route := &netlink.Route{
 		Dst: ipNet,
 	}
+	if PreferLocalRoutes {
+		route.Priority = VPNRouteMetric
+	}
 
-	logger.Info("Removing route to %s", destination)
+	if interfaceName != "" {
+		link, err := netlink.LinkByName(interfaceName)
+		if err != nil {
+			return fmt.Errorf("failed to get interface %s: %v", interfaceName, err)
+		}
+		route.LinkIndex = link.Attrs().Index
+	}
+
+	logger.Info("Removing route to %s via interface %s", destination, interfaceName)
 
 	// Delete the route
 	if err := netlink.RouteDel(route); err != nil {
@@ -157,9 +204,9 @@ func RemoveRouteForServerIP(serverIP string, interfaceName string) error {
 		return DarwinRemoveRoute(serverIP)
 	}
 	// else if runtime.GOOS == "windows" {
-	// 	return WindowsRemoveRoute(serverIP)
+	// 	return WindowsRemoveRoute(serverIP, interfaceName)
 	// } else if runtime.GOOS == "linux" {
-	// 	return LinuxRemoveRoute(serverIP)
+	// 	return LinuxRemoveRoute(serverIP, interfaceName)
 	// }
 	return nil
 }
@@ -242,8 +289,11 @@ func AddRoutes(remoteSubnets []string, interfaceName string) error {
 	return nil
 }
 
-// removeRoutesForRemoteSubnets removes routes for each subnet in RemoteSubnets
-func RemoveRoutes(remoteSubnets []string) error {
+// removeRoutesForRemoteSubnets removes routes for each subnet in RemoteSubnets.
+// interfaceName must match the interface the routes were added on (see
+// AddRoutes) so that only the routes we own are deleted, never an unrelated
+// local/native route to the same destination on another interface.
+func RemoveRoutes(remoteSubnets []string, interfaceName string) error {
 	if len(remoteSubnets) == 0 {
 		return nil
 	}
@@ -267,11 +317,11 @@ func RemoveRoutes(remoteSubnets []string) error {
 				logger.Error("Failed to remove Darwin route for subnet %s: %v", subnet, err)
 			}
 		case "windows":
-			if err := WindowsRemoveRoute(subnet); err != nil {
+			if err := WindowsRemoveRoute(subnet, interfaceName); err != nil {
 				logger.Error("Failed to remove Windows route for subnet %s: %v", subnet, err)
 			}
 		case "linux":
-			if err := LinuxRemoveRoute(subnet); err != nil {
+			if err := LinuxRemoveRoute(subnet, interfaceName); err != nil {
 				logger.Error("Failed to remove Linux route for subnet %s: %v", subnet, err)
 			}
 		case "android", "ios":
