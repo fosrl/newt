@@ -63,11 +63,18 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 		return
 	}
 
-	if err := json.Unmarshal(jsonData, &n.wgData); err != nil {
+	// Unmarshal into a fresh WgData rather than the persistent n.wgData. Decoding a
+	// JSON array into an existing slice merges element-by-element by position, and a
+	// JSON null is a no-op for non-pointer fields, so reusing n.wgData lets a target
+	// inherit a stale expected status code (hcStatus) from the previous connection
+	// when the health-check rows arrive in a different order on reconnect.
+	var wgData WgData
+	if err := json.Unmarshal(jsonData, &wgData); err != nil {
 		logger.Info("Error unmarshaling target data: %v", err)
 		regResult = "failure"
 		return
 	}
+	n.wgData = wgData
 
 	logger.Debug(fmtReceivedMsg, msg)
 
