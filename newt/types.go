@@ -70,5 +70,6 @@ type SyncData struct {
 	RemoteExitNodeSubnets []string               `json:"remoteExitNodeSubnets"`
 	Peers                 []wgclients.Peer       `json:"peers"`
 	ClientTargets         []wgclients.Target     `json:"clientTargets"`
+	Certs                 []wgclients.CertData   `json:"certs"`
 	BrowserGatewayTargets []BrowserGatewayTarget `json:"browserGatewayTargets"`
 }
