@@ -1010,7 +1010,9 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 
 		bcChainId := generateChainId()
-		n.pendingRegisterChainId = bcChainId
+		// Pangolin intentionally does not answer backwards-compatible
+		// registrations with newt/wg/connect. Do not replace the chain ID of
+		// the real registration while its response may already be in flight.
 		if err := n.client.SendMessage(topicWGRegister, map[string]interface{}{
 			"publicKey":           n.publicKey.String(),
 			"newtVersion":         n.config.Version,
