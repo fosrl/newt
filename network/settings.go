@@ -81,6 +81,45 @@ func SetIPv4Settings(addresses []string, subnetMasks []string) {
 	logger.Info("Set IPv4 addresses: %v, subnet masks: %v", addresses, subnetMasks)
 }
 
+// AddIPv4Address appends an additional IPv4 address/subnet mask pair to the
+// tunnel's network settings. This is how a secondary interface address gets
+// exposed to mobile (iOS/Android) packet-tunnel providers, which read the
+// full IPv4Addresses/IPv4SubnetMasks arrays (not just the first entry) and
+// re-apply them on every settings poll.
+func AddIPv4Address(address string, subnetMask string) {
+	networkSettingsMutex.Lock()
+	defer networkSettingsMutex.Unlock()
+
+	for _, a := range networkSettings.IPv4Addresses {
+		if a == address {
+			logger.Info("IPv4 address already exists: %s", address)
+			return
+		}
+	}
+
+	networkSettings.IPv4Addresses = append(networkSettings.IPv4Addresses, address)
+	networkSettings.IPv4SubnetMasks = append(networkSettings.IPv4SubnetMasks, subnetMask)
+	incrementor++
+	logger.Info("Added IPv4 address: %s/%s", address, subnetMask)
+}
+
+// RemoveIPv4Address removes a previously added secondary IPv4 address.
+func RemoveIPv4Address(address string) {
+	networkSettingsMutex.Lock()
+	defer networkSettingsMutex.Unlock()
+
+	for i, a := range networkSettings.IPv4Addresses {
+		if a == address {
+			networkSettings.IPv4Addresses = append(networkSettings.IPv4Addresses[:i], networkSettings.IPv4Addresses[i+1:]...)
+			networkSettings.IPv4SubnetMasks = append(networkSettings.IPv4SubnetMasks[:i], networkSettings.IPv4SubnetMasks[i+1:]...)
+			incrementor++
+			logger.Info("Removed IPv4 address: %s", address)
+			return
+		}
+	}
+	logger.Info("IPv4 address not found for removal: %s", address)
+}
+
 // SetIPv4IncludedRoutes sets the included IPv4 routes
 func SetIPv4IncludedRoutes(routes []IPv4Route) {
 	networkSettingsMutex.Lock()
