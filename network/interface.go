@@ -115,6 +115,10 @@ func FindUnusedUTUN() (string, error) {
 }
 
 func configureDarwin(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
+	if NativeConfigDisabled {
+		return nil
+	}
+
 	logger.Info("Configuring darwin interface: %s", interfaceName)
 
 	prefix, _ := ipNet.Mask.Size()
@@ -246,6 +250,10 @@ func removeLinuxAddress(interfaceName string, ip net.IP, ipNet *net.IPNet) error
 }
 
 func removeDarwinAddress(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
+	if NativeConfigDisabled {
+		return nil
+	}
+
 	prefix, _ := ipNet.Mask.Size()
 	ipStr := fmt.Sprintf("%s/%d", ip.String(), prefix)
 

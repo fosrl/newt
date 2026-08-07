@@ -32,6 +32,20 @@ const VPNRouteMetric = 9999
 // this to true (e.g. from a config value) before routes are added.
 var PreferLocalRoutes = false
 
+// NativeConfigDisabled, when true, skips the raw `ifconfig`/`route` subprocess
+// calls this package otherwise makes on darwin (configureDarwin,
+// removeDarwinAddress, DarwinAddRouteWithSource, DarwinRemoveRoute) while still
+// populating the JSON-facing NetworkSettings state. This must be set when the
+// TUN device's addresses/routes are instead owned by an external mechanism
+// that reconciles them independently - namely Apple's NetworkExtension
+// (NEPacketTunnelProvider.setTunnelNetworkSettings), which is the sole
+// sanctioned way to configure that virtual interface. Running our own
+// ifconfig/route commands in addition to NE applying its own settings was
+// observed to install two competing routes to the same destination (one via
+// NE's gatewayAddress-based route, one via our own `-ifa` route), so the two
+// mechanisms must be mutually exclusive rather than layered.
+var NativeConfigDisabled = false
+
 // DarwinAddRoute adds a route via the BSD routing table. Unlike Linux/Windows,
 // BSD's routing table has no per-route metric - preference between an
 // overlapping local route and this VPN route is instead resolved by
@@ -52,6 +66,9 @@ func DarwinAddRoute(destination string, gateway string, interfaceName string) er
 // though the tunnel/handshake itself stays up.
 func DarwinAddRouteWithSource(destination string, gateway string, interfaceName string, sourceIP string) error {
 	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	if NativeConfigDisabled {
 		return nil
 	}
 
@@ -85,6 +102,9 @@ func DarwinAddRouteWithSource(destination string, gateway string, interfaceName 
 
 func DarwinRemoveRoute(destination string) error {
 	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	if NativeConfigDisabled {
 		return nil
 	}
 
