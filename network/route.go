@@ -203,11 +203,17 @@ func AddRouteForServerIPWithSource(serverIP, interfaceName string, sourceIP stri
 	if interfaceName == "" {
 		return nil
 	}
+
+	// Populate the NetworkSettings entry (and its gatewayAddress, for the
+	// NetworkExtension source-pinning trick above) unconditionally, same as
+	// AddRoutesWithSource does for remote subnets - mobile packet-tunnel
+	// providers rely on this regardless of GOOS.
+	if err := AddRouteForNetworkConfigWithGateway(serverIP, sourceIP); err != nil {
+		return err
+	}
+
 	// TODO: does this also need to be ios?
 	if runtime.GOOS == "darwin" { // macos requires routes for each peer to be added but this messes with other platforms
-		if err := AddRouteForNetworkConfig(serverIP); err != nil {
-			return err
-		}
 		return DarwinAddRouteWithSource(serverIP, "", interfaceName, sourceIP)
 	}
 	// else if runtime.GOOS == "windows" {
@@ -220,14 +226,24 @@ func AddRouteForServerIPWithSource(serverIP, interfaceName string, sourceIP stri
 
 // removeRouteForServerIP removes an OS-specific route for the server IP
 func RemoveRouteForServerIP(serverIP string, interfaceName string) error {
+	return RemoveRouteForServerIPWithSource(serverIP, interfaceName, "")
+}
+
+// RemoveRouteForServerIPWithSource is RemoveRouteForServerIP with an explicit
+// source/gateway address - must match whatever was passed to
+// AddRouteForServerIPWithSource when the route was added (see
+// RemoveRouteForNetworkConfigWithGateway).
+func RemoveRouteForServerIPWithSource(serverIP string, interfaceName string, sourceIP string) error {
 	if interfaceName == "" {
 		return nil
 	}
+
+	if err := RemoveRouteForNetworkConfigWithGateway(serverIP, sourceIP); err != nil {
+		return err
+	}
+
 	// TODO: does this also need to be ios?
 	if runtime.GOOS == "darwin" { // macos requires routes for each peer to be added but this messes with other platforms
-		if err := RemoveRouteForNetworkConfig(serverIP); err != nil {
-			return err
-		}
 		return DarwinRemoveRoute(serverIP)
 	}
 	// else if runtime.GOOS == "windows" {
@@ -239,6 +255,20 @@ func RemoveRouteForServerIP(serverIP string, interfaceName string) error {
 }
 
 func AddRouteForNetworkConfig(destination string) error {
+	return AddRouteForNetworkConfigWithGateway(destination, "")
+}
+
+// AddRouteForNetworkConfigWithGateway is AddRouteForNetworkConfig with an
+// explicit gateway address for the route entry surfaced via NetworkSettings.
+// This is consumed by mobile (iOS/macOS NetworkExtension) packet-tunnel
+// providers as NEIPv4Route.gatewayAddress. NetworkExtension gives us no
+// direct way to pin a route's source address (no equivalent of BSD's `route
+// -ifa`) - but setting gatewayAddress to one of the tunnel interface's own
+// addresses makes the OS resolve "how do I reach this gateway" recursively
+// to that address/interface pairing, which is what determines the source
+// address used for packets matching the route. This is the same underlying
+// mechanism as `route add -gateway` (see DarwinAddRoute's gateway branch).
+func AddRouteForNetworkConfigWithGateway(destination string, gateway string) error {
 	// Parse the subnet to extract IP and mask
 	_, ipNet, err := net.ParseCIDR(destination)
 	if err != nil {
@@ -249,12 +279,21 @@ func AddRouteForNetworkConfig(destination string) error {
 	mask := net.IP(ipNet.Mask).String()
 	destinationAddress := ipNet.IP.String()
 
-	AddIPv4IncludedRoute(IPv4Route{DestinationAddress: destinationAddress, SubnetMask: mask})
+	AddIPv4IncludedRoute(IPv4Route{DestinationAddress: destinationAddress, SubnetMask: mask, GatewayAddress: gateway})
 
 	return nil
 }
 
 func RemoveRouteForNetworkConfig(destination string) error {
+	return RemoveRouteForNetworkConfigWithGateway(destination, "")
+}
+
+// RemoveRouteForNetworkConfigWithGateway is RemoveRouteForNetworkConfig with
+// an explicit gateway address. This must match whatever gateway the route was
+// added with (see AddRouteForNetworkConfigWithGateway) - RemoveIPv4IncludedRoute
+// matches by full struct equality, so a mismatched gateway means the entry is
+// silently never found/removed.
+func RemoveRouteForNetworkConfigWithGateway(destination string, gateway string) error {
 	// Parse the subnet to extract IP and mask
 	_, ipNet, err := net.ParseCIDR(destination)
 	if err != nil {
@@ -265,7 +304,7 @@ func RemoveRouteForNetworkConfig(destination string) error {
 	mask := net.IP(ipNet.Mask).String()
 	destinationAddress := ipNet.IP.String()
 
-	RemoveIPv4IncludedRoute(IPv4Route{DestinationAddress: destinationAddress, SubnetMask: mask})
+	RemoveIPv4IncludedRoute(IPv4Route{DestinationAddress: destinationAddress, SubnetMask: mask, GatewayAddress: gateway})
 
 	return nil
 }
