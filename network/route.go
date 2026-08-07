@@ -39,21 +39,39 @@ var PreferLocalRoutes = false
 // rather than replacing an existing route to the same destination, so a local
 // route is never displaced by one we add here.
 func DarwinAddRoute(destination string, gateway string, interfaceName string) error {
+	return DarwinAddRouteWithSource(destination, gateway, interfaceName, "")
+}
+
+// DarwinAddRouteWithSource is DarwinAddRoute with an explicit source address
+// (route(8) `-ifa`). This is required when the interface carries more than
+// one address (e.g. an exit node's secondary tunnel address alongside the
+// site tunnel's primary address): without `-ifa`, BSD picks a source address
+// for the route on its own - typically the interface's primary address - and
+// WireGuard's own reverse-path filtering on the remote end will silently drop
+// packets whose source doesn't match the peer's configured AllowedIPs, even
+// though the tunnel/handshake itself stays up.
+func DarwinAddRouteWithSource(destination string, gateway string, interfaceName string, sourceIP string) error {
 	if runtime.GOOS != "darwin" {
 		return nil
 	}
 
-	var cmd *exec.Cmd
+	var args []string
 
 	if gateway != "" {
 		// Route with specific gateway
-		cmd = exec.Command("route", "-q", "-n", "add", "-inet", destination, "-gateway", gateway)
+		args = []string{"-q", "-n", "add", "-inet", destination, "-gateway", gateway}
 	} else if interfaceName != "" {
 		// Route via interface
-		cmd = exec.Command("route", "-q", "-n", "add", "-inet", destination, "-interface", interfaceName)
+		args = []string{"-q", "-n", "add", "-inet", destination, "-interface", interfaceName}
 	} else {
 		return fmt.Errorf("either gateway or interface must be specified")
 	}
+
+	if sourceIP != "" {
+		args = append(args, "-ifa", sourceIP)
+	}
+
+	cmd := exec.Command("route", args...)
 
 	logger.Info("Running command: %v", cmd)
 
@@ -173,6 +191,15 @@ func LinuxRemoveRoute(destination string, interfaceName string) error {
 
 // addRouteForServerIP adds an OS-specific route for the server IP
 func AddRouteForServerIP(serverIP, interfaceName string) error {
+	return AddRouteForServerIPWithSource(serverIP, interfaceName, "")
+}
+
+// AddRouteForServerIPWithSource is AddRouteForServerIP with an explicit source
+// address for the darwin route (see DarwinAddRouteWithSource) - needed when
+// the interface carries more than one address, e.g. an exit node connection
+// where the interface's primary address belongs to the site tunnel rather
+// than the exit node.
+func AddRouteForServerIPWithSource(serverIP, interfaceName string, sourceIP string) error {
 	if interfaceName == "" {
 		return nil
 	}
@@ -181,7 +208,7 @@ func AddRouteForServerIP(serverIP, interfaceName string) error {
 		if err := AddRouteForNetworkConfig(serverIP); err != nil {
 			return err
 		}
-		return DarwinAddRoute(serverIP, "", interfaceName)
+		return DarwinAddRouteWithSource(serverIP, "", interfaceName, sourceIP)
 	}
 	// else if runtime.GOOS == "windows" {
 	//	return WindowsAddRoute(serverIP, "", interfaceName)
@@ -245,6 +272,16 @@ func RemoveRouteForNetworkConfig(destination string) error {
 
 // addRoutes adds routes for each subnet in RemoteSubnets
 func AddRoutes(remoteSubnets []string, interfaceName string) error {
+	return AddRoutesWithSource(remoteSubnets, interfaceName, "")
+}
+
+// AddRoutesWithSource is AddRoutes with an explicit source address for the
+// darwin routes (see DarwinAddRouteWithSource) - needed when the interface
+// carries more than one address (e.g. a site tunnel address alongside an
+// exit node's secondary address), so the routes for these subnets are pinned
+// to the address they actually belong to rather than whichever address
+// darwin would otherwise default to.
+func AddRoutesWithSource(remoteSubnets []string, interfaceName string, sourceIP string) error {
 	if len(remoteSubnets) == 0 {
 		return nil
 	}
@@ -268,7 +305,7 @@ func AddRoutes(remoteSubnets []string, interfaceName string) error {
 
 		switch runtime.GOOS {
 		case "darwin":
-			if err := DarwinAddRoute(subnet, "", interfaceName); err != nil {
+			if err := DarwinAddRouteWithSource(subnet, "", interfaceName, sourceIP); err != nil {
 				logger.Error("Failed to add Darwin route for subnet %s: %v", subnet, err)
 			}
 		case "windows":
