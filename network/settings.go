@@ -2,6 +2,7 @@ package network
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 
 	"github.com/fosrl/newt/logger"
@@ -86,14 +87,24 @@ func SetIPv4Settings(addresses []string, subnetMasks []string) {
 // exposed to mobile (iOS/Android) packet-tunnel providers, which read the
 // full IPv4Addresses/IPv4SubnetMasks arrays (not just the first entry) and
 // re-apply them on every settings poll.
-func AddIPv4Address(address string, subnetMask string) {
+//
+// It requires a primary address to already be set (via SetIPv4Settings,
+// i.e. ConfigureInterface) and refuses to add otherwise: on mobile
+// platforms, array order is what determines which address the OS treats as
+// primary, so appending to an empty list would silently make this
+// "additional" address the primary one instead.
+func AddIPv4Address(address string, subnetMask string) error {
 	networkSettingsMutex.Lock()
 	defer networkSettingsMutex.Unlock()
+
+	if len(networkSettings.IPv4Addresses) == 0 {
+		return fmt.Errorf("cannot add secondary IPv4 address %s: no primary address configured yet", address)
+	}
 
 	for _, a := range networkSettings.IPv4Addresses {
 		if a == address {
 			logger.Info("IPv4 address already exists: %s", address)
-			return
+			return nil
 		}
 	}
 
@@ -101,6 +112,7 @@ func AddIPv4Address(address string, subnetMask string) {
 	networkSettings.IPv4SubnetMasks = append(networkSettings.IPv4SubnetMasks, subnetMask)
 	incrementor++
 	logger.Info("Added IPv4 address: %s/%s", address, subnetMask)
+	return nil
 }
 
 // RemoveIPv4Address removes a previously added secondary IPv4 address.

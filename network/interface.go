@@ -184,7 +184,9 @@ func AddSecondaryAddress(interfaceName string, addr string) error {
 	}
 
 	mask := net.IP(ipNet.Mask).String()
-	AddIPv4Address(ip.String(), mask)
+	if err := AddIPv4Address(ip.String(), mask); err != nil {
+		return err
+	}
 
 	if interfaceName == "" {
 		return nil
