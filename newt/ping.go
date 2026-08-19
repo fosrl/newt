@@ -280,7 +280,8 @@ func (n *Newt) startPingCheck(fn pingFunc, serverIP, tunnelID string) chan struc
 							"chainId": pingChainId,
 						}, 3*time.Second)
 						bcChainId := generateChainId()
-						n.pendingRegisterChainId = bcChainId
+						// This compatibility message has no wg/connect response and must
+						// not supersede the pending real registration chain.
 						if err := n.client.SendMessage("newt/wg/register", map[string]interface{}{
 							"publicKey":           n.publicKey.String(),
 							"backwardsCompatible": true,

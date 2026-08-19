@@ -35,10 +35,11 @@ import (
 )
 
 type WgConfig struct {
-	IpAddress string   `json:"ipAddress"`
-	Peers     []Peer   `json:"peers"`
-	Targets   []Target `json:"targets"`
-	ChainId   string   `json:"chainId"`
+	IpAddress string     `json:"ipAddress"`
+	Peers     []Peer     `json:"peers"`
+	Targets   []Target   `json:"targets"`
+	Certs     []CertData `json:"certs"`
+	ChainId   string     `json:"chainId"`
 }
 
 type Target struct {
@@ -53,6 +54,23 @@ type Target struct {
 	HTTPTargets    []netstack2.HTTPTarget `json:"httpTargets,omitempty"` // for http protocol, list of downstream services to load balance across
 	TLSCert        string                 `json:"tlsCert,omitempty"`     // PEM-encoded certificate for incoming HTTPS termination
 	TLSKey         string                 `json:"tlsKey,omitempty"`      // PEM-encoded private key for incoming HTTPS termination
+	TLSCertID      string                 `json:"tlsCertId,omitempty"`   // references an entry in the sync message's Certs list instead of inlining TLSCert/TLSKey
+}
+
+// CertData is a single shared TLS certificate/key pair, referenced by ID from
+// one or more Targets via TLSCertID. Sent once per sync message so that many
+// targets backed by the same certificate (e.g. a wildcard cert) don't each
+// carry a full copy of the PEM data.
+type CertData struct {
+	ID   string `json:"id"`
+	Cert string `json:"cert"`
+	Key  string `json:"key"`
+}
+
+// CertPair holds the resolved PEM certificate/key material for a CertData entry.
+type CertPair struct {
+	Cert string
+	Key  string
 }
 
 type PortRange struct {
@@ -122,6 +140,11 @@ type WireGuardService struct {
 
 	// connection blocking: when true, all new incoming connections are dropped
 	blocked atomic.Bool
+
+	// certs resolves TLSCertID references on incoming Targets to their PEM
+	// cert/key material. Replaced wholesale on every full sync.
+	certs   map[string]CertPair
+	certsMu sync.RWMutex
 }
 
 // generateChainId generates a random chain ID for deduplicating round-trip messages.
@@ -196,6 +219,8 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 	wsClient.RegisterHandler("newt/wg/targets/add", service.handleAddTarget)
 	wsClient.RegisterHandler("newt/wg/targets/remove", service.handleRemoveTarget)
 	wsClient.RegisterHandler("newt/wg/targets/update", service.handleUpdateTarget)
+	wsClient.RegisterHandler("newt/certs/add", service.handleAddCerts)
+	wsClient.RegisterHandler("newt/certs/remove", service.handleRemoveCerts)
 
 	return service, nil
 }
@@ -544,6 +569,7 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	}
 
 	s.config = config
+	s.SetCerts(config.Certs)
 
 	if s.stopGetConfig != nil {
 		s.stopGetConfig()
@@ -566,6 +592,107 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	}
 
 	logger.Info("Client connectivity setup. Ready to accept connections from clients!")
+}
+
+// SetCerts replaces the TLSCertID lookup table used by resolveTLS. The server
+// sends the complete set of referenced certs on every full sync, so this is a
+// wholesale replacement rather than an incremental merge.
+func (s *WireGuardService) SetCerts(certs []CertData) {
+	m := make(map[string]CertPair, len(certs))
+	for _, c := range certs {
+		m[c.ID] = CertPair{Cert: c.Cert, Key: c.Key}
+	}
+	s.certsMu.Lock()
+	s.certs = m
+	s.certsMu.Unlock()
+}
+
+// resolveTLS returns the PEM cert/key to use for target's incoming HTTPS
+// termination: target.TLSCertID looked up in the certs table if set, falling
+// back to the target's own inline TLSCert/TLSKey otherwise.
+func (s *WireGuardService) resolveTLS(target Target) (cert, key string) {
+	if target.TLSCertID == "" {
+		return target.TLSCert, target.TLSKey
+	}
+	s.certsMu.RLock()
+	pair, ok := s.certs[target.TLSCertID]
+	s.certsMu.RUnlock()
+	if !ok {
+		logger.Warn("No cert found for tlsCertId %s, falling back to inline cert on target", target.TLSCertID)
+		return target.TLSCert, target.TLSKey
+	}
+	return pair.Cert, pair.Key
+}
+
+// AddCerts upserts the given certs into the lookup table used by resolveTLS,
+// without discarding any certs already present. Used for incremental cert
+// pushes (e.g. after a renewal) outside of a full newt/sync or
+// newt/wg/receive-config, which replace the table wholesale via SetCerts.
+func (s *WireGuardService) AddCerts(certs []CertData) {
+	if len(certs) == 0 {
+		return
+	}
+	s.certsMu.Lock()
+	if s.certs == nil {
+		s.certs = make(map[string]CertPair, len(certs))
+	}
+	for _, c := range certs {
+		s.certs[c.ID] = CertPair{Cert: c.Cert, Key: c.Key}
+	}
+	s.certsMu.Unlock()
+}
+
+// RemoveCerts deletes the given cert IDs from the lookup table, e.g. once the
+// server knows no target references them anymore.
+func (s *WireGuardService) RemoveCerts(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	s.certsMu.Lock()
+	for _, id := range ids {
+		delete(s.certs, id)
+	}
+	s.certsMu.Unlock()
+}
+
+// handleAddCerts processes a "newt/certs/add" message: an array of CertData
+// to upsert into the cert lookup table.
+func (s *WireGuardService) handleAddCerts(msg websocket.WSMessage) {
+	jsonData, err := json.Marshal(msg.Data)
+	if err != nil {
+		logger.Info("Error marshaling cert add data: %v", err)
+		return
+	}
+
+	var certs []CertData
+	if err := json.Unmarshal(jsonData, &certs); err != nil {
+		logger.Warn("Error unmarshaling cert add data: %v", err)
+		return
+	}
+
+	s.AddCerts(certs)
+	logger.Info("Added %d certs", len(certs))
+}
+
+// handleRemoveCerts processes a "newt/certs/remove" message: {ids: [...]}
+// naming the cert IDs to drop from the lookup table.
+func (s *WireGuardService) handleRemoveCerts(msg websocket.WSMessage) {
+	jsonData, err := json.Marshal(msg.Data)
+	if err != nil {
+		logger.Info("Error marshaling cert remove data: %v", err)
+		return
+	}
+
+	var data struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.Unmarshal(jsonData, &data); err != nil {
+		logger.Warn("Error unmarshaling cert remove data: %v", err)
+		return
+	}
+
+	s.RemoveCerts(data.IDs)
+	logger.Info("Removed %d certs", len(data.IDs))
 }
 
 // Sync synchronizes the clients WireGuard peers and targets with the desired state
@@ -680,6 +807,7 @@ func (s *WireGuardService) syncTargets(desiredTargets []Target) error {
 				continue
 			}
 
+			tlsCert, tlsKey := s.resolveTLS(target)
 			rules = append(rules, netstack2.SubnetRule{
 				SourcePrefix: sourcePrefix,
 				DestPrefix:   destPrefix,
@@ -689,8 +817,8 @@ func (s *WireGuardService) syncTargets(desiredTargets []Target) error {
 				ResourceId:   target.ResourceId,
 				Protocol:     target.Protocol,
 				HTTPTargets:  target.HTTPTargets,
-				TLSCert:      target.TLSCert,
-				TLSKey:       target.TLSKey,
+				TLSCert:      tlsCert,
+				TLSKey:       tlsKey,
 			})
 		}
 	}
@@ -976,6 +1104,7 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 			if err != nil {
 				return fmt.Errorf("invalid CIDR %s: %v", sp, err)
 			}
+			tlsCert, tlsKey := s.resolveTLS(target)
 			s.tnet.AddProxySubnetRule(netstack2.SubnetRule{
 				SourcePrefix: sourcePrefix,
 				DestPrefix:   destPrefix,
@@ -985,8 +1114,8 @@ func (s *WireGuardService) ensureTargets(targets []Target) error {
 				ResourceId:   target.ResourceId,
 				Protocol:     target.Protocol,
 				HTTPTargets:  target.HTTPTargets,
-				TLSCert:      target.TLSCert,
-				TLSKey:       target.TLSKey,
+				TLSCert:      tlsCert,
+				TLSKey:       tlsKey,
 			})
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}
@@ -1380,6 +1509,7 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 				logger.Info("Invalid CIDR %s: %v", sp, err)
 				continue
 			}
+			tlsCert, tlsKey := s.resolveTLS(target)
 			s.tnet.AddProxySubnetRule(netstack2.SubnetRule{
 				SourcePrefix: sourcePrefix,
 				DestPrefix:   destPrefix,
@@ -1389,8 +1519,8 @@ func (s *WireGuardService) handleAddTarget(msg websocket.WSMessage) {
 				ResourceId:   target.ResourceId,
 				Protocol:     target.Protocol,
 				HTTPTargets:  target.HTTPTargets,
-				TLSCert:      target.TLSCert,
-				TLSKey:       target.TLSKey,
+				TLSCert:      tlsCert,
+				TLSKey:       tlsKey,
 			})
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}
@@ -1509,6 +1639,7 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 				logger.Info("Invalid CIDR %s: %v", sp, err)
 				continue
 			}
+			tlsCert, tlsKey := s.resolveTLS(target)
 			s.tnet.AddProxySubnetRule(netstack2.SubnetRule{
 				SourcePrefix: sourcePrefix,
 				DestPrefix:   destPrefix,
@@ -1518,8 +1649,8 @@ func (s *WireGuardService) handleUpdateTarget(msg websocket.WSMessage) {
 				ResourceId:   target.ResourceId,
 				Protocol:     target.Protocol,
 				HTTPTargets:  target.HTTPTargets,
-				TLSCert:      target.TLSCert,
-				TLSKey:       target.TLSKey,
+				TLSCert:      tlsCert,
+				TLSKey:       tlsKey,
 			})
 			logger.Info("Added target subnet from %s to %s rewrite to %s with port ranges: %v", sp, target.DestPrefix, target.RewriteTo, target.PortRange)
 		}

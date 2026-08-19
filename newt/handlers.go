@@ -10,13 +10,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/fosrl/newt/authdaemon"
 	"github.com/fosrl/newt/browsergateway"
 	"github.com/fosrl/newt/docker"
+	"github.com/fosrl/newt/exitnode"
 	"github.com/fosrl/newt/healthcheck"
 	"github.com/fosrl/newt/internal/state"
 	"github.com/fosrl/newt/internal/telemetry"
@@ -140,129 +140,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 			return
 		}
 
-		if len(exitNodes) == 1 || n.config.PreferEndpoint != "" {
-			logger.Debug("Only one exit node available, using it directly: %s", exitNodes[0].Endpoint)
-
-			if n.config.PreferEndpoint != "" {
-				for _, node := range exitNodes {
-					if node.Endpoint == n.config.PreferEndpoint {
-						exitNodes[0] = node
-						break
-					}
-				}
-			}
-
-			pingResults := []ExitNodePingResult{
-				{
-					ExitNodeID:             exitNodes[0].ID,
-					LatencyMs:              0,
-					Weight:                 exitNodes[0].Weight,
-					Error:                  "",
-					Name:                   exitNodes[0].Name,
-					Endpoint:               exitNodes[0].Endpoint,
-					WasPreviouslyConnected: exitNodes[0].WasPreviouslyConnected,
-				},
-			}
-
-			chainId := generateChainId()
-			n.pendingRegisterChainId = chainId
-			n.stopFunc = n.client.SendMessageInterval(topicWGRegister, map[string]interface{}{
-				"publicKey":   n.publicKey.String(),
-				"pingResults": pingResults,
-				"newtVersion": n.config.Version,
-				"chainId":     chainId,
-			}, 2*time.Second)
-
-			return
-		}
-
-		type nodeResult struct {
-			Node    ExitNode
-			Latency time.Duration
-			Err     error
-		}
-
-		results := make([]nodeResult, len(exitNodes))
-		const pingAttempts = 3
-		for i, node := range exitNodes {
-			var totalLatency time.Duration
-			var lastErr error
-			successes := 0
-			httpClient := &http.Client{
-				Timeout: 5 * time.Second,
-			}
-			url := node.Endpoint
-			if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-				url = "http://" + url
-			}
-			if !strings.HasSuffix(url, "/ping") {
-				url = strings.TrimRight(url, "/") + "/ping"
-			}
-			for j := 0; j < pingAttempts; j++ {
-				start := time.Now()
-				resp, err := httpClient.Get(url)
-				latency := time.Since(start)
-				if err != nil {
-					lastErr = err
-					logger.Warn("Failed to ping exit node %d (%s) attempt %d: %v", node.ID, url, j+1, err)
-					continue
-				}
-				resp.Body.Close()
-				totalLatency += latency
-				successes++
-			}
-			var avgLatency time.Duration
-			if successes > 0 {
-				avgLatency = totalLatency / time.Duration(successes)
-			}
-			if successes == 0 {
-				results[i] = nodeResult{Node: node, Latency: 0, Err: lastErr}
-			} else {
-				results[i] = nodeResult{Node: node, Latency: avgLatency, Err: nil}
-			}
-		}
-
-		var pingResults []ExitNodePingResult
-		for _, res := range results {
-			errMsg := ""
-			if res.Err != nil {
-				errMsg = res.Err.Error()
-			}
-			pingResults = append(pingResults, ExitNodePingResult{
-				ExitNodeID:             res.Node.ID,
-				LatencyMs:              res.Latency.Milliseconds(),
-				Weight:                 res.Node.Weight,
-				Error:                  errMsg,
-				Name:                   res.Node.Name,
-				Endpoint:               res.Node.Endpoint,
-				WasPreviouslyConnected: res.Node.WasPreviouslyConnected,
-			})
-		}
-
-		if n.connected {
-			var filteredPingResults []ExitNodePingResult
-			previouslyConnectedNodeIdx := -1
-			for i, res := range pingResults {
-				if res.WasPreviouslyConnected {
-					previouslyConnectedNodeIdx = i
-				}
-			}
-			goodNodeCount := 0
-			for i, res := range pingResults {
-				if i != previouslyConnectedNodeIdx && res.LatencyMs > 0 && res.Error == "" {
-					goodNodeCount++
-				}
-			}
-			if previouslyConnectedNodeIdx != -1 && goodNodeCount > 0 {
-				for i, res := range pingResults {
-					if i != previouslyConnectedNodeIdx {
-						filteredPingResults = append(filteredPingResults, res)
-					}
-				}
-				pingResults = filteredPingResults
-				logger.Info("Excluding previously connected exit node from ping results due to other available nodes")
-			}
-		}
+		pingResults := exitnode.PingExitNodes(exitNodes, n.config.PreferEndpoint, n.connected)
 
 		chainId := generateChainId()
 		n.pendingRegisterChainId = chainId
@@ -1010,7 +888,9 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 
 		bcChainId := generateChainId()
-		n.pendingRegisterChainId = bcChainId
+		// Pangolin intentionally does not answer backwards-compatible
+		// registrations with newt/wg/connect. Do not replace the chain ID of
+		// the real registration while its response may already be in flight.
 		if err := n.client.SendMessage(topicWGRegister, map[string]interface{}{
 			"publicKey":           n.publicKey.String(),
 			"newtVersion":         n.config.Version,

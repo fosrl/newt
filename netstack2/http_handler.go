@@ -3,9 +3,15 @@ package netstack2
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -65,6 +71,13 @@ type HTTPHandler struct {
 	// of the PEM certificate and key. Parsing a keypair is relatively expensive
 	// and the same cert is likely reused across many connections.
 	tlsCache sync.Map // map[string]*tls.Config
+
+	// fallbackTLSOnce/fallbackTLSCfg hold a lazily-generated self-signed
+	// certificate used when a rule's configured cert/key fails to parse, so
+	// that a misconfigured rule degrades to a browser cert warning instead of
+	// silently dropping every connection.
+	fallbackTLSOnce sync.Once
+	fallbackTLSCfg  *tls.Config
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +275,13 @@ func (h *HTTPHandler) getTLSConfig(rule *SubnetRule) (*tls.Config, error) {
 
 	cert, err := tls.X509KeyPair([]byte(rule.TLSCert), []byte(rule.TLSKey))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse TLS keypair: %w", err)
+		// A misconfigured rule (bad/missing PEM data) must not take the whole
+		// connection down: fall back to a self-signed cert so the handshake
+		// still completes and the request reaches handleRequest, which routes
+		// independently of the cert. Clients will see a cert warning instead
+		// of a silent connection reset.
+		logger.Warn("HTTP handler: falling back to self-signed cert for rule (invalid configured keypair): %v", err)
+		return h.getFallbackTLSConfig(), nil
 	}
 	cfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
@@ -271,6 +290,57 @@ func (h *HTTPHandler) getTLSConfig(rule *SubnetRule) (*tls.Config, error) {
 	// both will produce a valid config; the loser's work is discarded.
 	actual, _ := h.tlsCache.LoadOrStore(cacheKey, cfg)
 	return actual.(*tls.Config), nil
+}
+
+// getFallbackTLSConfig returns a *tls.Config backed by a self-signed
+// certificate, generated once and reused for the lifetime of the handler.
+func (h *HTTPHandler) getFallbackTLSConfig() *tls.Config {
+	h.fallbackTLSOnce.Do(func() {
+		cert, err := generateSelfSignedCert()
+		if err != nil {
+			// Generation of an in-memory self-signed cert has no external
+			// dependencies and should never fail; if it somehow does, there
+			// is no sensible fallback left, so surface it loudly.
+			logger.Error("HTTP handler: failed to generate fallback self-signed cert: %v", err)
+			return
+		}
+		h.fallbackTLSCfg = &tls.Config{Certificates: []tls.Certificate{cert}}
+	})
+	return h.fallbackTLSCfg
+}
+
+// generateSelfSignedCert creates a fresh, in-memory self-signed TLS
+// certificate/key pair valid for one year, used as a fallback when a rule's
+// configured certificate cannot be parsed.
+func generateSelfSignedCert() (tls.Certificate, error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("failed to generate private key: %w", err)
+	}
+
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("failed to generate serial number: %w", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject:      pkix.Name{CommonName: "newt-fallback"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().AddDate(1, 0, 0),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("failed to create certificate: %w", err)
+	}
+
+	return tls.Certificate{
+		Certificate: [][]byte{derBytes},
+		PrivateKey:  priv,
+	}, nil
 }
 
 // getProxy returns a cached *httputil.ReverseProxy for the given target,

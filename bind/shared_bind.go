@@ -683,6 +683,23 @@ func (b *SharedBind) receiveIPv4Simple(conn *net.UDPConn, bufs [][]byte, sizes [
 	}
 }
 
+// IsMagicPacket reports whether payload is one of our connectivity-test magic
+// packets (a MagicTestRequest or MagicTestResponse). These packets are meant to
+// travel directly between physical UDP sockets and must never be encapsulated by
+// WireGuard - e.g. if OS routing mistakenly sends one into a WireGuard TUN
+// interface (because the destination falls inside a routed tunnel subnet), it
+// should be dropped there rather than tunneled, which would otherwise make a
+// LAN-local endpoint test falsely appear to succeed over the tunnel.
+func IsMagicPacket(payload []byte) bool {
+	if len(payload) >= MagicTestRequestLen && bytes.HasPrefix(payload, MagicTestRequest) {
+		return true
+	}
+	if len(payload) >= MagicTestResponseLen && bytes.HasPrefix(payload, MagicTestResponse) {
+		return true
+	}
+	return false
+}
+
 // handleMagicPacket checks if the packet is a magic test packet and responds if so.
 // Returns true if the packet was a magic packet and was handled (should not be passed to WireGuard).
 func (b *SharedBind) handleMagicPacket(data []byte, addr *net.UDPAddr) bool {

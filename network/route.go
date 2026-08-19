@@ -32,6 +32,20 @@ const VPNRouteMetric = 9999
 // this to true (e.g. from a config value) before routes are added.
 var PreferLocalRoutes = false
 
+// NativeConfigDisabled, when true, skips the raw `ifconfig`/`route` subprocess
+// calls this package otherwise makes on darwin (configureDarwin,
+// removeDarwinAddress, DarwinAddRouteWithSource, DarwinRemoveRoute) while still
+// populating the JSON-facing NetworkSettings state. This must be set when the
+// TUN device's addresses/routes are instead owned by an external mechanism
+// that reconciles them independently - namely Apple's NetworkExtension
+// (NEPacketTunnelProvider.setTunnelNetworkSettings), which is the sole
+// sanctioned way to configure that virtual interface. Running our own
+// ifconfig/route commands in addition to NE applying its own settings was
+// observed to install two competing routes to the same destination (one via
+// NE's gatewayAddress-based route, one via our own `-ifa` route), so the two
+// mechanisms must be mutually exclusive rather than layered.
+var NativeConfigDisabled = false
+
 // DarwinAddRoute adds a route via the BSD routing table. Unlike Linux/Windows,
 // BSD's routing table has no per-route metric - preference between an
 // overlapping local route and this VPN route is instead resolved by
@@ -39,21 +53,42 @@ var PreferLocalRoutes = false
 // rather than replacing an existing route to the same destination, so a local
 // route is never displaced by one we add here.
 func DarwinAddRoute(destination string, gateway string, interfaceName string) error {
+	return DarwinAddRouteWithSource(destination, gateway, interfaceName, "")
+}
+
+// DarwinAddRouteWithSource is DarwinAddRoute with an explicit source address
+// (route(8) `-ifa`). This is required when the interface carries more than
+// one address (e.g. an exit node's secondary tunnel address alongside the
+// site tunnel's primary address): without `-ifa`, BSD picks a source address
+// for the route on its own - typically the interface's primary address - and
+// WireGuard's own reverse-path filtering on the remote end will silently drop
+// packets whose source doesn't match the peer's configured AllowedIPs, even
+// though the tunnel/handshake itself stays up.
+func DarwinAddRouteWithSource(destination string, gateway string, interfaceName string, sourceIP string) error {
 	if runtime.GOOS != "darwin" {
 		return nil
 	}
+	if NativeConfigDisabled {
+		return nil
+	}
 
-	var cmd *exec.Cmd
+	var args []string
 
 	if gateway != "" {
 		// Route with specific gateway
-		cmd = exec.Command("route", "-q", "-n", "add", "-inet", destination, "-gateway", gateway)
+		args = []string{"-q", "-n", "add", "-inet", destination, "-gateway", gateway}
 	} else if interfaceName != "" {
 		// Route via interface
-		cmd = exec.Command("route", "-q", "-n", "add", "-inet", destination, "-interface", interfaceName)
+		args = []string{"-q", "-n", "add", "-inet", destination, "-interface", interfaceName}
 	} else {
 		return fmt.Errorf("either gateway or interface must be specified")
 	}
+
+	if sourceIP != "" {
+		args = append(args, "-ifa", sourceIP)
+	}
+
+	cmd := exec.Command("route", args...)
 
 	logger.Info("Running command: %v", cmd)
 
@@ -67,6 +102,9 @@ func DarwinAddRoute(destination string, gateway string, interfaceName string) er
 
 func DarwinRemoveRoute(destination string) error {
 	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	if NativeConfigDisabled {
 		return nil
 	}
 
@@ -173,15 +211,30 @@ func LinuxRemoveRoute(destination string, interfaceName string) error {
 
 // addRouteForServerIP adds an OS-specific route for the server IP
 func AddRouteForServerIP(serverIP, interfaceName string) error {
+	return AddRouteForServerIPWithSource(serverIP, interfaceName, "")
+}
+
+// AddRouteForServerIPWithSource is AddRouteForServerIP with an explicit source
+// address for the darwin route (see DarwinAddRouteWithSource) - needed when
+// the interface carries more than one address, e.g. an exit node connection
+// where the interface's primary address belongs to the site tunnel rather
+// than the exit node.
+func AddRouteForServerIPWithSource(serverIP, interfaceName string, sourceIP string) error {
 	if interfaceName == "" {
 		return nil
 	}
+
+	// Populate the NetworkSettings entry (and its gatewayAddress, for the
+	// NetworkExtension source-pinning trick above) unconditionally, same as
+	// AddRoutesWithSource does for remote subnets - mobile packet-tunnel
+	// providers rely on this regardless of GOOS.
+	if err := AddRouteForNetworkConfigWithGateway(serverIP, sourceIP); err != nil {
+		return err
+	}
+
 	// TODO: does this also need to be ios?
 	if runtime.GOOS == "darwin" { // macos requires routes for each peer to be added but this messes with other platforms
-		if err := AddRouteForNetworkConfig(serverIP); err != nil {
-			return err
-		}
-		return DarwinAddRoute(serverIP, "", interfaceName)
+		return DarwinAddRouteWithSource(serverIP, "", interfaceName, sourceIP)
 	}
 	// else if runtime.GOOS == "windows" {
 	//	return WindowsAddRoute(serverIP, "", interfaceName)
@@ -193,14 +246,24 @@ func AddRouteForServerIP(serverIP, interfaceName string) error {
 
 // removeRouteForServerIP removes an OS-specific route for the server IP
 func RemoveRouteForServerIP(serverIP string, interfaceName string) error {
+	return RemoveRouteForServerIPWithSource(serverIP, interfaceName, "")
+}
+
+// RemoveRouteForServerIPWithSource is RemoveRouteForServerIP with an explicit
+// source/gateway address - must match whatever was passed to
+// AddRouteForServerIPWithSource when the route was added (see
+// RemoveRouteForNetworkConfigWithGateway).
+func RemoveRouteForServerIPWithSource(serverIP string, interfaceName string, sourceIP string) error {
 	if interfaceName == "" {
 		return nil
 	}
+
+	if err := RemoveRouteForNetworkConfigWithGateway(serverIP, sourceIP); err != nil {
+		return err
+	}
+
 	// TODO: does this also need to be ios?
 	if runtime.GOOS == "darwin" { // macos requires routes for each peer to be added but this messes with other platforms
-		if err := RemoveRouteForNetworkConfig(serverIP); err != nil {
-			return err
-		}
 		return DarwinRemoveRoute(serverIP)
 	}
 	// else if runtime.GOOS == "windows" {
@@ -212,6 +275,20 @@ func RemoveRouteForServerIP(serverIP string, interfaceName string) error {
 }
 
 func AddRouteForNetworkConfig(destination string) error {
+	return AddRouteForNetworkConfigWithGateway(destination, "")
+}
+
+// AddRouteForNetworkConfigWithGateway is AddRouteForNetworkConfig with an
+// explicit gateway address for the route entry surfaced via NetworkSettings.
+// This is consumed by mobile (iOS/macOS NetworkExtension) packet-tunnel
+// providers as NEIPv4Route.gatewayAddress. NetworkExtension gives us no
+// direct way to pin a route's source address (no equivalent of BSD's `route
+// -ifa`) - but setting gatewayAddress to one of the tunnel interface's own
+// addresses makes the OS resolve "how do I reach this gateway" recursively
+// to that address/interface pairing, which is what determines the source
+// address used for packets matching the route. This is the same underlying
+// mechanism as `route add -gateway` (see DarwinAddRoute's gateway branch).
+func AddRouteForNetworkConfigWithGateway(destination string, gateway string) error {
 	// Parse the subnet to extract IP and mask
 	_, ipNet, err := net.ParseCIDR(destination)
 	if err != nil {
@@ -222,12 +299,21 @@ func AddRouteForNetworkConfig(destination string) error {
 	mask := net.IP(ipNet.Mask).String()
 	destinationAddress := ipNet.IP.String()
 
-	AddIPv4IncludedRoute(IPv4Route{DestinationAddress: destinationAddress, SubnetMask: mask})
+	AddIPv4IncludedRoute(IPv4Route{DestinationAddress: destinationAddress, SubnetMask: mask, GatewayAddress: gateway})
 
 	return nil
 }
 
 func RemoveRouteForNetworkConfig(destination string) error {
+	return RemoveRouteForNetworkConfigWithGateway(destination, "")
+}
+
+// RemoveRouteForNetworkConfigWithGateway is RemoveRouteForNetworkConfig with
+// an explicit gateway address. This must match whatever gateway the route was
+// added with (see AddRouteForNetworkConfigWithGateway) - RemoveIPv4IncludedRoute
+// matches by full struct equality, so a mismatched gateway means the entry is
+// silently never found/removed.
+func RemoveRouteForNetworkConfigWithGateway(destination string, gateway string) error {
 	// Parse the subnet to extract IP and mask
 	_, ipNet, err := net.ParseCIDR(destination)
 	if err != nil {
@@ -238,13 +324,23 @@ func RemoveRouteForNetworkConfig(destination string) error {
 	mask := net.IP(ipNet.Mask).String()
 	destinationAddress := ipNet.IP.String()
 
-	RemoveIPv4IncludedRoute(IPv4Route{DestinationAddress: destinationAddress, SubnetMask: mask})
+	RemoveIPv4IncludedRoute(IPv4Route{DestinationAddress: destinationAddress, SubnetMask: mask, GatewayAddress: gateway})
 
 	return nil
 }
 
 // addRoutes adds routes for each subnet in RemoteSubnets
 func AddRoutes(remoteSubnets []string, interfaceName string) error {
+	return AddRoutesWithSource(remoteSubnets, interfaceName, "")
+}
+
+// AddRoutesWithSource is AddRoutes with an explicit source address for the
+// darwin routes (see DarwinAddRouteWithSource) - needed when the interface
+// carries more than one address (e.g. a site tunnel address alongside an
+// exit node's secondary address), so the routes for these subnets are pinned
+// to the address they actually belong to rather than whichever address
+// darwin would otherwise default to.
+func AddRoutesWithSource(remoteSubnets []string, interfaceName string, sourceIP string) error {
 	if len(remoteSubnets) == 0 {
 		return nil
 	}
@@ -268,7 +364,7 @@ func AddRoutes(remoteSubnets []string, interfaceName string) error {
 
 		switch runtime.GOOS {
 		case "darwin":
-			if err := DarwinAddRoute(subnet, "", interfaceName); err != nil {
+			if err := DarwinAddRouteWithSource(subnet, "", interfaceName, sourceIP); err != nil {
 				logger.Error("Failed to add Darwin route for subnet %s: %v", subnet, err)
 			}
 		case "windows":
