@@ -115,6 +115,10 @@ func FindUnusedUTUN() (string, error) {
 }
 
 func configureDarwin(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
+	if NativeConfigDisabled {
+		return nil
+	}
+
 	logger.Info("Configuring darwin interface: %s", interfaceName)
 
 	prefix, _ := ipNet.Mask.Size()
@@ -163,6 +167,104 @@ func configureLinux(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
 	// Bring up the interface
 	if err := netlink.LinkSetUp(link); err != nil {
 		return fmt.Errorf("failed to bring up interface: %v", err)
+	}
+
+	return nil
+}
+
+// AddSecondaryAddress adds an additional IP address (given as CIDR, e.g. "10.10.0.5/32")
+// to an already-configured interface. It also records the address in the shared
+// NetworkSettings (see AddIPv4Address) so mobile (iOS/Android) packet-tunnel providers
+// pick it up on their next settings poll - those platforms have no OS-level interface
+// to configure directly, so this is the only way they learn about the address.
+func AddSecondaryAddress(interfaceName string, addr string) error {
+	ip, ipNet, err := net.ParseCIDR(addr)
+	if err != nil {
+		return fmt.Errorf("invalid IP address: %v", err)
+	}
+
+	mask := net.IP(ipNet.Mask).String()
+	if err := AddIPv4Address(ip.String(), mask); err != nil {
+		return err
+	}
+
+	if interfaceName == "" {
+		return nil
+	}
+
+	switch runtime.GOOS {
+	case "linux":
+		return configureLinux(interfaceName, ip, ipNet)
+	case "darwin":
+		return configureDarwin(interfaceName, ip, ipNet)
+	case "windows":
+		return configureWindows(interfaceName, ip, ipNet)
+	default:
+		return nil
+	}
+}
+
+// RemoveSecondaryAddress removes an IP address (given as CIDR) previously added with
+// AddSecondaryAddress, including from the shared NetworkSettings used by mobile
+// packet-tunnel providers.
+func RemoveSecondaryAddress(interfaceName string, addr string) error {
+	ip, ipNet, err := net.ParseCIDR(addr)
+	if err != nil {
+		return fmt.Errorf("invalid IP address: %v", err)
+	}
+
+	RemoveIPv4Address(ip.String())
+
+	if interfaceName == "" {
+		return nil
+	}
+
+	switch runtime.GOOS {
+	case "linux":
+		return removeLinuxAddress(interfaceName, ip, ipNet)
+	case "darwin":
+		return removeDarwinAddress(interfaceName, ip, ipNet)
+	case "windows":
+		return removeWindowsAddress(interfaceName, ip, ipNet)
+	default:
+		return nil
+	}
+}
+
+func removeLinuxAddress(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
+	link, err := netlink.LinkByName(interfaceName)
+	if err != nil {
+		return fmt.Errorf("failed to get interface %s: %v", interfaceName, err)
+	}
+
+	addr := &netlink.Addr{
+		IPNet: &net.IPNet{
+			IP:   ip,
+			Mask: ipNet.Mask,
+		},
+	}
+
+	if err := netlink.AddrDel(link, addr); err != nil {
+		return fmt.Errorf("failed to remove IP address: %v", err)
+	}
+
+	return nil
+}
+
+func removeDarwinAddress(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
+	if NativeConfigDisabled {
+		return nil
+	}
+
+	prefix, _ := ipNet.Mask.Size()
+	ipStr := fmt.Sprintf("%s/%d", ip.String(), prefix)
+
+	cmd := exec.Command("/sbin/ifconfig", interfaceName, "inet", ipStr, "-alias")
+	logger.Info("Running command: %v", cmd)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ifconfig command failed: %v, output: %s", err, out)
 	}
 
 	return nil

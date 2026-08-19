@@ -10,3 +10,7 @@ import (
 func configureWindows(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
 	return fmt.Errorf("configureWindows called on non-Windows platform")
 }
+
+func removeWindowsAddress(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
+	return fmt.Errorf("removeWindowsAddress called on non-Windows platform")
+}

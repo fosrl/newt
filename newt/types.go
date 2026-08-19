@@ -2,6 +2,7 @@ package newt
 
 import (
 	wgclients "github.com/fosrl/newt/clients"
+	"github.com/fosrl/newt/exitnode"
 	"github.com/fosrl/newt/healthcheck"
 )
 
@@ -35,28 +36,14 @@ type TargetData struct {
 	Targets []string `json:"targets"`
 }
 
-type ExitNodeData struct {
-	ExitNodes []ExitNode `json:"exitNodes"`
-	ChainId   string     `json:"chainId"`
-}
-
-type ExitNode struct {
-	ID                     int     `json:"exitNodeId"`
-	Name                   string  `json:"exitNodeName"`
-	Endpoint               string  `json:"endpoint"`
-	Weight                 float64 `json:"weight"`
-	WasPreviouslyConnected bool    `json:"wasPreviouslyConnected"`
-}
-
-type ExitNodePingResult struct {
-	ExitNodeID             int     `json:"exitNodeId"`
-	LatencyMs              int64   `json:"latencyMs"`
-	Weight                 float64 `json:"weight"`
-	Error                  string  `json:"error,omitempty"`
-	Name                   string  `json:"exitNodeName"`
-	Endpoint               string  `json:"endpoint"`
-	WasPreviouslyConnected bool    `json:"wasPreviouslyConnected"`
-}
+// ExitNodeData, ExitNode and ExitNodePingResult are aliases for the shared
+// exit-node ping dance types in package exitnode, kept here so existing code
+// in this package can keep referring to them unqualified.
+type (
+	ExitNodeData       = exitnode.ExitNodeData
+	ExitNode           = exitnode.ExitNode
+	ExitNodePingResult = exitnode.ExitNodePingResult
+)
 
 type BlueprintResult struct {
 	Success bool   `json:"success"`

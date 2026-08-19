@@ -28,6 +28,15 @@ import (
 	"go.opentelemetry.io/otel"
 )
 
+// writeDeadline bounds how long a websocket write may block before it is
+// treated as a failure. Without this, a write to a TCP connection whose
+// underlying network interface has disappeared (e.g. laptop sleep/resume,
+// Wi-Fi roam) can sit buffered in the kernel for minutes without erroring.
+// This matters even with the read-deadline/pong machinery below: if the
+// WriteJSON call in sendPing blocks, execution never reaches the
+// WriteControl ping that would otherwise trigger that read-side detection.
+const writeDeadline = 10 * time.Second
+
 type Client struct {
 	conn              *websocket.Conn
 	config            *Config
@@ -257,6 +266,9 @@ func (c *Client) SendMessage(messageType string, data interface{}) error {
 
 	c.writeMux.Lock()
 	defer c.writeMux.Unlock()
+	if err := c.conn.SetWriteDeadline(time.Now().Add(writeDeadline)); err != nil {
+		return err
+	}
 	if err := c.conn.WriteJSON(msg); err != nil {
 		return err
 	}
@@ -277,6 +289,9 @@ func (c *Client) SendMessageNoLog(messageType string, data interface{}) error {
 
 	c.writeMux.Lock()
 	defer c.writeMux.Unlock()
+	if err := c.conn.SetWriteDeadline(time.Now().Add(writeDeadline)); err != nil {
+		return err
+	}
 	if err := c.conn.WriteJSON(msg); err != nil {
 		return err
 	}
@@ -760,14 +775,17 @@ func (c *Client) sendPing() {
 		c.writeMux.Unlock()
 		return
 	}
-	err := c.conn.WriteJSON(pingMsg)
+	err := c.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
+	if err == nil {
+		err = c.conn.WriteJSON(pingMsg)
+	}
 	if err == nil {
 		telemetry.IncWSMessage(c.metricsContext(), "out", "ping")
 		// Protocol-level ping: a standards-compliant server replies with a PONG,
 		// which refreshes the read deadline. This is what lets us notice a
 		// half-open connection where writes still succeed (buffered) but the
 		// peer is gone.
-		_ = c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second))
+		_ = c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeDeadline))
 	}
 	c.writeMux.Unlock()
 

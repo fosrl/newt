@@ -52,8 +52,8 @@ type versionResponse struct {
 }
 
 // ErrAutoUpdateUnsupportedInOfficialContainer indicates auto-update is not
-// available when running inside official Fossorial container images.
-var ErrAutoUpdateUnsupportedInOfficialContainer = errors.New("auto-update unsupported in official Fossorial container images")
+// available when running inside container images.
+var ErrAutoUpdateUnsupportedInOfficialContainer = errors.New("auto-update unsupported in container images")
 
 // isOfficialContainer returns true when the process is running inside an
 // official Fossorial-built container image.  The image sets

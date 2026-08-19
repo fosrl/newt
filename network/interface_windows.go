@@ -61,3 +61,35 @@ func configureWindows(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
 
 	return nil
 }
+
+func removeWindowsAddress(interfaceName string, ip net.IP, ipNet *net.IPNet) error {
+	iface, err := net.InterfaceByName(interfaceName)
+	if err != nil {
+		return fmt.Errorf("failed to get interface %s: %v", interfaceName, err)
+	}
+
+	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
+	if err != nil {
+		return fmt.Errorf("failed to get LUID for interface %s: %v", interfaceName, err)
+	}
+
+	maskBits, _ := ipNet.Mask.Size()
+
+	var addr netip.Addr
+	if ip4 := ip.To4(); ip4 != nil {
+		addr, _ = netip.AddrFromSlice(ip4)
+	} else {
+		addr, _ = netip.AddrFromSlice(ip)
+	}
+	if !addr.IsValid() {
+		return fmt.Errorf("failed to convert IP address")
+	}
+	prefix := netip.PrefixFrom(addr, maskBits)
+
+	logger.Info("Removing IP address %s from interface %s", prefix.String(), interfaceName)
+	if err := luid.DeleteIPAddress(prefix); err != nil {
+		return fmt.Errorf("failed to remove IP address: %v", err)
+	}
+
+	return nil
+}
