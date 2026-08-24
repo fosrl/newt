@@ -496,42 +496,28 @@ func (h *ICMPHandler) handleICMPPacket(id stack.TransportEndpointID, pkt *stack.
 	logger.Info("ICMP Handler: Echo Request from %s to %s (ident=%d, seq=%d)",
 		srcIP, dstIP, icmpHdr.Ident(), icmpHdr.Sequence())
 
-	// Convert to netip.Addr for subnet matching
-	srcAddr, err := netip.ParseAddr(srcIP)
-	if err != nil {
-		logger.Debug("ICMP Handler: Failed to parse source IP %s: %v", srcIP, err)
-		return false
-	}
-	dstAddr, err := netip.ParseAddr(dstIP)
-	if err != nil {
-		logger.Debug("ICMP Handler: Failed to parse dest IP %s: %v", dstIP, err)
-		return false
-	}
-
-	// Check subnet rules (use port 0 for ICMP since it doesn't have ports)
 	if h.proxyHandler == nil {
 		logger.Debug("ICMP Handler: No proxy handler configured")
 		return false
 	}
 
-	matchedRule := h.proxyHandler.subnetLookup.Match(srcAddr, dstAddr, 0, header.ICMPv4ProtocolNumber)
-	if matchedRule == nil {
-		logger.Debug("ICMP Handler: No matching subnet rule for %s -> %s", srcIP, dstIP)
-		return false
-	}
-
-	logger.Info("ICMP Handler: Matched subnet rule for %s -> %s", srcIP, dstIP)
-
-	// Determine actual destination (with possible rewrite)
+	// This packet only reached the proxy stack because it already matched a
+	// subnet rule during injection (ProxyHandler.HandleIncomingPacket), so
+	// there's no need to re-run subnet matching here for permission - doing
+	// so used to re-derive the DNAT target from a *fresh* rule lookup keyed
+	// on dstIP, but dstIP here is ambiguous: for a loopback rewrite target
+	// it's still the original (unrewritten) destination, while for a
+	// non-loopback rewrite target it's already the post-DNAT address. In
+	// the latter case (and always for a domain-name RewriteTo, which has no
+	// subnet rule of its own for the resolved IP) that re-lookup could find
+	// no rule and silently drop the ping even though the connection is
+	// legitimately allowed. Instead, resolve the same way the TCP/UDP
+	// handlers do: via destRewriteTable, which HandleIncomingPacket already
+	// populated for this exact flow keyed by the original destination.
 	actualDstIP := dstIP
-	if matchedRule.RewriteTo != "" {
-		resolvedAddr, err := h.proxyHandler.resolveRewriteAddress(matchedRule.RewriteTo)
-		if err != nil {
-			logger.Info("ICMP Handler: Failed to resolve rewrite address %s: %v", matchedRule.RewriteTo, err)
-		} else {
-			actualDstIP = resolvedAddr.String()
-			logger.Info("ICMP Handler: Using rewritten destination %s (original: %s)", actualDstIP, dstIP)
-		}
+	if rewrittenAddr, ok := h.proxyHandler.LookupDestinationRewrite(srcIP, dstIP, 0, uint8(header.ICMPv4ProtocolNumber)); ok {
+		actualDstIP = rewrittenAddr.String()
+		logger.Info("ICMP Handler: Using rewritten destination %s (original: %s)", actualDstIP, dstIP)
 	}
 
 	// Get the full ICMP payload (including the data after the header)
