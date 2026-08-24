@@ -832,16 +832,11 @@ func (s *WireGuardService) syncTargets(desiredTargets []Target) error {
 func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 	s.mu.Lock()
 
-	// split off the cidr from the IP address
-	parts := strings.Split(wgconfig.IpAddress, "/")
-	if len(parts) != 2 {
+	interfaceAddress, tunnelIP, err := normalizeInterfaceAddress(wgconfig.IpAddress)
+	if err != nil {
 		s.mu.Unlock()
-		return fmt.Errorf("invalid IP address format: %s", wgconfig.IpAddress)
+		return err
 	}
-	// Parse the IP address and CIDR mask
-	tunnelIP := netip.MustParseAddr(parts[0])
-
-	var err error
 
 	if s.useNativeInterface {
 		// Create native TUN device
@@ -917,7 +912,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 		}
 
 		// Configure the network interface with IP address
-		if err := network.ConfigureInterface(interfaceName, wgconfig.IpAddress, s.mtu); err != nil {
+		if err := network.ConfigureInterface(interfaceName, interfaceAddress, s.mtu); err != nil {
 			s.mu.Unlock()
 			return fmt.Errorf("failed to configure interface: %v", err)
 		}
