@@ -342,6 +342,17 @@ func TestParseTargetStringNetDialCompatibility(t *testing.T) {
 	}
 }
 
+// TestPingNilNetstackReturnsError is the regression guard for fosrl/newt#439:
+// a still-running ping goroutine calling ping() with a nil *netstack.Net
+// (after closeWgTunnel clears it during teardown/reconnect) must return an
+// error instead of panicking with a nil pointer dereference.
+func TestPingNilNetstackReturnsError(t *testing.T) {
+	_, err := ping(nil, "127.0.0.1", 100*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected error when tnet is nil, got nil")
+	}
+}
+
 // TestShouldFireRecovery is the regression guard for the broken trigger gate
 // that prevented data-plane recovery from ever firing under default settings
 // (fosrl/newt#284, #310, pangolin#1004).
