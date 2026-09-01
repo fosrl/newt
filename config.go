@@ -53,11 +53,12 @@ type fileSettings struct {
 	MTU           *int    `json:"mtu"`
 	Port          *int    `json:"port"`
 
-	UseNativeInterface      *bool   `json:"native"`
-	UseNativeMainInterface  *bool   `json:"nativeMain"`
-	NativeMainInterfaceName *string `json:"interfaceMain"`
-	NoCloud                 *bool   `json:"noCloud"`
-	PreferEndpoint          *string `json:"preferEndpoint"`
+	UseNativeInterface      *bool    `json:"native"`
+	UseNativeMainInterface  *bool    `json:"nativeMain"`
+	NativeMainInterfaceName *string  `json:"interfaceMain"`
+	NoCloud                 *bool    `json:"noCloud"`
+	PreferEndpoint          *string  `json:"preferEndpoint"`
+	LocalEndpointInterfaces []string `json:"localEndpointInterfaces"`
 
 	PingInterval        *string `json:"pingInterval"`
 	PingTimeout         *string `json:"pingTimeout"`
@@ -294,6 +295,10 @@ func loadNewtConfig() newtpkg.Config {
 		applyStr(&cfg.NativeMainInterfaceName, fileCfg.NativeMainInterfaceName, "interface-main", sources, sourceFile)
 		applyBool(&cfg.NoCloud, fileCfg.NoCloud, "no-cloud", sources, sourceFile)
 		applyStr(&cfg.PreferEndpoint, fileCfg.PreferEndpoint, "prefer-endpoint", sources, sourceFile)
+		if len(fileCfg.LocalEndpointInterfaces) > 0 {
+			cfg.LocalEndpointInterfaces = fileCfg.LocalEndpointInterfaces
+			sources["local-endpoint-interfaces"] = string(sourceFile)
+		}
 
 		applyStr(&pingIntervalStr, fileCfg.PingInterval, "ping-interval", sources, sourceFile)
 		applyStr(&pingTimeoutStr, fileCfg.PingTimeout, "ping-timeout", sources, sourceFile)
@@ -351,6 +356,16 @@ func loadNewtConfig() newtpkg.Config {
 	applyEnvBool(&cfg.UseNativeMainInterface, "USE_NATIVE_MAIN_INTERFACE", "native-main", sources)
 	applyEnvStr(&cfg.NativeMainInterfaceName, "INTERFACE_MAIN", "interface-main", sources)
 	applyEnvBool(&cfg.NoCloud, "NO_CLOUD", "no-cloud", sources)
+	if v := os.Getenv("LOCAL_ENDPOINT_INTERFACES"); v != "" {
+		var names []string
+		for _, n := range strings.Split(v, ",") {
+			if t := strings.TrimSpace(n); t != "" {
+				names = append(names, t)
+			}
+		}
+		cfg.LocalEndpointInterfaces = names
+		sources["local-endpoint-interfaces"] = string(sourceEnv)
+	}
 
 	applyEnvStr(&pingIntervalStr, "PING_INTERVAL", "ping-interval", sources)
 	applyEnvStr(&pingTimeoutStr, "PING_TIMEOUT", "ping-timeout", sources)
@@ -416,6 +431,8 @@ func loadNewtConfig() newtpkg.Config {
 	origTLSCert, origTLSKey, origDockerEnforce := cfg.TLSClientCert, cfg.TLSClientKey, dockerEnforceStr
 	origHealthFile, origBlueprintFile, origProvBlueprintFile := cfg.HealthFile, cfg.BlueprintFile, cfg.ProvisioningBlueprintFile
 	origNoCloud, origTLSPrivateKey := cfg.NoCloud, cfg.TLSPrivateKey
+	localEndpointInterfacesStr := strings.Join(cfg.LocalEndpointInterfaces, ",")
+	origLocalEndpointInterfaces := localEndpointInterfacesStr
 	origMetrics, origOTLP, origAdminAddr := cfg.MetricsEnabled, cfg.OTLPEnabled, cfg.AdminAddr
 	origMetricsAsync, origPprof, origRegion := cfg.MetricsAsyncBytes, cfg.PprofEnabled, cfg.Region
 	origADKey, origADPrincipals, origADCACert := cfg.AuthDaemonKey, cfg.AuthDaemonPrincipalsFile, cfg.AuthDaemonCACertPath
@@ -442,6 +459,7 @@ func loadNewtConfig() newtpkg.Config {
 	flag.StringVar(&pingTimeoutStr, "ping-timeout", pingTimeoutStr, "Timeout for each ping (default 7s)")
 	flag.StringVar(&udpProxyIdleTimeoutStr, "udp-proxy-idle-timeout", udpProxyIdleTimeoutStr, "Idle timeout for UDP proxied client flows before cleanup")
 	flag.StringVar(&cfg.PreferEndpoint, "prefer-endpoint", cfg.PreferEndpoint, "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
+	flag.StringVar(&localEndpointInterfacesStr, "local-endpoint-interfaces", localEndpointInterfacesStr, "Comma-separated list of network interface names to restrict reported local endpoints to (default: report all interfaces)")
 	flag.StringVar(&cfg.ProvisioningKey, "provisioning-key", cfg.ProvisioningKey, "One-time provisioning key used to obtain a newt ID and secret from the server")
 	flag.StringVar(&cfg.NewtName, "name", cfg.NewtName, "Name for the site created during provisioning (supports {{env.VAR}} interpolation)")
 	flag.StringVar(&cfg.ConfigFile, "config-file", configPath, "Path to config file (overrides CONFIG_FILE env var and default location)")
@@ -517,6 +535,7 @@ func loadNewtConfig() newtpkg.Config {
 	markCLI("blueprint-file", cfg.BlueprintFile != origBlueprintFile)
 	markCLI("provisioning-blueprint-file", cfg.ProvisioningBlueprintFile != origProvBlueprintFile)
 	markCLI("no-cloud", cfg.NoCloud != origNoCloud)
+	markCLI("local-endpoint-interfaces", localEndpointInterfacesStr != origLocalEndpointInterfaces)
 	markCLI("metrics", cfg.MetricsEnabled != origMetrics)
 	markCLI("otlp", cfg.OTLPEnabled != origOTLP)
 	markCLI("metrics-admin-addr", cfg.AdminAddr != origAdminAddr)
@@ -538,7 +557,7 @@ func loadNewtConfig() newtpkg.Config {
 	}
 
 	if *showConfig {
-		printShowConfig(cfg, sources, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr, dockerEnforceStr)
+		printShowConfig(cfg, sources, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr, dockerEnforceStr, localEndpointInterfacesStr)
 		os.Exit(0)
 	}
 
@@ -552,6 +571,19 @@ func loadNewtConfig() newtpkg.Config {
 		} else {
 			cfg.Port = uint16(portInt)
 		}
+	}
+
+	// Parse local endpoint interface allowlist (after flag.Parse so CLI takes effect)
+	if localEndpointInterfacesStr != "" {
+		var names []string
+		for _, n := range strings.Split(localEndpointInterfacesStr, ",") {
+			if t := strings.TrimSpace(n); t != "" {
+				names = append(names, t)
+			}
+		}
+		cfg.LocalEndpointInterfaces = names
+	} else {
+		cfg.LocalEndpointInterfaces = nil
 	}
 
 	// Parse MTU
@@ -581,7 +613,7 @@ func loadNewtConfig() newtpkg.Config {
 }
 
 // printShowConfig prints the resolved configuration and the source of each value
-func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr, dockerEnforceStr string) {
+func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr, dockerEnforceStr, localEndpointInterfacesStr string) {
 	getSource := func(key string) string {
 		if s, ok := sources[key]; ok && s != "" {
 			return s
@@ -629,6 +661,7 @@ func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, 
 	fmt.Printf("  native-main      = %v [%s]\n", cfg.UseNativeMainInterface, getSource("native-main"))
 	fmt.Printf("  interface-main   = %s [%s]\n", cfg.NativeMainInterfaceName, getSource("interface-main"))
 	fmt.Printf("  no-cloud         = %v [%s]\n", cfg.NoCloud, getSource("no-cloud"))
+	fmt.Printf("  local-endpoint-interfaces = %s [%s]\n", mask("local-endpoint-interfaces", localEndpointInterfacesStr), getSource("local-endpoint-interfaces"))
 
 	fmt.Println("\nLogging:")
 	fmt.Printf("  log-level        = %s [%s]\n", cfg.LogLevel, getSource("log-level"))
