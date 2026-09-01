@@ -98,13 +98,25 @@ func interfaceScore(name string) int {
 // name of our own WireGuard/TUN interface, whose address is the tunnel IP
 // and not a useful endpoint to advertise.
 //
+// allowedInterfaces, if non-empty, restricts the result to only those
+// interface names (an allowlist), letting callers report a single known-good
+// interface instead of every candidate on the host.
+//
 // If interfaces cannot be enumerated (e.g. insufficient OS permissions),
 // an info message is logged and an empty slice is returned.
-func GetLocalEndpoints(port uint16, excludeInterface string) []string {
+func GetLocalEndpoints(port uint16, excludeInterface string, allowedInterfaces []string) []string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		logger.Info("Unable to enumerate local network interfaces, localEndpoints will not be reported: %v", err)
 		return nil
+	}
+
+	var allowedSet map[string]struct{}
+	if len(allowedInterfaces) > 0 {
+		allowedSet = make(map[string]struct{}, len(allowedInterfaces))
+		for _, name := range allowedInterfaces {
+			allowedSet[name] = struct{}{}
+		}
 	}
 
 	type candidate struct {
@@ -116,6 +128,11 @@ func GetLocalEndpoints(port uint16, excludeInterface string) []string {
 	for _, iface := range ifaces {
 		if excludeInterface != "" && iface.Name == excludeInterface {
 			continue
+		}
+		if allowedSet != nil {
+			if _, ok := allowedSet[iface.Name]; !ok {
+				continue
+			}
 		}
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue

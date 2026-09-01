@@ -29,6 +29,7 @@ type Config struct {
 	NativeMainInterfaceName string
 	NoCloud                 bool
 	PreferEndpoint          string
+	LocalEndpointInterfaces []string
 
 	// Timing
 	PingInterval        time.Duration

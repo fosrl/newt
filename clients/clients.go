@@ -98,20 +98,21 @@ type PeerReading struct {
 }
 
 type WireGuardService struct {
-	interfaceName        string
-	mtu                  int
-	client               *websocket.Client
-	config               WgConfig
-	key                  wgtypes.Key
-	newtId               string
-	lastReadings         map[string]PeerReading
-	mu                   sync.Mutex
-	Port                 uint16
-	host                 string
-	serverPubKey         string
-	token                string
-	stopGetConfig        func()
-	pendingConfigChainId string
+	interfaceName           string
+	localEndpointInterfaces []string
+	mtu                     int
+	client                  *websocket.Client
+	config                  WgConfig
+	key                     wgtypes.Key
+	newtId                  string
+	lastReadings            map[string]PeerReading
+	mu                      sync.Mutex
+	Port                    uint16
+	host                    string
+	serverPubKey            string
+	token                   string
+	stopGetConfig           func()
+	pendingConfigChainId    string
 	// Netstack fields
 	tun    tun.Device
 	tnet   *netstack2.Net
@@ -154,7 +155,7 @@ func generateChainId() string {
 	return hex.EncodeToString(b)
 }
 
-func NewWireGuardService(interfaceName string, port uint16, mtu int, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool) (*WireGuardService, error) {
+func NewWireGuardService(interfaceName string, port uint16, mtu int, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool, localEndpointInterfaces []string) (*WireGuardService, error) {
 	key, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %v", err)
@@ -195,17 +196,18 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 	dnsAddrs := []netip.Addr{netip.MustParseAddr(dns)}
 
 	service := &WireGuardService{
-		interfaceName:      interfaceName,
-		mtu:                mtu,
-		client:             wsClient,
-		key:                key,
-		newtId:             newtId,
-		host:               host,
-		lastReadings:       make(map[string]PeerReading),
-		Port:               port,
-		dns:                dnsAddrs,
-		sharedBind:         sharedBind,
-		useNativeInterface: useNativeInterface,
+		interfaceName:           interfaceName,
+		localEndpointInterfaces: localEndpointInterfaces,
+		mtu:                     mtu,
+		client:                  wsClient,
+		key:                     key,
+		newtId:                  newtId,
+		host:                    host,
+		lastReadings:            make(map[string]PeerReading),
+		Port:                    port,
+		dns:                     dnsAddrs,
+		sharedBind:              sharedBind,
+		useNativeInterface:      useNativeInterface,
 	}
 
 	// Create the holepunch manager
@@ -532,7 +534,7 @@ func (s *WireGuardService) LoadRemoteConfig() error {
 		"publicKey":      s.key.PublicKey().String(),
 		"port":           s.Port,
 		"chainId":        chainId,
-		"localEndpoints": network.GetLocalEndpoints(s.Port, s.interfaceName),
+		"localEndpoints": network.GetLocalEndpoints(s.Port, s.interfaceName, s.localEndpointInterfaces),
 	}, 2*time.Second)
 
 	logger.Debug("Requesting WireGuard configuration from remote server")
