@@ -11,9 +11,47 @@ func clearNewtEnv(t *testing.T) {
 	for _, k := range []string{
 		"PANGOLIN_ENDPOINT", "NEWT_ID", "NEWT_SECRET", "DNS", "LOG_LEVEL",
 		"MTU", "CONFIG_FILE", "NEWT_PROVISIONING_KEY", "NEWT_NAME",
-		"DISABLE_SSH", "DISABLE_CLIENTS",
+		"DISABLE_SSH", "DISABLE_CLIENTS", "SITE_ID", "SITE_SECRET",
 	} {
 		t.Setenv(k, "")
+	}
+}
+
+func TestLoadNewtConfig_SiteIDSecretEnvAliases(t *testing.T) {
+	clearNewtEnv(t)
+	t.Setenv("SITE_ID", "from-site-id")
+	t.Setenv("SITE_SECRET", "from-site-secret")
+
+	cfg, err := Load(Options{Args: []string{"--config-file", filepath.Join(t.TempDir(), "missing.json")}})
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.ID != "from-site-id" {
+		t.Errorf("expected id from SITE_ID, got %q", cfg.ID)
+	}
+	if cfg.Secret != "from-site-secret" {
+		t.Errorf("expected secret from SITE_SECRET, got %q", cfg.Secret)
+	}
+}
+
+func TestLoadNewtConfig_NewtIDSecretWinOverSiteAliases(t *testing.T) {
+	clearNewtEnv(t)
+	t.Setenv("SITE_ID", "from-site-id")
+	t.Setenv("SITE_SECRET", "from-site-secret")
+	t.Setenv("NEWT_ID", "from-newt-id")
+	t.Setenv("NEWT_SECRET", "from-newt-secret")
+
+	cfg, err := Load(Options{Args: []string{"--config-file", filepath.Join(t.TempDir(), "missing.json")}})
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.ID != "from-newt-id" {
+		t.Errorf("expected NEWT_ID to win over SITE_ID, got %q", cfg.ID)
+	}
+	if cfg.Secret != "from-newt-secret" {
+		t.Errorf("expected NEWT_SECRET to win over SITE_SECRET, got %q", cfg.Secret)
 	}
 }
 
