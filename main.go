@@ -16,6 +16,7 @@ import (
 	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
 	newtpkg "github.com/fosrl/newt/newt"
+	"github.com/fosrl/newt/newtconfig"
 	"github.com/fosrl/newt/updates"
 	"github.com/fosrl/newt/websocket"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -62,16 +63,19 @@ func main() {
 func runNewtMain(ctx context.Context) {
 	logger.Init(nil)
 
-	cfg := loadNewtConfig()
+	cfg, err := newtconfig.Load(newtconfig.Options{
+		Args:     os.Args[1:],
+		Version:  newtVersion,
+		Platform: newtPlatform,
+	})
+	if err != nil {
+		logger.Fatal("Configuration error: %v", err)
+	}
 
 	if cfg.UseNativeMainInterface {
 		if err := permissions.CheckNativeInterfacePermissions(); err != nil {
 			logger.Fatal("Insufficient permissions for native main tunnel interface: %v", err)
 		}
-	}
-
-	if err := validateTLSConfig(cfg); err != nil {
-		logger.Fatal("TLS configuration error: %v", err)
 	}
 
 	logger.Debug("Endpoint: %v", cfg.Endpoint)

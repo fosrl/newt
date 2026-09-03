@@ -13,6 +13,7 @@ import (
 	wgclients "github.com/fosrl/newt/clients"
 	"github.com/fosrl/newt/docker"
 	"github.com/fosrl/newt/healthcheck"
+	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/nativessh"
 	"github.com/fosrl/newt/proxy"
@@ -81,6 +82,14 @@ type Newt struct {
 // Callers should invoke Start after any additional setup (telemetry, etc.).
 func Init(ctx context.Context, cfg Config) (*Newt, error) {
 	n := &Newt{config: cfg}
+
+	// Metric-recording calls throughout the websocket/proxy/tunnel code are
+	// unconditional, not gated on cfg.MetricsEnabled, so the instruments
+	// must exist even when the caller never sets up telemetry exporters
+	// (e.g. an embedder that only calls Init/Start, like the Pangolin CLI).
+	if err := telemetry.EnsureInstruments(); err != nil {
+		return nil, fmt.Errorf("failed to initialize telemetry instruments: %w", err)
+	}
 
 	n.loggerLevel = util.ParseLogLevel(cfg.LogLevel)
 

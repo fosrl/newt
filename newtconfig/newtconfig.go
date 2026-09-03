@@ -1,4 +1,10 @@
-package main
+// Package newtconfig resolves Newt's runtime configuration (CLI flags, env
+// vars, and config file) into a newt.Config. It is the same logic used by
+// the newt binary's entrypoint, factored out so other programs (such as the
+// Pangolin CLI, which embeds Newt as a library) can load configuration the
+// exact same way, from an explicit argument list rather than the process's
+// global os.Args/flag.CommandLine.
+package newtconfig
 
 import (
 	"encoding/json"
@@ -94,8 +100,9 @@ type fileSettings struct {
 
 // resolveConfigFilePath determines the settings/credentials file path using
 // the same precedence as every other setting: CLI > env > OS default.
-// It has to run before flag.Parse (which needs the file-resolved defaults),
-// so it scans os.Args directly instead of using the flag package.
+// It has to run before the flag set is parsed (which needs the
+// file-resolved defaults), so it scans args directly instead of using the
+// flag package.
 func resolveConfigFilePath(args []string) string {
 	for i, a := range args {
 		if a == "--config-file" || a == "-config-file" {
@@ -235,14 +242,28 @@ func parseDurationEnvOrFlag(s string, defaultVal time.Duration, label string) ti
 	return d
 }
 
-// loadNewtConfig resolves configuration with priority cli > env > file >
-// default, then returns a populated newtpkg.Config. This function calls
-// flag.Parse internally and will exit the process if --version or
-// --show-config is passed.
-func loadNewtConfig() newtpkg.Config {
+// Options controls how Load resolves configuration.
+type Options struct {
+	// Args are the newt command-line arguments, i.e. os.Args[1:] when newt
+	// is run as its own binary, or whatever arguments were passed to a
+	// subcommand that embeds newt as a library.
+	Args []string
+	// Version and Platform populate the resulting Config's build info and
+	// are printed by --version.
+	Version  string
+	Platform string
+}
+
+// Load resolves configuration with priority cli > env > file > default,
+// validates it (e.g. TLS flag consistency and referenced file existence),
+// and returns a populated newtpkg.Config. This function parses Args with a
+// dedicated flag.FlagSet (safe to call more than once per process) and will
+// exit the process if --version or --show-config is passed, matching the
+// newt binary's own CLI behavior exactly.
+func Load(opts Options) (newtpkg.Config, error) {
 	sources := make(map[string]string)
 
-	configPath := resolveConfigFilePath(os.Args[1:])
+	configPath := resolveConfigFilePath(opts.Args)
 	fileCfg, err := loadFileSettings(configPath)
 	if err != nil {
 		logger.Fatal("Failed to load config file: %v", err)
@@ -250,8 +271,8 @@ func loadNewtConfig() newtpkg.Config {
 
 	// ---- defaults ----
 	cfg := newtpkg.Config{
-		Version:  newtVersion,
-		Platform: newtPlatform,
+		Version:  opts.Version,
+		Platform: opts.Platform,
 
 		DNS:                      "9.9.9.9",
 		LogLevel:                 "INFO",
@@ -438,60 +459,62 @@ func loadNewtConfig() newtpkg.Config {
 	origADKey, origADPrincipals, origADCACert := cfg.AuthDaemonKey, cfg.AuthDaemonPrincipalsFile, cfg.AuthDaemonCACertPath
 	origADRandomPass := cfg.AuthDaemonGenerateRandomPassword
 
-	flag.StringVar(&cfg.Endpoint, "endpoint", cfg.Endpoint, "Endpoint of your pangolin server")
-	flag.StringVar(&cfg.ID, "id", cfg.ID, "Newt ID")
-	flag.StringVar(&cfg.Secret, "secret", cfg.Secret, "Newt secret")
-	flag.StringVar(&mtuStr, "mtu", mtuStr, "MTU to use")
-	flag.StringVar(&cfg.DNS, "dns", cfg.DNS, "DNS server to use")
-	flag.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (DEBUG, INFO, WARN, ERROR, FATAL)")
-	flag.StringVar(&cfg.UpdownScript, "updown", cfg.UpdownScript, "Path to updown script to be called when targets are added or removed")
-	flag.StringVar(&cfg.InterfaceName, "interface", cfg.InterfaceName, "Name of the WireGuard interface")
-	flag.StringVar(&portStr, "port", portStr, "Port for client WireGuard interface")
-	flag.BoolVar(&cfg.UseNativeInterface, "native", cfg.UseNativeInterface, "Use native WireGuard interface for client tunnels")
-	flag.BoolVar(&cfg.UseNativeMainInterface, "native-main", cfg.UseNativeMainInterface, "Use native WireGuard interface for the main tunnel (instead of netstack)")
+	fs := flag.NewFlagSet("newt", flag.ExitOnError)
+
+	fs.StringVar(&cfg.Endpoint, "endpoint", cfg.Endpoint, "Endpoint of your pangolin server")
+	fs.StringVar(&cfg.ID, "id", cfg.ID, "Newt ID")
+	fs.StringVar(&cfg.Secret, "secret", cfg.Secret, "Newt secret")
+	fs.StringVar(&mtuStr, "mtu", mtuStr, "MTU to use")
+	fs.StringVar(&cfg.DNS, "dns", cfg.DNS, "DNS server to use")
+	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level (DEBUG, INFO, WARN, ERROR, FATAL)")
+	fs.StringVar(&cfg.UpdownScript, "updown", cfg.UpdownScript, "Path to updown script to be called when targets are added or removed")
+	fs.StringVar(&cfg.InterfaceName, "interface", cfg.InterfaceName, "Name of the WireGuard interface")
+	fs.StringVar(&portStr, "port", portStr, "Port for client WireGuard interface")
+	fs.BoolVar(&cfg.UseNativeInterface, "native", cfg.UseNativeInterface, "Use native WireGuard interface for client tunnels")
+	fs.BoolVar(&cfg.UseNativeMainInterface, "native-main", cfg.UseNativeMainInterface, "Use native WireGuard interface for the main tunnel (instead of netstack)")
 	// making this the same as above should prevent them from running together
-	flag.StringVar(&cfg.NativeMainInterfaceName, "interface-main", cfg.NativeMainInterfaceName, "Name of the native main tunnel WireGuard interface (used with --native-main)")
-	flag.BoolVar(&cfg.DisableClients, "disable-clients", cfg.DisableClients, "Disable clients on the WireGuard interface")
-	flag.BoolVar(&cfg.DisableSSH, "disable-ssh", cfg.DisableSSH, "Disable SSH auth daemon and native SSH mode (remote auth daemon still works)")
-	flag.BoolVar(&cfg.EnforceHealthcheckCert, "enforce-hc-cert", cfg.EnforceHealthcheckCert, "Enforce certificate validation for health checks (default: false, accepts any cert)")
-	flag.StringVar(&cfg.DockerSocket, "docker-socket", cfg.DockerSocket, "Path or address to Docker socket (typically unix:///var/run/docker.sock)")
-	flag.StringVar(&pingIntervalStr, "ping-interval", pingIntervalStr, "Interval for pinging the server (default 15s)")
-	flag.StringVar(&pingTimeoutStr, "ping-timeout", pingTimeoutStr, "Timeout for each ping (default 7s)")
-	flag.StringVar(&udpProxyIdleTimeoutStr, "udp-proxy-idle-timeout", udpProxyIdleTimeoutStr, "Idle timeout for UDP proxied client flows before cleanup")
-	flag.StringVar(&cfg.PreferEndpoint, "prefer-endpoint", cfg.PreferEndpoint, "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
-	flag.StringVar(&localEndpointInterfacesStr, "local-endpoint-interfaces", localEndpointInterfacesStr, "Comma-separated list of network interface names to restrict reported local endpoints to (default: report all interfaces)")
-	flag.StringVar(&cfg.ProvisioningKey, "provisioning-key", cfg.ProvisioningKey, "One-time provisioning key used to obtain a newt ID and secret from the server")
-	flag.StringVar(&cfg.NewtName, "name", cfg.NewtName, "Name for the site created during provisioning (supports {{env.VAR}} interpolation)")
-	flag.StringVar(&cfg.ConfigFile, "config-file", configPath, "Path to config file (overrides CONFIG_FILE env var and default location)")
-	flag.StringVar(&cfg.TLSClientCert, "tls-client-cert-file", cfg.TLSClientCert, "Path to client certificate file (PEM/DER format)")
-	flag.StringVar(&cfg.TLSClientKey, "tls-client-key", cfg.TLSClientKey, "Path to client private key file (PEM/DER format)")
+	fs.StringVar(&cfg.NativeMainInterfaceName, "interface-main", cfg.NativeMainInterfaceName, "Name of the native main tunnel WireGuard interface (used with --native-main)")
+	fs.BoolVar(&cfg.DisableClients, "disable-clients", cfg.DisableClients, "Disable clients on the WireGuard interface")
+	fs.BoolVar(&cfg.DisableSSH, "disable-ssh", cfg.DisableSSH, "Disable SSH auth daemon and native SSH mode (remote auth daemon still works)")
+	fs.BoolVar(&cfg.EnforceHealthcheckCert, "enforce-hc-cert", cfg.EnforceHealthcheckCert, "Enforce certificate validation for health checks (default: false, accepts any cert)")
+	fs.StringVar(&cfg.DockerSocket, "docker-socket", cfg.DockerSocket, "Path or address to Docker socket (typically unix:///var/run/docker.sock)")
+	fs.StringVar(&pingIntervalStr, "ping-interval", pingIntervalStr, "Interval for pinging the server (default 15s)")
+	fs.StringVar(&pingTimeoutStr, "ping-timeout", pingTimeoutStr, "Timeout for each ping (default 7s)")
+	fs.StringVar(&udpProxyIdleTimeoutStr, "udp-proxy-idle-timeout", udpProxyIdleTimeoutStr, "Idle timeout for UDP proxied client flows before cleanup")
+	fs.StringVar(&cfg.PreferEndpoint, "prefer-endpoint", cfg.PreferEndpoint, "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
+	fs.StringVar(&localEndpointInterfacesStr, "local-endpoint-interfaces", localEndpointInterfacesStr, "Comma-separated list of network interface names to restrict reported local endpoints to (default: report all interfaces)")
+	fs.StringVar(&cfg.ProvisioningKey, "provisioning-key", cfg.ProvisioningKey, "One-time provisioning key used to obtain a newt ID and secret from the server")
+	fs.StringVar(&cfg.NewtName, "name", cfg.NewtName, "Name for the site created during provisioning (supports {{env.VAR}} interpolation)")
+	fs.StringVar(&cfg.ConfigFile, "config-file", configPath, "Path to config file (overrides CONFIG_FILE env var and default location)")
+	fs.StringVar(&cfg.TLSClientCert, "tls-client-cert-file", cfg.TLSClientCert, "Path to client certificate file (PEM/DER format)")
+	fs.StringVar(&cfg.TLSClientKey, "tls-client-key", cfg.TLSClientKey, "Path to client private key file (PEM/DER format)")
 	// Backward-compat dummy flag (auth daemon is always enabled now)
-	flag.Bool("auth-daemon", false, "Enable auth daemon mode (deprecated, always enabled)")
+	fs.Bool("auth-daemon", false, "Enable auth daemon mode (deprecated, always enabled)")
 
 	var tlsClientCAsFlag stringSlice
-	flag.Var(&tlsClientCAsFlag, "tls-client-ca", "Path to CA certificate file for validating remote certificates (can be specified multiple times)")
+	fs.Var(&tlsClientCAsFlag, "tls-client-ca", "Path to CA certificate file for validating remote certificates (can be specified multiple times)")
 
-	flag.StringVar(&cfg.TLSPrivateKey, "tls-client-cert", cfg.TLSPrivateKey, "Path to client certificate (PKCS12 format) - DEPRECATED: use --tls-client-cert-file and --tls-client-key instead")
-	flag.StringVar(&dockerEnforceStr, "docker-enforce-network-validation", dockerEnforceStr, "Enforce validation of container on newt network (true or false)")
-	flag.StringVar(&cfg.HealthFile, "health-file", cfg.HealthFile, "Path to health file (if unset, health file won't be written)")
-	flag.StringVar(&cfg.BlueprintFile, "blueprint-file", cfg.BlueprintFile, "Path to blueprint file (if unset, no blueprint will be applied)")
-	flag.StringVar(&cfg.ProvisioningBlueprintFile, "provisioning-blueprint-file", cfg.ProvisioningBlueprintFile, "Path to blueprint file applied once after a provisioning credential exchange (if unset, no provisioning blueprint will be applied)")
-	flag.BoolVar(&cfg.NoCloud, "no-cloud", cfg.NoCloud, "Disable cloud failover")
-	flag.BoolVar(&cfg.MetricsEnabled, "metrics", cfg.MetricsEnabled, "Enable Prometheus metrics exporter")
-	flag.BoolVar(&cfg.OTLPEnabled, "otlp", cfg.OTLPEnabled, "Enable OTLP exporters (metrics/traces) to OTEL_EXPORTER_OTLP_ENDPOINT")
-	flag.StringVar(&cfg.AdminAddr, "metrics-admin-addr", cfg.AdminAddr, "Admin/metrics bind address")
-	flag.BoolVar(&cfg.MetricsAsyncBytes, "metrics-async-bytes", cfg.MetricsAsyncBytes, "Enable async bytes counting (background flush; lower hot path overhead)")
-	flag.BoolVar(&cfg.PprofEnabled, "pprof", cfg.PprofEnabled, "Enable pprof debug endpoints on admin server")
-	flag.StringVar(&cfg.Region, "region", cfg.Region, "Optional region resource attribute (also NEWT_REGION)")
-	flag.StringVar(&cfg.AuthDaemonKey, "ad-pre-shared-key", cfg.AuthDaemonKey, "Pre-shared key for auth daemon authentication")
-	flag.StringVar(&cfg.AuthDaemonPrincipalsFile, "ad-principals-file", cfg.AuthDaemonPrincipalsFile, "Path to the principals file for auth daemon")
-	flag.StringVar(&cfg.AuthDaemonCACertPath, "ad-ca-cert-path", cfg.AuthDaemonCACertPath, "Path to the CA certificate file for auth daemon")
-	flag.BoolVar(&cfg.AuthDaemonGenerateRandomPassword, "ad-generate-random-password", cfg.AuthDaemonGenerateRandomPassword, "Generate a random password for authenticated users")
+	fs.StringVar(&cfg.TLSPrivateKey, "tls-client-cert", cfg.TLSPrivateKey, "Path to client certificate (PKCS12 format) - DEPRECATED: use --tls-client-cert-file and --tls-client-key instead")
+	fs.StringVar(&dockerEnforceStr, "docker-enforce-network-validation", dockerEnforceStr, "Enforce validation of container on newt network (true or false)")
+	fs.StringVar(&cfg.HealthFile, "health-file", cfg.HealthFile, "Path to health file (if unset, health file won't be written)")
+	fs.StringVar(&cfg.BlueprintFile, "blueprint-file", cfg.BlueprintFile, "Path to blueprint file (if unset, no blueprint will be applied)")
+	fs.StringVar(&cfg.ProvisioningBlueprintFile, "provisioning-blueprint-file", cfg.ProvisioningBlueprintFile, "Path to blueprint file applied once after a provisioning credential exchange (if unset, no provisioning blueprint will be applied)")
+	fs.BoolVar(&cfg.NoCloud, "no-cloud", cfg.NoCloud, "Disable cloud failover")
+	fs.BoolVar(&cfg.MetricsEnabled, "metrics", cfg.MetricsEnabled, "Enable Prometheus metrics exporter")
+	fs.BoolVar(&cfg.OTLPEnabled, "otlp", cfg.OTLPEnabled, "Enable OTLP exporters (metrics/traces) to OTEL_EXPORTER_OTLP_ENDPOINT")
+	fs.StringVar(&cfg.AdminAddr, "metrics-admin-addr", cfg.AdminAddr, "Admin/metrics bind address")
+	fs.BoolVar(&cfg.MetricsAsyncBytes, "metrics-async-bytes", cfg.MetricsAsyncBytes, "Enable async bytes counting (background flush; lower hot path overhead)")
+	fs.BoolVar(&cfg.PprofEnabled, "pprof", cfg.PprofEnabled, "Enable pprof debug endpoints on admin server")
+	fs.StringVar(&cfg.Region, "region", cfg.Region, "Optional region resource attribute (also NEWT_REGION)")
+	fs.StringVar(&cfg.AuthDaemonKey, "ad-pre-shared-key", cfg.AuthDaemonKey, "Pre-shared key for auth daemon authentication")
+	fs.StringVar(&cfg.AuthDaemonPrincipalsFile, "ad-principals-file", cfg.AuthDaemonPrincipalsFile, "Path to the principals file for auth daemon")
+	fs.StringVar(&cfg.AuthDaemonCACertPath, "ad-ca-cert-path", cfg.AuthDaemonCACertPath, "Path to the CA certificate file for auth daemon")
+	fs.BoolVar(&cfg.AuthDaemonGenerateRandomPassword, "ad-generate-random-password", cfg.AuthDaemonGenerateRandomPassword, "Generate a random password for authenticated users")
 
-	version := flag.Bool("version", false, "Print the version")
-	showConfig := flag.Bool("show-config", false, "Show configuration values and their sources, then exit")
+	version := fs.Bool("version", false, "Print the version")
+	showConfig := fs.Bool("show-config", false, "Show configuration values and their sources, then exit")
 
-	flag.Parse()
+	fs.Parse(opts.Args)
 
 	// ---- post-parse processing ----
 
@@ -552,7 +575,7 @@ func loadNewtConfig() newtpkg.Config {
 
 	// Version check (exits process)
 	if *version {
-		fmt.Println("Newt version " + newtVersion)
+		fmt.Println("Newt version " + opts.Version)
 		os.Exit(0)
 	}
 
@@ -561,7 +584,7 @@ func loadNewtConfig() newtpkg.Config {
 		os.Exit(0)
 	}
 
-	logger.Info("Newt version %s", newtVersion)
+	logger.Info("Newt version %s", opts.Version)
 
 	// Parse port
 	if portStr != "" {
@@ -573,7 +596,7 @@ func loadNewtConfig() newtpkg.Config {
 		}
 	}
 
-	// Parse local endpoint interface allowlist (after flag.Parse so CLI takes effect)
+	// Parse local endpoint interface allowlist (after flag parsing so CLI takes effect)
 	if localEndpointInterfacesStr != "" {
 		var names []string
 		for _, n := range strings.Split(localEndpointInterfacesStr, ",") {
@@ -604,12 +627,16 @@ func loadNewtConfig() newtpkg.Config {
 		cfg.DockerEnforceNetworkValidation = false
 	}
 
-	// Parse durations (after flag.Parse so CLI flags take effect)
+	// Parse durations (after flag parsing so CLI flags take effect)
 	cfg.PingInterval = parseDurationEnvOrFlag(pingIntervalStr, 15*time.Second, "PING_INTERVAL")
 	cfg.PingTimeout = parseDurationEnvOrFlag(pingTimeoutStr, 7*time.Second, "PING_TIMEOUT")
 	cfg.UDPProxyIdleTimeout = parseDurationEnvOrFlag(udpProxyIdleTimeoutStr, 90*time.Second, "NEWT_UDP_PROXY_IDLE_TIMEOUT")
 
-	return cfg
+	if err := validateTLSConfig(cfg); err != nil {
+		return newtpkg.Config{}, err
+	}
+
+	return cfg, nil
 }
 
 // printShowConfig prints the resolved configuration and the source of each value

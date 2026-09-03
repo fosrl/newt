@@ -87,6 +87,18 @@ func attrsWithSite(extra ...attribute.KeyValue) []attribute.KeyValue {
 	return attrs
 }
 
+// EnsureInstruments registers this package's instruments against whichever
+// MeterProvider is globally active (the no-op provider if Init has not been
+// called), so that the Inc*/Observe* recording functions below are always
+// safe to call. Idempotent and cheap to call repeatedly or before Init - Init
+// calls it too, and OTel's global API transparently upgrades instruments
+// created this way once a real MeterProvider is later installed via
+// otel.SetMeterProvider, so calling it early does not affect metrics
+// exported once Init runs.
+func EnsureInstruments() error {
+	return registerInstruments()
+}
+
 func registerInstruments() error {
 	var err error
 	initOnce.Do(func() {
