@@ -188,6 +188,20 @@ func applyEnvBool(dst *bool, envName, key string, sources map[string]string) {
 	}
 }
 
+// applyEnvStrAlias behaves like applyEnvStr, but checks a preferred env var
+// first and only falls back to an alias name when the preferred one is unset.
+func applyEnvStrAlias(dst *string, envName, aliasEnvName, key string, sources map[string]string) {
+	if v := os.Getenv(envName); v != "" {
+		*dst = v
+		sources[key] = string(sourceEnv)
+		return
+	}
+	if v := os.Getenv(aliasEnvName); v != "" {
+		*dst = v
+		sources[key] = string(sourceEnv)
+	}
+}
+
 // validateTLSConfig validates that TLS config fields are consistent and that
 // referenced files exist.
 func validateTLSConfig(cfg newtpkg.Config) error {
@@ -361,8 +375,12 @@ func Load(opts Options) (newtpkg.Config, error) {
 
 	// ---- layer 2: environment variables ----
 	applyEnvStr(&cfg.Endpoint, "PANGOLIN_ENDPOINT", "endpoint", sources)
-	applyEnvStr(&cfg.ID, "NEWT_ID", "id", sources)
-	applyEnvStr(&cfg.Secret, "NEWT_SECRET", "secret", sources)
+	// SITE_ID/SITE_SECRET are accepted as aliases for NEWT_ID/NEWT_SECRET
+	// (NEWT_ID/NEWT_SECRET win if both are set) so a site tunnel's
+	// credentials can be named consistently with other Pangolin CLI
+	// connection types (e.g. CLIENT_ID/CLIENT_SECRET for `up client`).
+	applyEnvStrAlias(&cfg.ID, "NEWT_ID", "SITE_ID", "id", sources)
+	applyEnvStrAlias(&cfg.Secret, "NEWT_SECRET", "SITE_SECRET", "secret", sources)
 	applyEnvStr(&cfg.ProvisioningKey, "NEWT_PROVISIONING_KEY", "provisioning-key", sources)
 	applyEnvStr(&cfg.NewtName, "NEWT_NAME", "name", sources)
 
