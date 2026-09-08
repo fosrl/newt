@@ -602,8 +602,6 @@ func Load(opts Options) (newtpkg.Config, error) {
 		os.Exit(0)
 	}
 
-	logger.Info("Newt version %s", opts.Version)
-
 	// Parse port
 	if portStr != "" {
 		portInt, err := strconv.Atoi(portStr)

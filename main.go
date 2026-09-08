@@ -72,6 +72,8 @@ func runNewtMain(ctx context.Context) {
 		logger.Fatal("Configuration error: %v", err)
 	}
 
+	logger.Info("Newt version %s", cfg.Version)
+
 	if cfg.UseNativeMainInterface {
 		if err := permissions.CheckNativeInterfacePermissions(); err != nil {
 			logger.Fatal("Insufficient permissions for native main tunnel interface: %v", err)
