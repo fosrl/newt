@@ -133,11 +133,7 @@ func CheckForUpdate(owner, repo, currentVersion string) error {
 
 	// Check if update is available
 	if currentVer.isNewer(latestVer) {
-		releaseNotes := componentVersion.ReleaseNotes
-		if releaseNotes == "" {
-			releaseNotes = "curl -fsSL https://static.pangolin.net/get-newt.sh | bash"
-		}
-		printUpdateBanner(currentVer.String(), latestVer.String(), releaseNotes)
+		printUpdateBanner(currentVer.String(), latestVer.String(), "curl -fsSL https://static.pangolin.net/get-newt.sh | bash")
 	}
 
 	return nil
