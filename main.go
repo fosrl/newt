@@ -205,7 +205,8 @@ func runNewtMain(ctx context.Context) {
 		}
 	}
 	go func() {
-		time.Sleep(2 * time.Minute)
+		time.Sleep(2 * time.Minute) // for production
+		// time.Sleep(10 * time.Second) // for testing, check for updates after 10 seconds
 		doUpdate()
 		ticker := time.NewTicker(6 * time.Hour)
 		defer ticker.Stop()
