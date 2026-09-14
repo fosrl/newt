@@ -177,15 +177,15 @@ func TestResolveConfigFilePath_Precedence(t *testing.T) {
 
 	// CLI flag wins over env.
 	t.Setenv("CONFIG_FILE", "/env/path/config.json")
-	if got := resolveConfigFilePath([]string{"--config-file", "/cli/path/config.json"}); got != "/cli/path/config.json" {
+	if got := resolveConfigFilePath([]string{"--config-file", "/cli/path/config.json"}, ""); got != "/cli/path/config.json" {
 		t.Errorf("expected cli path to win, got %q", got)
 	}
-	if got := resolveConfigFilePath([]string{"--config-file=/cli/eq/config.json"}); got != "/cli/eq/config.json" {
+	if got := resolveConfigFilePath([]string{"--config-file=/cli/eq/config.json"}, ""); got != "/cli/eq/config.json" {
 		t.Errorf("expected cli = path to win, got %q", got)
 	}
 
 	// Env wins over default when no CLI flag given.
-	if got := resolveConfigFilePath([]string{}); got != "/env/path/config.json" {
+	if got := resolveConfigFilePath([]string{}, ""); got != "/env/path/config.json" {
 		t.Errorf("expected env path, got %q", got)
 	}
 }

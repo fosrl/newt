@@ -216,6 +216,20 @@ func applyEnvStrAlias(dst *string, envName, aliasEnvName, key string, sources ma
 	}
 }
 
+// applyEnvBoolAlias behaves like applyEnvBool, but checks a preferred env var
+// first and only falls back to an alias name when the preferred one is unset.
+func applyEnvBoolAlias(dst *bool, envName, aliasEnvName, key string, sources map[string]string) {
+	if v := os.Getenv(envName); v != "" {
+		*dst = v == "true"
+		sources[key] = string(sourceEnv)
+		return
+	}
+	if v := os.Getenv(aliasEnvName); v != "" {
+		*dst = v == "true"
+		sources[key] = string(sourceEnv)
+	}
+}
+
 // validateTLSConfig validates that TLS config fields are consistent and that
 // referenced files exist.
 func validateTLSConfig(cfg newtpkg.Config) error {
@@ -315,8 +329,8 @@ func Load(opts Options) (newtpkg.Config, error) {
 
 		DNS:                      "9.9.9.9",
 		LogLevel:                 "INFO",
-		InterfaceName:            "newt",
-		NativeMainInterfaceName:  "newt",
+		InterfaceName:            "pangolin",
+		NativeMainInterfaceName:  "pangolin",
 		AuthDaemonPrincipalsFile: "/var/run/auth-daemon/principals",
 		AuthDaemonCACertPath:     "/etc/ssh/ca.pem",
 		AdminAddr:                "127.0.0.1:2112",
@@ -406,8 +420,8 @@ func Load(opts Options) (newtpkg.Config, error) {
 	// connection types (e.g. CLIENT_ID/CLIENT_SECRET for `up client`).
 	applyEnvStrAlias(&cfg.ID, "NEWT_ID", "SITE_ID", "id", sources)
 	applyEnvStrAlias(&cfg.Secret, "NEWT_SECRET", "SITE_SECRET", "secret", sources)
-	applyEnvStr(&cfg.ProvisioningKey, "NEWT_PROVISIONING_KEY", "provisioning-key", sources)
-	applyEnvStr(&cfg.NewtName, "NEWT_NAME", "name", sources)
+	applyEnvStrAlias(&cfg.ProvisioningKey, "NEWT_PROVISIONING_KEY", "SITE_PROVISIONING_KEY", "provisioning-key", sources)
+	applyEnvStrAlias(&cfg.NewtName, "NEWT_NAME", "SITE_NAME", "name", sources)
 
 	applyEnvStr(&cfg.DNS, "DNS", "dns", sources)
 	applyEnvStr(&cfg.LogLevel, "LOG_LEVEL", "log-level", sources)
@@ -433,7 +447,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 
 	applyEnvStr(&pingIntervalStr, "PING_INTERVAL", "ping-interval", sources)
 	applyEnvStr(&pingTimeoutStr, "PING_TIMEOUT", "ping-timeout", sources)
-	applyEnvStr(&udpProxyIdleTimeoutStr, "NEWT_UDP_PROXY_IDLE_TIMEOUT", "udp-proxy-idle-timeout", sources)
+	applyEnvStrAlias(&udpProxyIdleTimeoutStr, "NEWT_UDP_PROXY_IDLE_TIMEOUT", "SITE_UDP_PROXY_IDLE_TIMEOUT", "udp-proxy-idle-timeout", sources)
 
 	applyEnvBool(&cfg.DisableClients, "DISABLE_CLIENTS", "disable-clients", sources)
 	applyEnvBool(&cfg.DisableSSH, "DISABLE_SSH", "disable-ssh", sources)
@@ -470,7 +484,11 @@ func Load(opts Options) (newtpkg.Config, error) {
 		sources["tls-client-cert"] = sources["tls-client-cert-file"]
 	}
 
-	if metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED"); metricsEnabledEnv != "" {
+	metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED")
+	if metricsEnabledEnv == "" {
+		metricsEnabledEnv = os.Getenv("SITE_METRICS_PROMETHEUS_ENABLED")
+	}
+	if metricsEnabledEnv != "" {
 		if v, err := strconv.ParseBool(metricsEnabledEnv); err == nil {
 			cfg.MetricsEnabled = v
 		} else {
@@ -478,11 +496,11 @@ func Load(opts Options) (newtpkg.Config, error) {
 		}
 		sources["metrics"] = string(sourceEnv)
 	}
-	applyEnvBool(&cfg.OTLPEnabled, "NEWT_METRICS_OTLP_ENABLED", "otlp", sources)
-	applyEnvStr(&cfg.AdminAddr, "NEWT_ADMIN_ADDR", "metrics-admin-addr", sources)
-	applyEnvStr(&cfg.Region, "NEWT_REGION", "region", sources)
-	applyEnvBool(&cfg.MetricsAsyncBytes, "NEWT_METRICS_ASYNC_BYTES", "metrics-async-bytes", sources)
-	applyEnvBool(&cfg.PprofEnabled, "NEWT_PPROF_ENABLED", "pprof", sources)
+	applyEnvBoolAlias(&cfg.OTLPEnabled, "NEWT_METRICS_OTLP_ENABLED", "SITE_METRICS_OTLP_ENABLED", "otlp", sources)
+	applyEnvStrAlias(&cfg.AdminAddr, "NEWT_ADMIN_ADDR", "SITE_ADMIN_ADDR", "metrics-admin-addr", sources)
+	applyEnvStrAlias(&cfg.Region, "NEWT_REGION", "SITE_REGION", "region", sources)
+	applyEnvBoolAlias(&cfg.MetricsAsyncBytes, "NEWT_METRICS_ASYNC_BYTES", "SITE_METRICS_ASYNC_BYTES", "metrics-async-bytes", sources)
+	applyEnvBoolAlias(&cfg.PprofEnabled, "NEWT_PPROF_ENABLED", "SITE_PPROF_ENABLED", "pprof", sources)
 
 	// ---- layer 3: CLI flags (always registered; default = file/env-resolved value) ----
 	origEndpoint, origID, origSecret := cfg.Endpoint, cfg.ID, cfg.Secret
