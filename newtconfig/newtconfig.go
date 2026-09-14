@@ -99,11 +99,16 @@ type fileSettings struct {
 }
 
 // resolveConfigFilePath determines the settings/credentials file path using
-// the same precedence as every other setting: CLI > env > OS default.
-// It has to run before the flag set is parsed (which needs the
+// the same precedence as every other setting: CLI > env > caller default >
+// OS default. It has to run before the flag set is parsed (which needs the
 // file-resolved defaults), so it scans args directly instead of using the
 // flag package.
-func resolveConfigFilePath(args []string) string {
+//
+// defaultConfigFile, when non-empty, overrides the standalone newt-client OS
+// default below - it lets a caller that embeds newtconfig as a library (such
+// as the Pangolin CLI) point new installs at its own config directory
+// instead of newt's, while --config-file/CONFIG_FILE still take precedence.
+func resolveConfigFilePath(args []string, defaultConfigFile string) string {
 	for i, a := range args {
 		if a == "--config-file" || a == "-config-file" {
 			if i+1 < len(args) {
@@ -120,6 +125,15 @@ func resolveConfigFilePath(args []string) string {
 
 	if v := os.Getenv("CONFIG_FILE"); v != "" {
 		return v
+	}
+
+	if defaultConfigFile != "" {
+		if dir := filepath.Dir(defaultConfigFile); dir != "" {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				fmt.Printf("Warning: Failed to create config directory: %v\n", err)
+			}
+		}
+		return defaultConfigFile
 	}
 
 	var configDir string
@@ -268,6 +282,13 @@ type Options struct {
 	Agent        string
 	AgentVersion string
 	Platform     string
+	// DefaultConfigFile overrides the OS-default config file path used when
+	// neither --config-file nor CONFIG_FILE is set. Leave empty to use the
+	// standalone newt binary's own default (e.g.
+	// ~/.config/newt-client/config.json on Linux); callers embedding
+	// newtconfig as a library (such as the Pangolin CLI) should set this to
+	// a path under their own config directory instead.
+	DefaultConfigFile string
 }
 
 // Load resolves configuration with priority cli > env > file > default,
@@ -279,7 +300,7 @@ type Options struct {
 func Load(opts Options) (newtpkg.Config, error) {
 	sources := make(map[string]string)
 
-	configPath := resolveConfigFilePath(opts.Args)
+	configPath := resolveConfigFilePath(opts.Args, opts.DefaultConfigFile)
 	fileCfg, err := loadFileSettings(configPath)
 	if err != nil {
 		logger.Fatal("Failed to load config file: %v", err)
