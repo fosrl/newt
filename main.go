@@ -64,9 +64,11 @@ func runNewtMain(ctx context.Context) {
 	logger.Init(nil)
 
 	cfg, err := newtconfig.Load(newtconfig.Options{
-		Args:     os.Args[1:],
-		Version:  newtVersion,
-		Platform: newtPlatform,
+		Args:         os.Args[1:],
+		Version:      newtVersion,
+		Agent:        "newt",
+		AgentVersion: newtVersion,
+		Platform:     newtPlatform,
 	})
 	if err != nil {
 		logger.Fatal("Configuration error: %v", err)
@@ -196,6 +198,7 @@ func runNewtMain(ctx context.Context) {
 			CurrentVersion: newtVersion,
 			Platform:       newtPlatform,
 			TLSConfig:      selfUpdateTLS,
+			Agent:          "newt",
 		}); err != nil {
 			if errors.Is(err, updates.ErrAutoUpdateUnsupportedInOfficialContainer) {
 				logger.Debug("checkAndSelfUpdate: auto-update skipped: %v", err)

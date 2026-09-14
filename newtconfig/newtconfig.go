@@ -264,8 +264,10 @@ type Options struct {
 	Args []string
 	// Version and Platform populate the resulting Config's build info and
 	// are printed by --version.
-	Version  string
-	Platform string
+	Version      string
+	Agent        string
+	AgentVersion string
+	Platform     string
 }
 
 // Load resolves configuration with priority cli > env > file > default,
@@ -285,8 +287,10 @@ func Load(opts Options) (newtpkg.Config, error) {
 
 	// ---- defaults ----
 	cfg := newtpkg.Config{
-		Version:  opts.Version,
-		Platform: opts.Platform,
+		Version:      opts.Version,
+		Platform:     opts.Platform,
+		Agent:        opts.Agent,
+		AgentVersion: opts.AgentVersion,
 
 		DNS:                      "9.9.9.9",
 		LogLevel:                 "INFO",

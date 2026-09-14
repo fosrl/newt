@@ -5,8 +5,10 @@ import "time"
 // Config holds all runtime configuration for a Newt instance.
 type Config struct {
 	// Build info
-	Version  string
-	Platform string
+	Version      string
+	Platform     string
+	Agent        string
+	AgentVersion string
 
 	// Logging
 	LogLevel string

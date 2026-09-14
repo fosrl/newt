@@ -37,6 +37,9 @@ type SelfUpdateConfig struct {
 	Platform string
 	// TLSConfig is an optional TLS configuration for the HTTP client (may be nil).
 	TLSConfig *tls.Config
+
+	// cli or newt depending on where we are
+	Agent string
 }
 
 // versionResponse mirrors the JSON returned by POST /api/v1/auth/newt/version
@@ -156,6 +159,7 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 		"newtId":   cfg.NewtID,
 		"secret":   cfg.Secret,
 		"platform": plat,
+		"agent":    cfg.Agent,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal version request: %w", err)
@@ -211,7 +215,7 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 		return nil
 	}
 
-	logger.Debug("checkAndSelfUpdate: update available %s → %s", cfg.CurrentVersion, verResp.Data.LatestVersion)
+	logger.Debug("checkAndSelfUpdate: newt package update available %s → %s", cfg.CurrentVersion, verResp.Data.LatestVersion)
 
 	// --- Pre-download: verify we can write to the binary's directory ---
 	// Do this before downloading so a permission failure doesn't waste bandwidth.
@@ -225,7 +229,7 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 	_ = os.Remove(writeTestFile.Name())
 
 	// --- Step 2: Download the new binary ---
-	logger.Debug("checkAndSelfUpdate: beginning download of new binary")
+	logger.Debug("checkAndSelfUpdate: beginning download of new binary from %s", verResp.Data.DownloadUrl)
 	dlCtx, dlCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer dlCancel()
 
