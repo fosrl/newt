@@ -47,6 +47,10 @@ func pingNative(dst string, timeout time.Duration) (time.Duration, error) {
 }
 
 func ping(tnet *netstack.Net, dst string, timeout time.Duration) (time.Duration, error) {
+	if tnet == nil {
+		return 0, fmt.Errorf("netstack not initialized")
+	}
+
 	socket, err := tnet.Dial("ping4", dst)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create ICMP socket: %w", err)

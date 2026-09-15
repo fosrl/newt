@@ -16,6 +16,7 @@ import (
 	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
 	newtpkg "github.com/fosrl/newt/newt"
+	"github.com/fosrl/newt/newtconfig"
 	"github.com/fosrl/newt/updates"
 	"github.com/fosrl/newt/websocket"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -62,16 +63,23 @@ func main() {
 func runNewtMain(ctx context.Context) {
 	logger.Init(nil)
 
-	cfg := loadNewtConfig()
+	cfg, err := newtconfig.Load(newtconfig.Options{
+		Args:         os.Args[1:],
+		Version:      newtVersion,
+		Agent:        "newt",
+		AgentVersion: newtVersion,
+		Platform:     newtPlatform,
+	})
+	if err != nil {
+		logger.Fatal("Configuration error: %v", err)
+	}
+
+	logger.Info("Newt version %s", cfg.Version)
 
 	if cfg.UseNativeMainInterface {
 		if err := permissions.CheckNativeInterfacePermissions(); err != nil {
 			logger.Fatal("Insufficient permissions for native main tunnel interface: %v", err)
 		}
-	}
-
-	if err := validateTLSConfig(cfg); err != nil {
-		logger.Fatal("TLS configuration error: %v", err)
 	}
 
 	logger.Debug("Endpoint: %v", cfg.Endpoint)
@@ -190,6 +198,7 @@ func runNewtMain(ctx context.Context) {
 			CurrentVersion: newtVersion,
 			Platform:       newtPlatform,
 			TLSConfig:      selfUpdateTLS,
+			Agent:          "newt",
 		}); err != nil {
 			if errors.Is(err, updates.ErrAutoUpdateUnsupportedInOfficialContainer) {
 				logger.Debug("checkAndSelfUpdate: auto-update skipped: %v", err)
@@ -199,7 +208,8 @@ func runNewtMain(ctx context.Context) {
 		}
 	}
 	go func() {
-		time.Sleep(2 * time.Minute)
+		time.Sleep(2 * time.Minute) // for production
+		// time.Sleep(10 * time.Second) // for testing, check for updates after 10 seconds
 		doUpdate()
 		ticker := time.NewTicker(6 * time.Hour)
 		defer ticker.Stop()
