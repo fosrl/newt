@@ -3,6 +3,8 @@ package newtconfig
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -12,8 +14,73 @@ func clearNewtEnv(t *testing.T) {
 		"PANGOLIN_ENDPOINT", "NEWT_ID", "NEWT_SECRET", "DNS", "LOG_LEVEL",
 		"MTU", "CONFIG_FILE", "NEWT_PROVISIONING_KEY", "NEWT_NAME",
 		"DISABLE_SSH", "DISABLE_CLIENTS", "SITE_ID", "SITE_SECRET",
+		"USE_NATIVE_INTERFACE", "USE_NATIVE_MAIN_INTERFACE", "USE_KERNEL_MAIN_INTERFACE",
+		"INTERFACE", "INTERFACE_MAIN",
 	} {
 		t.Setenv(k, "")
+	}
+}
+
+func TestLoadNewtConfig_KernelMainPrecedence(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		file string
+		env  string
+		args []string
+		want bool
+	}{
+		{name: "default"},
+		{name: "file true", file: `{"kernelMain":true}`, want: true},
+		{name: "file false", file: `{"kernelMain":false}`},
+		{name: "env true overrides file", file: `{"kernelMain":false}`, env: "true", want: true},
+		{name: "env false overrides file", file: `{"kernelMain":true}`, env: "false"},
+		{name: "cli true overrides env", file: `{"kernelMain":false}`, env: "false", args: []string{"--kernel-main"}, want: true},
+		{name: "cli false overrides env", file: `{"kernelMain":true}`, env: "true", args: []string{"--kernel-main=false"}},
+		{name: "cli false overrides file", file: `{"kernelMain":true}`, args: []string{"--kernel-main=false"}},
+		{name: "cli false matches default", args: []string{"--kernel-main=false"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearNewtEnv(t)
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			if tt.file != "" {
+				if err := os.WriteFile(configPath, []byte(tt.file), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("USE_KERNEL_MAIN_INTERFACE", tt.env)
+			args := append([]string{"--config-file", configPath}, tt.args...)
+			// Platform is display/build metadata, not an OS validation override.
+			cfg, err := Load(Options{Args: args, Platform: "linux"})
+			if tt.want && runtime.GOOS != "linux" {
+				if err == nil || !strings.Contains(err.Error(), "requires Linux") {
+					t.Fatalf("expected Linux-only validation, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load returned error: %v", err)
+			}
+			if cfg.UseKernelMainInterface != tt.want {
+				t.Errorf("kernel main = %v, want %v", cfg.UseKernelMainInterface, tt.want)
+			}
+			if cfg.UseNativeMainInterface {
+				t.Error("kernel-main must not implicitly enable native-main")
+			}
+			if cfg.NativeMainInterfaceName != "pangolin" {
+				t.Errorf("unexpected default main interface name: %q", cfg.NativeMainInterfaceName)
+			}
+		})
+	}
+}
+
+func TestLoadNewtConfig_KernelNativeConflict(t *testing.T) {
+	clearNewtEnv(t)
+	t.Setenv("USE_NATIVE_MAIN_INTERFACE", "true")
+	_, err := Load(Options{Args: []string{
+		"--config-file", filepath.Join(t.TempDir(), "missing.json"), "--kernel-main",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "cannot be used together") {
+		t.Fatalf("expected conflicting backend error, got %v", err)
 	}
 }
 

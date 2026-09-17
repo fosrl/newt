@@ -6,13 +6,14 @@
 > [!NOTE]
 > Newt is being phased out in favor of the [Pangolin CLI](https://github.com/fosrl/cli). Use `pangolin site up`
 
-Newt is a fully user space [WireGuard](https://www.wireguard.com/) tunnel client and TCP/UDP proxy, designed to securely expose private resources controlled by Pangolin. By using Newt, you don't need to manage complex WireGuard tunnels and NATing.
+Newt is a [WireGuard](https://www.wireguard.com/) tunnel client and TCP/UDP proxy, designed to securely expose private resources controlled by Pangolin. It runs fully in user space by default, with an optional Linux kernel backend for the main site tunnel. By using Newt, you don't need to manage complex WireGuard tunnels and NATing.
 
 ### Installation and Documentation
 
 Newt is used with Pangolin and Gerbil as part of the larger system. See documentation below:
 
 -   [Full Documentation](https://docs.pangolin.net/manage/sites/understanding-sites)
+-   [Linux kernel main tunnel: setup, Docker example, and validation](docs/kernel-main.md)
 
 ## Key Functions
 
@@ -22,7 +23,7 @@ Using the Newt ID and a secret, the client will make HTTP requests to Pangolin t
 
 ### Receives WireGuard Control Messages
 
-When Newt receives WireGuard control messages, it will use the information encoded (endpoint, public key) to bring up a WireGuard tunnel using [netstack](https://github.com/WireGuard/wireguard-go/blob/master/tun/netstack/examples/http_server.go) fully in user space. It will ping over the tunnel to ensure the peer on the Gerbil side is brought up.
+When Newt receives WireGuard control messages, it will use the information encoded (endpoint, public key) to bring up a WireGuard tunnel. By default, this uses [netstack](https://github.com/WireGuard/wireguard-go/blob/master/tun/netstack/examples/http_server.go) fully in user space; Linux users can opt into the kernel main tunnel backend. It will ping over the tunnel to ensure the peer on the Gerbil side is brought up.
 
 ### Receives Proxy Control Messages
 

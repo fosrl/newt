@@ -60,41 +60,51 @@ type Target struct {
 // errors.Is(err, net.ErrClosed) leaves the accept loop spinning forever.
 type managedListener struct {
 	net.Listener
-	closed chan struct{}
+	closed    chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	workers   sync.WaitGroup
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func newManagedListener(l net.Listener) *managedListener {
-	return &managedListener{Listener: l, closed: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &managedListener{Listener: l, closed: make(chan struct{}), ctx: ctx, cancel: cancel}
 }
 
 func (m *managedListener) Close() error {
-	err := m.Listener.Close()
-	select {
-	case <-m.closed:
-	default:
+	m.closeOnce.Do(func() {
+		m.cancel()
 		close(m.closed)
-	}
-	return err
+		m.closeErr = m.Listener.Close()
+	})
+	return m.closeErr
 }
 
 // managedPacketConn is the net.PacketConn equivalent of managedListener.
 type managedPacketConn struct {
 	net.PacketConn
-	closed chan struct{}
+	closed    chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	workers   sync.WaitGroup
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func newManagedPacketConn(c net.PacketConn) *managedPacketConn {
-	return &managedPacketConn{PacketConn: c, closed: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &managedPacketConn{PacketConn: c, closed: make(chan struct{}), ctx: ctx, cancel: cancel}
 }
 
 func (m *managedPacketConn) Close() error {
-	err := m.PacketConn.Close()
-	select {
-	case <-m.closed:
-	default:
+	m.closeOnce.Do(func() {
+		m.cancel()
 		close(m.closed)
-	}
-	return err
+		m.closeErr = m.PacketConn.Close()
+	})
+	return m.closeErr
 }
 
 // ProxyManager handles the creation and management of proxy connections
@@ -113,6 +123,7 @@ type ProxyManager struct {
 	tunnels         map[string]*tunnelEntry
 	asyncBytes      bool
 	flushStop       chan struct{}
+	flushDone       chan struct{}
 	udpIdleTimeout  time.Duration
 
 	// connection blocking
@@ -432,6 +443,7 @@ func (pm *ProxyManager) Start() error {
 	}
 
 	pm.running = true
+	pm.startFlushLoopLocked()
 	return nil
 }
 
@@ -439,9 +451,14 @@ func (pm *ProxyManager) SetAsyncBytes(b bool) {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
 	pm.asyncBytes = b
-	if b && pm.flushStop == nil {
+	pm.startFlushLoopLocked()
+}
+
+func (pm *ProxyManager) startFlushLoopLocked() {
+	if pm.asyncBytes && pm.flushStop == nil {
 		pm.flushStop = make(chan struct{})
-		go pm.flushLoop()
+		pm.flushDone = make(chan struct{})
+		go pm.flushLoop(pm.flushStop, pm.flushDone)
 	}
 }
 
@@ -455,7 +472,8 @@ func (pm *ProxyManager) SetUDPIdleTimeout(d time.Duration) {
 	}
 	pm.udpIdleTimeout = d
 }
-func (pm *ProxyManager) flushLoop() {
+func (pm *ProxyManager) flushLoop(stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
 	flushInterval := 2 * time.Second
 	if v := os.Getenv("OTEL_METRIC_EXPORT_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
@@ -489,7 +507,7 @@ func (pm *ProxyManager) flushLoop() {
 				}
 			}
 			pm.mutex.RUnlock()
-		case <-pm.flushStop:
+		case <-stop:
 			pm.mutex.RLock()
 			for _, e := range pm.tunnels {
 				inTCP := e.bytesInTCP.Swap(0)
@@ -517,18 +535,18 @@ func (pm *ProxyManager) flushLoop() {
 
 func (pm *ProxyManager) Stop() error {
 	pm.mutex.Lock()
-	defer pm.mutex.Unlock()
+	var workers []*sync.WaitGroup
 
-	if !pm.running {
-		return nil
-	}
-
-	// Set running to false first to signal handlers to stop
+	// Start may have allocated listeners before a later target failed, leaving
+	// running false. Always release those partial-start resources as well.
 	pm.running = false
 
 	// Close TCP listeners
 	for i := len(pm.listeners) - 1; i >= 0; i-- {
 		listener := pm.listeners[i]
+		if managed, ok := listener.(*managedListener); ok {
+			workers = append(workers, &managed.workers)
+		}
 		if err := listener.Close(); err != nil {
 			logger.Error("Error closing TCP listener: %v", err)
 		}
@@ -539,6 +557,9 @@ func (pm *ProxyManager) Stop() error {
 	// Close UDP connections
 	for i := len(pm.udpConns) - 1; i >= 0; i-- {
 		conn := pm.udpConns[i]
+		if managed, ok := conn.(*managedPacketConn); ok {
+			workers = append(workers, &managed.workers)
+		}
 		if err := conn.Close(); err != nil {
 			logger.Error("Error closing UDP connection: %v", err)
 		}
@@ -546,10 +567,34 @@ func (pm *ProxyManager) Stop() error {
 		pm.udpConns = append(pm.udpConns[:i], pm.udpConns[i+1:]...)
 	}
 
-	// Give active connections a chance to close gracefully
-	time.Sleep(100 * time.Millisecond)
+	flushDone := pm.flushDone
+	if pm.flushStop != nil {
+		close(pm.flushStop)
+		pm.flushStop = nil
+		pm.flushDone = nil
+	}
+	pm.mutex.Unlock()
+	// Flow cleanup also takes pm.mutex, so join it after releasing the lock.
+	// Each listener owns its generation, including dials in progress, and can
+	// safely finish independently of any subsequently restarted listeners.
+	for _, worker := range workers {
+		worker.Wait()
+	}
+
+	// The final telemetry flush takes pm.mutex.RLock; waiting under the write
+	// lock would deadlock. The worker owns its channels, so a later Start can
+	// safely create a fresh worker while this one finishes.
+	if flushDone != nil {
+		<-flushDone
+	}
 
 	return nil
+}
+
+func (pm *ProxyManager) isRunning() bool {
+	pm.mutex.RLock()
+	defer pm.mutex.RUnlock()
+	return pm.running
 }
 
 func (pm *ProxyManager) startTarget(proto, listenIP string, port int, targetAddr string) error {
@@ -573,6 +618,7 @@ func (pm *ProxyManager) startTarget(proto, listenIP string, port int, targetAddr
 		}
 		ml := newManagedListener(listener)
 		pm.listeners = append(pm.listeners, ml)
+		ml.workers.Add(1)
 		go pm.handleTCPProxy(ml, targetAddr)
 
 	case "udp":
@@ -594,6 +640,7 @@ func (pm *ProxyManager) startTarget(proto, listenIP string, port int, targetAddr
 		}
 		mc := newManagedPacketConn(conn)
 		pm.udpConns = append(pm.udpConns, mc)
+		mc.workers.Add(1)
 		go pm.handleUDPProxy(mc, targetAddr)
 
 	default:
@@ -615,6 +662,7 @@ func (pm *ProxyManager) getEntry(id string) *tunnelEntry {
 }
 
 func (pm *ProxyManager) handleTCPProxy(listener *managedListener, targetAddr string) {
+	defer listener.workers.Done()
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -625,7 +673,7 @@ func (pm *ProxyManager) handleTCPProxy(listener *managedListener, targetAddr str
 				return
 			default:
 			}
-			if !pm.running {
+			if !pm.isRunning() {
 				return
 			}
 			if errors.Is(err, net.ErrClosed) {
@@ -653,9 +701,22 @@ func (pm *ProxyManager) handleTCPProxy(listener *managedListener, targetAddr str
 			}
 		}
 
+		listener.workers.Add(1)
 		go func(tunnelID string, accepted net.Conn) {
+			defer listener.workers.Done()
+			defer accepted.Close()
+			stopAcceptedClose := context.AfterFunc(listener.ctx, func() { _ = accepted.Close() })
+			defer stopAcceptedClose()
+			defer func() {
+				if tunnelID != "" {
+					state.Global().DecSessions(tunnelID)
+					if e := pm.getEntry(tunnelID); e != nil {
+						e.activeTCP.Add(-1)
+					}
+				}
+			}()
 			connStart := time.Now()
-			target, err := net.Dial("tcp", targetAddr)
+			target, err := (&net.Dialer{}).DialContext(listener.ctx, "tcp", targetAddr)
 			if err != nil {
 				logger.Error("Error connecting to target: %v", err)
 				accepted.Close()
@@ -664,6 +725,9 @@ func (pm *ProxyManager) handleTCPProxy(listener *managedListener, targetAddr str
 				telemetry.ObserveProxyConnectionDuration(context.Background(), tunnelID, "tcp", "failure", time.Since(connStart).Seconds())
 				return
 			}
+			defer target.Close()
+			stopTargetClose := context.AfterFunc(listener.ctx, func() { _ = target.Close() })
+			defer stopTargetClose()
 
 			entry := pm.getEntry(tunnelID)
 			if entry == nil {
@@ -687,12 +751,6 @@ func (pm *ProxyManager) handleTCPProxy(listener *managedListener, targetAddr str
 			}(entry)
 
 			wg.Wait()
-			if tunnelID != "" {
-				state.Global().DecSessions(tunnelID)
-				if e := pm.getEntry(tunnelID); e != nil {
-					e.activeTCP.Add(-1)
-				}
-			}
 			telemetry.ObserveProxyConnectionDuration(context.Background(), tunnelID, "tcp", "success", time.Since(connStart).Seconds())
 			telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "tcp", telemetry.ProxyConnectionClosed)
 		}(tunnelID, conn)
@@ -700,44 +758,41 @@ func (pm *ProxyManager) handleTCPProxy(listener *managedListener, targetAddr str
 }
 
 func (pm *ProxyManager) handleUDPProxy(conn *managedPacketConn, targetAddr string) {
+	defer conn.workers.Done()
 	bufPtr := getUDPBuffer()
 	defer putUDPBuffer(bufPtr)
 	buffer := *bufPtr
 	clientConns := make(map[string]*net.UDPConn)
 	var clientsMutex sync.RWMutex
+	defer func() {
+		clientsMutex.Lock()
+		for _, targetConn := range clientConns {
+			targetConn.Close()
+		}
+		clientConns = nil
+		clientsMutex.Unlock()
+	}()
 
 	for {
 		n, remoteAddr, err := conn.ReadFrom(buffer)
 		if err != nil {
-			closeAllClients := func() {
-				clientsMutex.Lock()
-				for _, targetConn := range clientConns {
-					targetConn.Close()
-				}
-				clientConns = nil
-				clientsMutex.Unlock()
-			}
-
 			// Check for intentional closure first: netstack does not
 			// surface net.ErrClosed/io.EOF from ReadFrom() after Close(),
 			// so this channel is the only reliable signal.
 			select {
 			case <-conn.closed:
 				logger.Info("UDP connection closed, stopping proxy handler")
-				closeAllClients()
 				return
 			default:
 			}
 
-			if !pm.running {
-				closeAllClients()
+			if !pm.isRunning() {
 				return
 			}
 
 			// Check for connection closed conditions
 			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 				logger.Info("UDP connection closed, stopping proxy handler")
-				closeAllClients()
 				return
 			}
 
@@ -770,19 +825,18 @@ func (pm *ProxyManager) handleUDPProxy(conn *managedPacketConn, targetAddr strin
 		clientsMutex.RUnlock()
 
 		if !exists {
-			targetUDPAddr, err := net.ResolveUDPAddr("udp", targetAddr)
+			target, err := (&net.Dialer{}).DialContext(conn.ctx, "udp", targetAddr)
 			if err != nil {
-				logger.Error("Error resolving target address: %v", err)
-				telemetry.IncProxyAccept(context.Background(), pm.currentTunnelID, "udp", "failure", "resolve")
-				continue
-			}
-
-			targetConn, err = net.DialUDP("udp", nil, targetUDPAddr)
-			if err != nil {
+				if conn.ctx.Err() != nil {
+					return
+				}
 				logger.Error("Error connecting to target: %v", err)
 				telemetry.IncProxyAccept(context.Background(), pm.currentTunnelID, "udp", "failure", classifyProxyError(err))
 				continue
 			}
+			targetConn = target.(*net.UDPConn)
+			flowTarget := targetConn
+			stopTargetClose := context.AfterFunc(conn.ctx, func() { _ = flowTarget.Close() })
 			// Prevent idle UDP client goroutines from living forever and
 			// retaining large per-connection buffers.
 			_ = targetConn.SetReadDeadline(time.Now().Add(pm.udpIdleTimeout))
@@ -798,7 +852,11 @@ func (pm *ProxyManager) handleUDPProxy(conn *managedPacketConn, targetAddr strin
 			clientConns[clientKey] = targetConn
 			clientsMutex.Unlock()
 
+			conn.workers.Add(1)
 			go func(clientKey string, targetConn *net.UDPConn, remoteAddr net.Addr, tunnelID string) {
+				defer conn.workers.Done()
+				defer stopTargetClose()
+				defer targetConn.Close()
 				start := time.Now()
 				result := "success"
 				bufPtr := getUDPBuffer()
@@ -810,11 +868,11 @@ func (pm *ProxyManager) handleUDPProxy(conn *managedPacketConn, targetAddr strin
 					if storedConn, exists := clientConns[clientKey]; exists && storedConn == targetConn {
 						delete(clientConns, clientKey)
 						targetConn.Close()
-						if e := pm.getEntry(tunnelID); e != nil {
-							e.activeUDP.Add(-1)
-						}
 					}
 					clientsMutex.Unlock()
+					if e := pm.getEntry(tunnelID); e != nil {
+						e.activeUDP.Add(-1)
+					}
 					telemetry.ObserveProxyConnectionDuration(context.Background(), tunnelID, "udp", result, time.Since(start).Seconds())
 					telemetry.IncProxyConnectionEvent(context.Background(), tunnelID, "udp", telemetry.ProxyConnectionClosed)
 				}()
