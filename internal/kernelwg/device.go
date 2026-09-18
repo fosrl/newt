@@ -184,11 +184,13 @@ func (d *Device) checkOwned() error {
 	// LinkAdd learns the index with a follow-up lookup. If that lookup failed,
 	// recover it only from the unique marker assigned during our successful
 	// creation; an existing interface never receives such a marker from us.
-	if d.link.index == 0 && current.index > 0 && current.name == d.link.name && current.kind == d.link.kind && current.alias == d.link.alias {
+	if d.link.index == 0 && d.link.alias != "" && current.index > 0 && current.name == d.link.name && current.kind == d.link.kind && current.alias == d.link.alias {
 		d.link.index = current.index
 	}
 	if d.link.index == 0 || current != d.link || current.kind != "wireguard" {
-		return fmt.Errorf("ownership of interface %s changed; refusing to modify it", d.link.name)
+		return fmt.Errorf("ownership of interface %s changed; refusing to modify it (expected name=%q type=%q index=%d alias=%q, got name=%q type=%q index=%d alias=%q)",
+			d.link.name, d.link.name, d.link.kind, d.link.index, d.link.alias,
+			current.name, current.kind, current.index, current.alias)
 	}
 	return nil
 }

@@ -21,17 +21,18 @@ type fakeRoute struct {
 }
 
 type fakeOperations struct {
-	links      map[string]link
-	routes     map[netip.Prefix]fakeRoute
-	allowed    []netip.Prefix
-	initial    wgtypes.Config
-	mtu        int
-	addr       netip.Prefix
-	isUp       bool
-	closed     bool
-	calls      []string
-	failures   map[string]int
-	callCounts map[string]int
+	createWithoutIndex bool
+	links              map[string]link
+	routes             map[netip.Prefix]fakeRoute
+	allowed            []netip.Prefix
+	initial            wgtypes.Config
+	mtu                int
+	addr               netip.Prefix
+	isUp               bool
+	closed             bool
+	calls              []string
+	failures           map[string]int
+	callCounts         map[string]int
 }
 
 func newFake() *fakeOperations {
@@ -72,6 +73,9 @@ func (f *fakeOperations) create(name, alias string, mtu int) (link, error) {
 	l := link{name: name, kind: "wireguard", alias: alias, index: 10}
 	f.links[name] = l
 	f.mtu = mtu
+	if f.createWithoutIndex {
+		l.index = 0
+	}
 	return l, nil
 }
 
@@ -213,6 +217,43 @@ func TestOpenRollsBackAtEverySetupStage(t *testing.T) {
 			t.Fatal("earlier successful route not cleaned up")
 		}
 	})
+}
+
+func TestOpenRecoversCreatedLinkIndexForSetupAndRollback(t *testing.T) {
+	for _, failure := range []string{"", "configure", "lookup"} {
+		name := failure
+		if name == "" {
+			name = "success"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newFake()
+			f.createWithoutIndex = true
+			if failure == "lookup" {
+				// Lose the initial lookup after creation; rollback must retry
+				// ownership validation and recover the index using our marker.
+				f.failures["lookup"] = 2
+			} else if failure != "" {
+				f.failures[failure] = 1
+			}
+			d, err := open(testConfig(), f)
+			if failure == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if d.link.index != 10 || f.routes[testConfig().AllowedIPs[0]].owner != 10 {
+					t.Fatal("created interface index was not recovered before setup")
+				}
+				if err := d.Close(); err != nil {
+					t.Fatal(err)
+				}
+			} else if !errors.Is(err, injectedError) || d != nil {
+				t.Fatalf("expected injected failure, got device=%v error=%v", d, err)
+			}
+			if len(f.links) != 1 || f.links["wg0"].alias != "existing VPN" || len(f.routes) != 1 || !f.closed {
+				t.Fatal("rollback leaked the created link or modified foreign state")
+			}
+		})
+	}
 }
 
 func TestExistingInterfaceAndRoutesAreNeverReplaced(t *testing.T) {

@@ -40,12 +40,46 @@ func (*linuxOperations) lookup(name string) (link, error) {
 	return link{name: l.Attrs().Name, kind: l.Type(), alias: l.Attrs().Alias, index: l.Attrs().Index}, nil
 }
 
-func (*linuxOperations) create(name, alias string, mtu int) (link, error) {
-	l := &netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: name, Alias: alias, MTU: mtu}}
-	if err := netlink.LinkAdd(l); err != nil {
+func (o *linuxOperations) create(name, alias string, mtu int) (link, error) {
+	return createLinuxLink(name, alias, mtu, netlink.LinkAdd, o.lookup, netlink.LinkSetAlias)
+}
+
+func createLinuxLink(name, alias string, mtu int,
+	add func(netlink.Link) error,
+	lookup func(string) (link, error),
+	setAlias func(netlink.Link, string) error,
+) (link, error) {
+	// Linux does not apply IFLA_IFALIAS when creating a link. Assign it in a
+	// separate operation after verifying the exclusively created interface.
+	l := &netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: name, MTU: mtu}}
+	if err := add(l); err != nil {
 		return link{}, err
 	}
-	return link{name: name, kind: "wireguard", alias: alias, index: l.Index}, nil
+	created := link{name: name, kind: "wireguard", index: l.Index}
+	if created.index <= 0 {
+		// Without an index or installed ownership marker, adopting a name
+		// could capture another administrator's replacement interface.
+		return created, errors.New("created WireGuard interface has no known index; refusing to modify or remove it")
+	}
+	current, err := lookup(name)
+	if err != nil {
+		return created, fmt.Errorf("inspect newly created WireGuard interface: %w", err)
+	}
+	if current != created {
+		return created, errors.New("newly created WireGuard interface changed before assigning ownership marker")
+	}
+	if err := setAlias(netlinkLink(created), alias); err != nil {
+		// A failed operation may still have applied. Preserve only a verified
+		// identity for open's rollback; never adopt a foreign alias or index.
+		current, lookupErr := lookup(name)
+		if lookupErr == nil && current.name == created.name && current.kind == created.kind &&
+			current.index == created.index && (current.alias == "" || current.alias == alias) {
+			created.alias = current.alias
+		}
+		return created, errors.Join(fmt.Errorf("set WireGuard ownership marker: %w", err), lookupErr)
+	}
+	created.alias = alias
+	return created, nil
 }
 
 func netlinkLink(l link) netlink.Link {

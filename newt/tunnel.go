@@ -3,6 +3,7 @@ package newt
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/fosrl/newt/logger"
@@ -182,10 +183,68 @@ func (n *Newt) requestKernelReconnect() {
 	}
 	chainID := generateChainId()
 	n.pendingPingChainId = chainID
-	n.stopFunc = n.client.SendMessageInterval("newt/ping/request", map[string]interface{}{
-		"noCloud": n.config.NoCloud,
-		"chainId": chainID,
-	}, 3*time.Second)
+	// SendMessageInterval sends immediately. Delay its creation as well, or a
+	// rejected kernel setup can trigger another registration in a tight loop.
+	n.stopFunc, _ = n.delayedKernelReconnect(chainID, 3*time.Second, func() func() {
+		return n.client.SendMessageInterval("newt/ping/request", map[string]interface{}{
+			"noCloud": n.config.NoCloud,
+			"chainId": chainID,
+		}, 3*time.Second)
+	})
+}
+
+// delayedKernelReconnect is called with lifecycleMu held. Its cancellation
+// never takes that mutex, so shutdown and handlers can stop a pending timer or
+// its replacement message interval without deadlocking. The starter is kept
+// separate so retry timing can be tested without a live control connection.
+func (n *Newt) delayedKernelReconnect(chainID string, delay time.Duration, start func() func()) (func(), <-chan struct{}) {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	var once sync.Once
+	var intervalMu sync.Mutex
+	var stopInterval func()
+	cancel := func() {
+		once.Do(func() {
+			close(stop)
+			intervalMu.Lock()
+			defer intervalMu.Unlock()
+			if stopInterval != nil {
+				stopInterval()
+			}
+		})
+	}
+	var shutdown <-chan struct{}
+	if n.shutdownCtx != nil {
+		shutdown = n.shutdownCtx.Done()
+	}
+	go func() {
+		defer close(done)
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-stop:
+			return
+		case <-shutdown:
+			return
+		case <-timer.C:
+		}
+		n.lifecycleMu.Lock()
+		defer n.lifecycleMu.Unlock()
+		intervalMu.Lock()
+		defer intervalMu.Unlock()
+		select {
+		case <-stop:
+			return
+		case <-shutdown:
+			return
+		default:
+		}
+		if n.stopping.Load() || n.connected || n.pendingPingChainId != chainID {
+			return
+		}
+		stopInterval = start()
+	}()
+	return cancel, done
 }
 
 // schedulePingRecovery keeps registration state under lifecycleMu without
