@@ -567,12 +567,9 @@ func (pm *ProxyManager) Stop() error {
 		pm.udpConns = append(pm.udpConns[:i], pm.udpConns[i+1:]...)
 	}
 
-	flushDone := pm.flushDone
-	if pm.flushStop != nil {
-		close(pm.flushStop)
-		pm.flushStop = nil
-		pm.flushDone = nil
-	}
+	flushStop, flushDone := pm.flushStop, pm.flushDone
+	pm.flushStop = nil
+	pm.flushDone = nil
 	pm.mutex.Unlock()
 	// Flow cleanup also takes pm.mutex, so join it after releasing the lock.
 	// Each listener owns its generation, including dials in progress, and can
@@ -581,6 +578,11 @@ func (pm *ProxyManager) Stop() error {
 		worker.Wait()
 	}
 
+	// Flows may account for their final bytes while exiting. Keep the flush
+	// loop alive until they finish so its final flush includes those bytes.
+	if flushStop != nil {
+		close(flushStop)
+	}
 	// The final telemetry flush takes pm.mutex.RLock; waiting under the write
 	// lock would deadlock. The worker owns its channels, so a later Start can
 	// safely create a fresh worker while this one finishes.

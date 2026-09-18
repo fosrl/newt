@@ -39,6 +39,18 @@ type NewtErrorData struct {
 	Message string `json:"message"`
 }
 
+// pingExitNodes runs under lifecycleMu, so both caller cancellation and Close
+// must interrupt its HTTP requests before shutdown can acquire that mutex.
+func (n *Newt) pingExitNodes(ctx context.Context, nodes []exitnode.ExitNode) ([]exitnode.ExitNodePingResult, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if n.shutdownCtx != nil {
+		stop := context.AfterFunc(n.shutdownCtx, cancel)
+		defer stop()
+	}
+	return exitnode.PingExitNodesContext(ctx, nodes, n.config.PreferEndpoint, n.connected)
+}
+
 func (n *Newt) registerHandlers(ctx context.Context) {
 	//TODO: MOVE MORE OF THESE HANDLERS TO STANDALONE FUNCTIONS IN THE DATA.GO AND CONNECT.GO FILES
 	registerHandler := func(topic string, handler websocket.MessageHandler) {
@@ -160,7 +172,11 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 			return
 		}
 
-		pingResults := exitnode.PingExitNodes(exitNodes, n.config.PreferEndpoint, n.connected)
+		pingResults, err := n.pingExitNodes(ctx, exitNodes)
+		if err != nil {
+			logger.Debug("Exit node selection canceled: %v", err)
+			return
+		}
 
 		chainId := generateChainId()
 		n.pendingRegisterChainId = chainId

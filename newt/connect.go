@@ -100,7 +100,7 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 		return
 	}
 	logger.Info("Connecting to endpoint: %s", host)
-	resolvedEndpoint, err := util.ResolveDomain(n.wgData.Endpoint)
+	resolvedEndpoint, err := util.ResolveDomainContext(ctx, n.wgData.Endpoint)
 	if err != nil {
 		logger.Error("Failed to resolve endpoint: %v", err)
 		regResult = "failure"
@@ -315,8 +315,7 @@ persistent_keepalive_interval=5`, util.FixKey(n.privateKey.String()), util.FixKe
 		logger.Debug("Successfully added %d health check targets", len(n.wgData.HealthCheckTargets))
 	}
 
-	if err = n.pm.Start(); err != nil {
-		logger.Error("Failed to start proxy manager: %v", err)
+	if err = n.startMainProxy(); err != nil {
 		regResult = "failure"
 		return
 	}
@@ -338,6 +337,19 @@ persistent_keepalive_interval=5`, util.FixKey(n.privateKey.String()), util.FixKe
 	}
 	n.connected = true
 	connectionReady = true
+}
+
+// startMainProxy preserves the existing best-effort startup for userspace and
+// native-TUN tunnels: one failed listener must not discard working listeners.
+// Kernel setup instead fails atomically and retries with a fresh owned interface.
+func (n *Newt) startMainProxy() error {
+	if err := n.pm.Start(); err != nil {
+		logger.Error("Failed to start proxy manager: %v", err)
+		if n.config.UseKernelMainInterface {
+			return err
+		}
+	}
+	return nil
 }
 
 // startBrowserGateway creates the browser gateway and its listener if one

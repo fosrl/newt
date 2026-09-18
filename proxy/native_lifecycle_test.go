@@ -109,6 +109,42 @@ func TestNativeAsyncFlushStopsBeforeStartAndRestarts(t *testing.T) {
 	}
 }
 
+func TestNativeStopFlushesBytesRecordedByExitingFlows(t *testing.T) {
+	initNativeProxyTelemetry(t)
+	pm := NewProxyManagerNative("127.0.0.1")
+	t.Cleanup(func() { stopNativeProxy(t, pm) })
+	pm.SetTunnelID("exiting-flow")
+	pm.SetAsyncBytes(true)
+	flushStop, flushDone := pm.flushStop, pm.flushDone
+	entry := pm.getEntry("exiting-flow")
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := newManagedListener(listener)
+	pm.listeners = append(pm.listeners, managed)
+	managed.workers.Add(1)
+	go func() {
+		defer managed.workers.Done()
+		<-managed.ctx.Done()
+		// Synchronize with Stop releasing its lock after canceling the flow.
+		pm.mutex.Lock()
+		pm.mutex.Unlock()
+		select {
+		case <-flushStop:
+			// If Stop ended the flush loop before joining the flow, force the
+			// final flush to precede this flow's last accounting update.
+			<-flushDone
+		default:
+		}
+		entry.bytesOutTCP.Add(123)
+	}()
+	stopNativeProxy(t, pm)
+	if got := entry.bytesOutTCP.Load(); got != 0 {
+		t.Fatalf("Stop left %d bytes unflushed from an exiting flow", got)
+	}
+}
+
 func TestNativeTCPAndUDPForwarding(t *testing.T) {
 	initNativeProxyTelemetry(t)
 	tcpTarget, err := net.Listen("tcp4", "127.0.0.1:0")

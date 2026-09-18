@@ -454,7 +454,44 @@ func TestValidationRejectsUnsafeRoutesBeforeMutation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_ = d.Close()
+		if f.initial.Peers[0].Endpoint.String() != "[2001:db8::1]:51820" {
+			t.Fatal("global IPv6 endpoint was not configured")
+		}
+		if err := d.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestValidationRejectsScopedIPv6EndpointsBeforeMutation(t *testing.T) {
+	for _, tt := range []struct {
+		name, ip, zone string
+	}{
+		{name: "named scope", ip: "fe80::1", zone: "eth0"},
+		{name: "numeric scope", ip: "fe80::1", zone: "2"},
+		{name: "link-local without scope", ip: "fe80::1"},
+		{name: "global address with scope", ip: "2001:db8::1", zone: "eth0"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFake()
+			c := testConfig()
+			c.Endpoint.IP = net.ParseIP(tt.ip)
+			c.Endpoint.Zone = tt.zone
+			d, err := open(c, f)
+			if d != nil || err == nil || !strings.Contains(err.Error(), "does not support scoped or link-local IPv6 endpoints") {
+				t.Fatalf("expected explicit unsupported endpoint error, got device=%v error=%v", d, err)
+			}
+			if !slices.Equal(f.calls, []string{"close"}) || !f.closed {
+				t.Fatalf("validation performed backend operations other than client cleanup: %v", f.calls)
+			}
+		})
+	}
+	t.Run("IPv4 link-local remains supported", func(t *testing.T) {
+		c := testConfig()
+		c.Endpoint.IP = net.ParseIP("169.254.0.1") // IPv4-mapped 16-byte representation.
+		if err := validate(c); err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 

@@ -83,8 +83,14 @@ func validate(c Config) error {
 		return errors.New("kernel WireGuard requires a resolved UDP endpoint")
 	}
 	ip, ok := netip.AddrFromSlice(c.Endpoint.IP)
-	if !ok || ip.Unmap().IsUnspecified() || ip.Unmap().IsMulticast() {
+	ip = ip.Unmap()
+	if !ok || ip.IsUnspecified() || ip.IsMulticast() {
 		return errors.New("kernel WireGuard requires a unicast endpoint address")
+	}
+	// The wgctrl Linux backend does not encode an IPv6 sockaddr's scope ID.
+	// Reject endpoints that need one instead of silently losing their zone.
+	if c.Endpoint.Zone != "" || (ip.Is6() && ip.IsLinkLocalUnicast()) {
+		return errors.New("kernel WireGuard backend does not support scoped or link-local IPv6 endpoints")
 	}
 	_, err := allowedIPs(c, c.AllowedIPs)
 	return err

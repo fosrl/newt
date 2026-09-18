@@ -23,8 +23,10 @@ permissions cause errors; there is no automatic userspace fallback. This is a
 source-build feature until a release containing it is available.
 
 The main tunnel uses an IPv4 address; its outer WireGuard UDP endpoint can be IPv4
-or IPv6. This backend supports non-default IPv4 remote subnet routes. It rejects
-default routes and subnets containing the local tunnel address, WireGuard
+or IPv6. Scoped endpoints (with a `%zone`) and IPv6 link-local endpoints are
+rejected because the current control library does not preserve their scope ID.
+This backend supports non-default IPv4 remote subnet routes. It rejects default
+routes and subnets containing the local tunnel address, WireGuard
 endpoint, or resolved Pangolin control endpoint, and does not replace existing
 host routes. General exit-node routing is outside this mode's scope.
 

@@ -25,7 +25,7 @@ jobs:
         run: make test
 
       - name: Check tunnel and proxy lifecycle races
-        run: go test -race ./internal/kernelwg ./newt ./newtconfig ./proxy
+        run: go test -race ./internal/kernelwg ./newt ./newtconfig ./proxy ./util ./exitnode
 
       - name: Test Linux kernel WireGuard lifecycle in an isolated namespace
         run: |
