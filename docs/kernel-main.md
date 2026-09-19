@@ -32,15 +32,23 @@ host routes. General exit-node routing is outside this mode's scope.
 
 ## Requirements and network isolation
 
-The Linux host must provide WireGuard, either built into its kernel or as a loaded
-module. Newt needs permission to manage network interfaces and routes in its
+The Linux host must provide WireGuard, either built into its kernel or as a
+loadable module. Newt needs permission to manage network interfaces and routes in its
 network namespace (`CAP_NET_ADMIN`), and a working `ping` executable for tunnel
 health checks. The repository's Docker image includes `ping`. Its normal Docker
 capabilities include `NET_RAW`, which may be needed for ping depending on the host
 configuration. If you drop the default capabilities, account for this separately.
 
 The kernel backend does not require `/dev/net/tun`, a mounted modules directory,
-`SYS_MODULE`, or a privileged Docker container. Module loading belongs to the host.
+or a privileged Docker container. Newt creates the interface through rtnetlink,
+the equivalent of `ip link add ... type wireguard`. For an unknown link kind the
+kernel invokes its own module loader in the host context, so on kernels from 5.6
+onward with in-tree WireGuard the module loads on first use without the container
+holding `SYS_MODULE`. Older or custom kernels that ship WireGuard as an out-of-tree
+module need it loaded on the host first; `SYS_MODULE` in the container is an
+alternative only if the container can also see the host's modules directory.
+This autoload path has not yet been verified against a host with the module
+unloaded; the test hosts already had WireGuard active.
 For Docker inside a Proxmox LXC, the kernel is the Proxmox host's kernel. Root in
 an unprivileged LXC and Docker's `NET_ADMIN` cannot override restrictions imposed
 by the outer container. Verify the actual permissions before changing LXC policy;

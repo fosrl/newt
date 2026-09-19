@@ -15,6 +15,13 @@ benchmark was not repeated after those fixes.
   endpoint to a receiver in Gerbil's network namespace. Bytes were discarded;
   no player, decoding or transcoding was involved. Public TLS/reverse-proxy
   layers and the viewer's connection were outside the measurement path.
+- Topology: Jellyfin ran on the LAN, one hop from the Docker host. Newt ran in
+  the bridge network of the example Compose file: no host networking, no
+  ipvlan, no hairpin through a published port. Traffic left the site over a
+  residential WAN link to the VPS. Every mode, including the direct WireGuard
+  reference, was capped by that link's upstream capacity of roughly 34 Mbit/s.
+  **The throughput column therefore measures the uplink, not the tunnel.** The
+  comparison of interest is CPU per GiB transferred.
 - Each main comparison lasted 60 seconds, capped at 512 MiB. Userspace and kernel
   runs alternated in A–B–B–A order. Native-main and direct-WireGuard references
   were separate runs; the direct reference lasted 30 seconds.
@@ -43,9 +50,11 @@ or power. Whole-host CPU was also sampled, but unrelated load varied too much
 for precise attribution: total host utilization was 20.68% in kernel B1 and
 34.86% in B2 while Newt's cgroup CPU stayed almost identical.
 
-There was no material demonstrated throughput improvement on this path. Even
-the direct WireGuard reference reached only about 34 Mbit/s; the remaining
-network bottleneck was not identified.
+There was no material demonstrated throughput improvement on this path, and
+none could be shown: the residential uplink capped every run at about 34 Mbit/s,
+including the direct WireGuard reference. Behavior on a saturated link,
+parallel streams and long-running iperf3 sessions remain to be measured on a
+LAN-local Pangolin/Gerbil test instance where the WAN drops out of the path.
 
 ## Startup, power and limitations
 
