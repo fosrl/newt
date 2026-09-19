@@ -3,6 +3,7 @@ package newt
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -21,12 +22,35 @@ type pingFunc func(dst string, timeout time.Duration) (time.Duration, error)
 
 const msgHealthFileWriteFailed = "Failed to write health file: %v"
 
+// pingKernel binds the probe to the owned interface. Otherwise a pre-existing
+// route (for example a Tailscale policy route) could make a broken tunnel look
+// healthy. Canceling the tunnel interrupts in-flight probes during cleanup.
+func pingKernel(parent context.Context, interfaceName, dst string, timeout time.Duration) (time.Duration, error) {
+	seconds := max(1, int(timeout.Seconds()))
+	ctx, cancel := context.WithTimeout(parent, timeout+time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ping", "-4", "-n", "-I", interfaceName,
+		"-c", "1", "-W", fmt.Sprintf("%d", seconds), dst)
+	start := time.Now()
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		return 0, fmt.Errorf("kernel tunnel ping to %s on %s failed: %w", dst, interfaceName, err)
+	}
+	return time.Since(start), nil
+}
+
 func pingNative(dst string, timeout time.Duration) (time.Duration, error) {
+	return pingNativeContext(context.Background(), dst, timeout)
+}
+
+func pingNativeContext(parent context.Context, dst string, timeout time.Duration) (time.Duration, error) {
 	timeoutSecs := int(timeout.Seconds())
 	if timeoutSecs < 1 {
 		timeoutSecs = 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Second)
+	ctx, cancel := context.WithTimeout(parent, timeout+time.Second)
 	defer cancel()
 
 	var cmd *exec.Cmd
@@ -41,12 +65,27 @@ func pingNative(dst string, timeout time.Duration) (time.Duration, error) {
 
 	start := time.Now()
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
 		return 0, fmt.Errorf("native ping to %s failed: %w", dst, err)
 	}
 	return time.Since(start), nil
 }
 
 func ping(tnet *netstack.Net, dst string, timeout time.Duration) (time.Duration, error) {
+	return pingContext(context.Background(), tnet, dst, timeout)
+}
+
+func pingContext(ctx context.Context, tnet *netstack.Net, dst string, timeout time.Duration) (latency time.Duration, err error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	defer func() {
+		if ctx.Err() != nil {
+			latency, err = 0, ctx.Err()
+		}
+	}()
 	if tnet == nil {
 		return 0, fmt.Errorf("netstack not initialized")
 	}
@@ -56,6 +95,8 @@ func ping(tnet *netstack.Net, dst string, timeout time.Duration) (time.Duration,
 		return 0, fmt.Errorf("failed to create ICMP socket: %w", err)
 	}
 	defer socket.Close()
+	stop := context.AfterFunc(ctx, func() { socket.Close() })
+	defer stop()
 
 	if tcpConn, ok := socket.(interface{ SetReadBuffer(int) error }); ok {
 		tcpConn.SetReadBuffer(64 * 1024)
@@ -120,6 +161,9 @@ func reliablePing(fn pingFunc, dst string, baseTimeout time.Duration, maxAttempt
 
 		latency, err := fn(dst, timeout)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return 0, err
+			}
 			lastErr = err
 			logger.Debug("Ping attempt %d/%d failed: %v", attempt, maxAttempts, err)
 
@@ -176,7 +220,9 @@ func (n *Newt) pingWithRetry(fn pingFunc, dst string, timeout time.Duration) (st
 		logger.Warn("Ping attempt %d failed: %v", attempt, err)
 	}
 
+	n.pingWorkers.Add(1)
 	go func() {
+		defer n.pingWorkers.Done()
 		attempt = 2
 
 		for {
@@ -197,9 +243,20 @@ func (n *Newt) pingWithRetry(fn pingFunc, dst string, timeout time.Duration) (st
 						logger.Info("Increasing ping retry delay to %v", retryDelay)
 					}
 
-					time.Sleep(retryDelay)
+					timer := time.NewTimer(retryDelay)
+					select {
+					case <-stopChan:
+						timer.Stop()
+						return
+					case <-timer.C:
+					}
 					attempt++
 				} else {
+					select {
+					case <-stopChan:
+						return
+					default:
+					}
 					logger.Debug("Ping succeeded after %d attempts", attempt)
 					logger.Debug("Ping latency: %v", latency)
 					logger.Info("Tunnel connection to server established successfully!")
@@ -210,8 +267,6 @@ func (n *Newt) pingWithRetry(fn pingFunc, dst string, timeout time.Duration) (st
 					}
 					return
 				}
-			case <-n.pingStopChan:
-				return
 			}
 		}
 	}()
@@ -229,7 +284,9 @@ func (n *Newt) startPingCheck(fn pingFunc, serverIP, tunnelID string) chan struc
 
 	pingStopChan := make(chan struct{})
 
+	n.pingWorkers.Add(1)
 	go func() {
+		defer n.pingWorkers.Done()
 		ticker := time.NewTicker(currentInterval)
 		defer ticker.Stop()
 		for {
@@ -257,6 +314,11 @@ func (n *Newt) startPingCheck(fn pingFunc, serverIP, tunnelID string) chan struc
 				}
 
 				latency, err := reliablePing(fn, serverIP, adaptiveTimeout, maxAttempts)
+				select {
+				case <-pingStopChan:
+					return
+				default:
+				}
 				if err != nil {
 					consecutiveFailures++
 
@@ -278,26 +340,7 @@ func (n *Newt) startPingCheck(fn pingFunc, serverIP, tunnelID string) chan struc
 						if tunnelID != "" {
 							telemetry.IncReconnect(context.Background(), tunnelID, "client", telemetry.ReasonTimeout)
 						}
-						pingChainId := generateChainId()
-						n.pendingPingChainId = pingChainId
-						n.stopFunc = n.client.SendMessageInterval("newt/ping/request", map[string]interface{}{
-							"chainId": pingChainId,
-						}, 3*time.Second)
-						bcChainId := generateChainId()
-						// This compatibility message has no wg/connect response and must
-						// not supersede the pending real registration chain.
-						if err := n.client.SendMessage("newt/wg/register", map[string]interface{}{
-							"publicKey":           n.publicKey.String(),
-							"backwardsCompatible": true,
-							"chainId":             bcChainId,
-						}); err != nil {
-							logger.Error("Failed to send registration message: %v", err)
-						}
-						if n.config.HealthFile != "" {
-							if err := os.Remove(n.config.HealthFile); err != nil {
-								logger.Error("Failed to remove health file: %v", err)
-							}
-						}
+						n.schedulePingRecovery(pingStopChan, tunnelID)
 					}
 					if consecutiveFailures >= failureThreshold && currentInterval < maxInterval {
 						currentInterval = time.Duration(float64(currentInterval) * 1.3)

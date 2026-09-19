@@ -138,8 +138,10 @@ func (n *Newt) handleSync(msg websocket.WSMessage) {
 	}
 
 	// Sync remote exit node subnets
-	if n.dev != nil {
-		n.updateRemoteExitNodeSubnets(syncData.RemoteExitNodeSubnets)
+	if n.hasMainTunnel() {
+		if err := n.updateRemoteExitNodeSubnetsLocked(syncData.RemoteExitNodeSubnets); err != nil {
+			return
+		}
 	}
 
 	// Sync clients WireGuard peers and targets, if clients are set up

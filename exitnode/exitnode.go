@@ -5,6 +5,7 @@
 package exitnode
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -54,8 +55,19 @@ type ExitNodePingResult struct {
 // available, biasing reconnects toward switching away from a possibly
 // degraded node.
 func PingExitNodes(exitNodes []ExitNode, preferEndpoint string, alreadyConnected bool) []ExitNodePingResult {
+	results, _ := PingExitNodesContext(context.Background(), exitNodes, preferEndpoint, alreadyConnected)
+	return results
+}
+
+// PingExitNodesContext is PingExitNodes with cancellation of in-flight HTTP
+// requests. Cancellation aborts selection; ordinary probe errors remain in the
+// per-node results so the server can still choose among the other candidates.
+func PingExitNodesContext(ctx context.Context, exitNodes []ExitNode, preferEndpoint string, alreadyConnected bool) ([]ExitNodePingResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(exitNodes) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	if len(exitNodes) == 1 || preferEndpoint != "" {
@@ -81,7 +93,7 @@ func PingExitNodes(exitNodes []ExitNode, preferEndpoint string, alreadyConnected
 				Endpoint:               selected.Endpoint,
 				WasPreviouslyConnected: selected.WasPreviouslyConnected,
 			},
-		}
+		}, nil
 	}
 
 	type nodeResult struct {
@@ -107,9 +119,23 @@ func PingExitNodes(exitNodes []ExitNode, preferEndpoint string, alreadyConnected
 			url = strings.TrimRight(url, "/") + "/ping"
 		}
 		for j := 0; j < pingAttempts; j++ {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			start := time.Now()
-			resp, err := httpClient.Get(url)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				lastErr = err
+				break
+			}
+			resp, err := httpClient.Do(req)
 			latency := time.Since(start)
+			if ctx.Err() != nil {
+				if resp != nil {
+					resp.Body.Close()
+				}
+				return nil, ctx.Err()
+			}
 			if err != nil {
 				lastErr = err
 				logger.Warn("Failed to ping exit node %d (%s) attempt %d: %v", node.ID, url, j+1, err)
@@ -172,5 +198,5 @@ func PingExitNodes(exitNodes []ExitNode, preferEndpoint string, alreadyConnected
 		}
 	}
 
-	return pingResults
+	return pingResults, nil
 }

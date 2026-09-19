@@ -7,3 +7,4 @@ Makefile
 public/
 LICENSE
 CONTRIBUTING.md
+examples/kernel-main/.env
