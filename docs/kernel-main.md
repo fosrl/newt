@@ -47,8 +47,12 @@ onward with in-tree WireGuard the module loads on first use without the containe
 holding `SYS_MODULE`. Older or custom kernels that ship WireGuard as an out-of-tree
 module need it loaded on the host first; `SYS_MODULE` in the container is an
 alternative only if the container can also see the host's modules directory.
-This autoload path has not yet been verified against a host with the module
-unloaded; the test hosts already had WireGuard active.
+Verified on Ubuntu 24.04 (kernel 6.8, in-tree module initially unloaded): a
+container with `CAP_NET_ADMIN` only, no `CAP_SYS_MODULE`, created the interface
+and the host loaded the module on that request; Newt's kernel lifecycle test
+passed under the same restriction. With host autoload blocked
+(`install wireguard /bin/false`), the same request fails with
+`Unknown device type` and the module stays unloaded.
 For Docker inside a Proxmox LXC, the kernel is the Proxmox host's kernel. Root in
 an unprivileged LXC and Docker's `NET_ADMIN` cannot override restrictions imposed
 by the outer container. Verify the actual permissions before changing LXC policy;
