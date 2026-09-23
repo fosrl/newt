@@ -175,11 +175,25 @@ func (sl *SubnetLookup) Match(srcIP, dstIP netip.Addr, port uint16, proto tcpip.
 			continue
 		}
 
+		// Supernets() yields longest-prefix-match first, then progressively
+		// less specific. Once a more specific, non-catch-all destination
+		// rule has been seen and rejected (wrong port/protocol), a
+		// 0.0.0.0/0 (or ::/0) exit-node rule must not be allowed to rescue
+		// it - "whole subnet" routing only applies when no more specific
+		// resource covers this destination at all. Fallthrough between two
+		// specific (non-catch-all) rules is intentional and unaffected.
+		sawRejectedSpecificDest := false
+
 		// Step 2: Find all destination prefixes that contain dstIP
 		// This is also O(log n) for each matching source prefix
-		for _, rules := range destTriePtr.trie.Supernets(dstPrefix) {
+		for destPrefix, rules := range destTriePtr.trie.Supernets(dstPrefix) {
 			if rules == nil {
 				continue
+			}
+
+			isCatchAll := destPrefix.Bits() == 0
+			if isCatchAll && sawRejectedSpecificDest {
+				return nil
 			}
 
 			// Step 3: Check each rule for ICMP and port restrictions
@@ -215,6 +229,10 @@ func (sl *SubnetLookup) Match(srcIP, dstIP netip.Addr, port uint16, proto tcpip.
 						// Port matches but protocol doesn't - continue checking other ranges
 					}
 				}
+			}
+
+			if !isCatchAll {
+				sawRejectedSpecificDest = true
 			}
 		}
 	}
