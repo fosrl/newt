@@ -181,6 +181,43 @@ func SetIPv4ExcludedRoutes(routes []IPv4Route) {
 	logger.Info("Set IPv4 excluded routes: %d routes", len(routes))
 }
 
+// AddIPv4ExcludedRoute adds a single excluded route, e.g. so mobile
+// (iOS/Android) packet-tunnel providers keep a specific destination (a site's
+// live endpoint, the control-plane server) out of an otherwise-broad included
+// route such as a full-tunnel/gateway default route. Mirrors
+// AddIPv4IncludedRoute's dedup-by-equality behavior.
+func AddIPv4ExcludedRoute(route IPv4Route) {
+	networkSettingsMutex.Lock()
+	defer networkSettingsMutex.Unlock()
+
+	for _, r := range networkSettings.IPv4ExcludedRoutes {
+		if r == route {
+			logger.Info("IPv4 excluded route already exists: %+v", route)
+			return
+		}
+	}
+
+	networkSettings.IPv4ExcludedRoutes = append(networkSettings.IPv4ExcludedRoutes, route)
+	incrementor++
+	logger.Info("Added IPv4 excluded route: %+v", route)
+}
+
+// RemoveIPv4ExcludedRoute reverses AddIPv4ExcludedRoute.
+func RemoveIPv4ExcludedRoute(route IPv4Route) {
+	networkSettingsMutex.Lock()
+	defer networkSettingsMutex.Unlock()
+	routes := networkSettings.IPv4ExcludedRoutes
+	for i, r := range routes {
+		if r == route {
+			networkSettings.IPv4ExcludedRoutes = append(routes[:i], routes[i+1:]...)
+			incrementor++
+			logger.Info("Removed IPv4 excluded route: %+v", route)
+			return
+		}
+	}
+	logger.Info("IPv4 excluded route not found for removal: %+v", route)
+}
+
 // SetIPv6Settings sets IPv6 addresses and network prefixes
 func SetIPv6Settings(addresses []string, networkPrefixes []string) {
 	networkSettingsMutex.Lock()

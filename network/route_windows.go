@@ -100,6 +100,94 @@ func WindowsAddRoute(destination string, gateway string, interfaceName string) e
 	return nil
 }
 
+// WindowsAddBypassRoute adds an explicit /32 host route for destIP via
+// whatever gateway/interface the OS routing table currently uses to reach
+// it, so a broader route added afterward (e.g. a gateway/full-tunnel default
+// route) can never capture this destination - see
+// network.AddBypassRouteForDestination.
+func WindowsAddBypassRoute(destIP string) error {
+	addr, err := netip.ParseAddr(destIP)
+	if err != nil {
+		return fmt.Errorf("invalid destination address: %v", err)
+	}
+
+	var family winipcfg.AddressFamily
+	if addr.Is4() {
+		family = 2 // AF_INET
+	} else {
+		family = 23 // AF_INET6
+	}
+
+	routes, err := winipcfg.GetIPForwardTable2(family)
+	if err != nil {
+		return fmt.Errorf("failed to get route table: %v", err)
+	}
+
+	var best *winipcfg.MibIPforwardRow2
+	bestBits := -1
+	for i := range routes {
+		route := &routes[i]
+		prefix := route.DestinationPrefix.Prefix()
+		if !prefix.Contains(addr) {
+			continue
+		}
+		if prefix.Bits() > bestBits || (prefix.Bits() == bestBits && best != nil && route.Metric < best.Metric) {
+			bestBits = prefix.Bits()
+			best = route
+		}
+	}
+	if best == nil {
+		return fmt.Errorf("no route found to %s", destIP)
+	}
+
+	prefix := netip.PrefixFrom(addr, addr.BitLen())
+	logger.Info("Adding bypass route to %s via interface LUID %v", destIP, best.InterfaceLUID)
+
+	if err := best.InterfaceLUID.AddRoute(prefix, best.NextHop.Addr(), 0); err != nil {
+		return fmt.Errorf("failed to add bypass route: %v", err)
+	}
+
+	return nil
+}
+
+// WindowsRemoveBypassRoute removes a route previously added by
+// WindowsAddBypassRoute. It deliberately does not re-derive the route via a
+// longest-prefix-match lookup - by the time this runs, our own /32 bypass
+// route is the most specific match for destIP and the lookup would just find
+// itself - so it instead deletes by exact destination prefix alone.
+func WindowsRemoveBypassRoute(destIP string) error {
+	addr, err := netip.ParseAddr(destIP)
+	if err != nil {
+		return fmt.Errorf("invalid destination address: %v", err)
+	}
+	prefix := netip.PrefixFrom(addr, addr.BitLen())
+
+	var family winipcfg.AddressFamily
+	if addr.Is4() {
+		family = 2
+	} else {
+		family = 23
+	}
+
+	routes, err := winipcfg.GetIPForwardTable2(family)
+	if err != nil {
+		return fmt.Errorf("failed to get route table: %v", err)
+	}
+
+	for _, route := range routes {
+		if route.DestinationPrefix.Prefix() != prefix {
+			continue
+		}
+		logger.Info("Removing bypass route to %s on interface LUID %v", destIP, route.InterfaceLUID)
+		if err := route.Delete(); err != nil {
+			return fmt.Errorf("failed to delete bypass route: %v", err)
+		}
+		return nil
+	}
+
+	return fmt.Errorf("bypass route to %s not found", destIP)
+}
+
 func WindowsRemoveRoute(destination string, interfaceName string) error {
 	// Parse destination CIDR
 	_, ipNet, err := net.ParseCIDR(destination)
