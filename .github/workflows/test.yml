@@ -24,6 +24,15 @@ jobs:
       - name: Run Go tests
         run: make test
 
+      - name: Check tunnel and proxy lifecycle races
+        run: go test -race ./internal/kernelwg ./newt ./newtconfig ./proxy ./util ./exitnode
+
+      - name: Test Linux kernel WireGuard lifecycle in an isolated namespace
+        run: |
+          sudo modprobe wireguard
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/kernelwg.test" ./internal/kernelwg
+          sudo env NEWT_KERNEL_WG_INTEGRATION=1 "$RUNNER_TEMP/kernelwg.test" -test.run '^TestLinuxKernelLifecycle$' -test.v
+
   build:
     runs-on: ubuntu-latest
     strategy:

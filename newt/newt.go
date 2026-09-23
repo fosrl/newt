@@ -5,6 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"net/netip"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -34,10 +37,22 @@ type Newt struct {
 	loggerLevel logger.LogLevel
 	tlsOpt      websocket.ClientOption
 
+	// Serialize tunnel setup and message handlers with external shutdown.
+	// Cancellation happens before locking so an in-flight setup can finish.
+	lifecycleMu    sync.Mutex
+	stopping       atomic.Bool
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
+
 	// WireGuard tunnel state
 	tun  wtun.Device
 	tnet *netstack.Net
 	dev  *device.Device
+	// kernelMain owns a Linux WireGuard link and its routes. The userspace
+	// device remains separate because only it exposes a userspace UAPI socket.
+	kernelMain     kernelMainDevice
+	mainPingCancel context.CancelFunc
+	mainUAPI       io.Closer
 
 	// Proxy / networking
 	pm                  *proxy.ProxyManager
@@ -48,6 +63,7 @@ type Newt struct {
 	// Ping state
 	pingStopChan          chan struct{}
 	pingWithRetryStopChan chan struct{}
+	pingWorkers           sync.WaitGroup
 
 	// Connection / messaging state
 	connected              bool
@@ -81,7 +97,11 @@ type Newt struct {
 // client, generates WireGuard keys, and starts the auth daemon if enabled.
 // Callers should invoke Start after any additional setup (telemetry, etc.).
 func Init(ctx context.Context, cfg Config) (*Newt, error) {
+	if err := cfg.ValidateMainInterface(); err != nil {
+		return nil, err
+	}
 	n := &Newt{config: cfg}
+	n.shutdownCtx, n.shutdownCancel = context.WithCancel(context.Background())
 
 	// Metric-recording calls throughout the websocket/proxy/tunnel code are
 	// unconditional, not gated on cfg.MetricsEnabled, so the instruments
@@ -179,6 +199,11 @@ func (n *Newt) GetTLSClientOpt() websocket.ClientOption {
 // Start sets up all WebSocket handlers, connects to the server, and blocks
 // until ctx is cancelled.
 func (n *Newt) Start(ctx context.Context) {
+	n.lifecycleMu.Lock()
+	if n.stopping.Load() || ctx.Err() != nil {
+		n.lifecycleMu.Unlock()
+		return
+	}
 	if !n.config.DisableClients {
 		n.setupClients()
 	}
@@ -251,45 +276,57 @@ func (n *Newt) Start(ctx context.Context) {
 			return sendBlueprint(n.client, n.config.BlueprintFile)
 		})
 	}
+	n.lifecycleMu.Unlock()
 
 	<-ctx.Done()
-
-	n.closeClients()
-
-	if n.dockerEventMonitor != nil {
-		n.dockerEventMonitor.Stop()
-	}
-
-	if n.healthMonitor != nil {
-		n.healthMonitor.Stop()
-	}
-
-	if n.dev != nil {
-		n.dev.Close()
-	}
-
-	if n.pm != nil {
-		n.pm.Stop()
-	}
-
 	n.client.SendMessage("newt/disconnecting", map[string]any{})
-
-	if n.client != nil {
-		n.client.Close()
-	}
+	n.Close()
 	logger.Info("Exiting...")
+}
+
+// kernelMainDevice is deliberately small so lifecycle and subnet updates can
+// be exercised without network privileges on development machines.
+type kernelMainDevice interface {
+	SetAllowedIPs([]netip.Prefix) error
+	Close() error
 }
 
 // Close performs an emergency shutdown: closes the tunnel, clients, health
 // monitor, and websocket connection. Typically used before re-exec.
 func (n *Newt) Close() {
-	n.closeWgTunnel()
+	n.stopping.Store(true)
+	if n.shutdownCancel != nil {
+		n.shutdownCancel()
+	}
+	n.lifecycleMu.Lock()
+	defer n.lifecycleMu.Unlock()
+	n.closeWgTunnelLocked()
+	if n.stopFunc != nil {
+		n.stopFunc()
+		n.stopFunc = nil
+	}
 	n.closeClients()
+	if n.dockerEventMonitor != nil {
+		n.dockerEventMonitor.Stop()
+	}
 	if n.healthMonitor != nil {
 		n.healthMonitor.Stop()
 	}
 	if n.client != nil {
 		n.client.Close()
+	}
+}
+
+// withMainLifecycle prevents new message work after shutdown starts and keeps
+// handlers from observing a tunnel halfway through setup or destruction.
+func (n *Newt) withMainLifecycle(handler websocket.MessageHandler) websocket.MessageHandler {
+	return func(msg websocket.WSMessage) {
+		n.lifecycleMu.Lock()
+		defer n.lifecycleMu.Unlock()
+		if n.stopping.Load() {
+			return
+		}
+		handler(msg)
 	}
 }
 

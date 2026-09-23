@@ -61,6 +61,7 @@ type fileSettings struct {
 
 	UseNativeInterface      *bool    `json:"native"`
 	UseNativeMainInterface  *bool    `json:"nativeMain"`
+	UseKernelMainInterface  *bool    `json:"kernelMain"`
 	NativeMainInterfaceName *string  `json:"interfaceMain"`
 	NoCloud                 *bool    `json:"noCloud"`
 	PreferEndpoint          *string  `json:"preferEndpoint"`
@@ -366,6 +367,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 
 		applyBool(&cfg.UseNativeInterface, fileCfg.UseNativeInterface, "native", sources, sourceFile)
 		applyBool(&cfg.UseNativeMainInterface, fileCfg.UseNativeMainInterface, "native-main", sources, sourceFile)
+		applyBool(&cfg.UseKernelMainInterface, fileCfg.UseKernelMainInterface, "kernel-main", sources, sourceFile)
 		applyStr(&cfg.NativeMainInterfaceName, fileCfg.NativeMainInterfaceName, "interface-main", sources, sourceFile)
 		applyBool(&cfg.NoCloud, fileCfg.NoCloud, "no-cloud", sources, sourceFile)
 		applyStr(&cfg.PreferEndpoint, fileCfg.PreferEndpoint, "prefer-endpoint", sources, sourceFile)
@@ -432,6 +434,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 
 	applyEnvBool(&cfg.UseNativeInterface, "USE_NATIVE_INTERFACE", "native", sources)
 	applyEnvBool(&cfg.UseNativeMainInterface, "USE_NATIVE_MAIN_INTERFACE", "native-main", sources)
+	applyEnvBool(&cfg.UseKernelMainInterface, "USE_KERNEL_MAIN_INTERFACE", "kernel-main", sources)
 	applyEnvStr(&cfg.NativeMainInterfaceName, "INTERFACE_MAIN", "interface-main", sources)
 	applyEnvBool(&cfg.NoCloud, "NO_CLOUD", "no-cloud", sources)
 	if v := os.Getenv("LOCAL_ENDPOINT_INTERFACES"); v != "" {
@@ -533,8 +536,8 @@ func Load(opts Options) (newtpkg.Config, error) {
 	fs.StringVar(&portStr, "port", portStr, "Port for client WireGuard interface")
 	fs.BoolVar(&cfg.UseNativeInterface, "native", cfg.UseNativeInterface, "Use native WireGuard interface for client tunnels")
 	fs.BoolVar(&cfg.UseNativeMainInterface, "native-main", cfg.UseNativeMainInterface, "Use native WireGuard interface for the main tunnel (instead of netstack)")
-	// making this the same as above should prevent them from running together
-	fs.StringVar(&cfg.NativeMainInterfaceName, "interface-main", cfg.NativeMainInterfaceName, "Name of the native main tunnel WireGuard interface (used with --native-main)")
+	fs.BoolVar(&cfg.UseKernelMainInterface, "kernel-main", cfg.UseKernelMainInterface, "Use Linux kernel WireGuard for the main tunnel (requires CAP_NET_ADMIN; mutually exclusive with --native-main)")
+	fs.StringVar(&cfg.NativeMainInterfaceName, "interface-main", cfg.NativeMainInterfaceName, "Name of the main tunnel WireGuard interface (used with --native-main or --kernel-main)")
 	fs.BoolVar(&cfg.DisableClients, "disable-clients", cfg.DisableClients, "Disable clients on the WireGuard interface")
 	fs.BoolVar(&cfg.DisableSSH, "disable-ssh", cfg.DisableSSH, "Disable SSH auth daemon and native SSH mode (remote auth daemon still works)")
 	fs.BoolVar(&cfg.EnforceHealthcheckCert, "enforce-hc-cert", cfg.EnforceHealthcheckCert, "Enforce certificate validation for health checks (default: false, accepts any cert)")
@@ -601,6 +604,13 @@ func Load(opts Options) (newtpkg.Config, error) {
 	markCLI("port", portStr != origPort)
 	markCLI("native", cfg.UseNativeInterface != origNative)
 	markCLI("native-main", cfg.UseNativeMainInterface != origNativeMain)
+	// An explicit false override is still a CLI source, even when it matches
+	// the value from a lower-priority source.
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "kernel-main" {
+			sources["kernel-main"] = string(sourceCLI)
+		}
+	})
 	markCLI("interface-main", cfg.NativeMainInterfaceName != origInterfaceMain)
 	markCLI("disable-clients", cfg.DisableClients != origDisableClients)
 	markCLI("disable-ssh", cfg.DisableSSH != origDisableSSH)
@@ -694,6 +704,9 @@ func Load(opts Options) (newtpkg.Config, error) {
 	if err := validateTLSConfig(cfg); err != nil {
 		return newtpkg.Config{}, err
 	}
+	if err := cfg.ValidateMainInterface(); err != nil {
+		return newtpkg.Config{}, err
+	}
 
 	return cfg, nil
 }
@@ -745,6 +758,7 @@ func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, 
 	fmt.Printf("  port             = %s [%s]\n", mask("port", portStr), getSource("port"))
 	fmt.Printf("  native           = %v [%s]\n", cfg.UseNativeInterface, getSource("native"))
 	fmt.Printf("  native-main      = %v [%s]\n", cfg.UseNativeMainInterface, getSource("native-main"))
+	fmt.Printf("  kernel-main      = %v [%s]\n", cfg.UseKernelMainInterface, getSource("kernel-main"))
 	fmt.Printf("  interface-main   = %s [%s]\n", cfg.NativeMainInterfaceName, getSource("interface-main"))
 	fmt.Printf("  no-cloud         = %v [%s]\n", cfg.NoCloud, getSource("no-cloud"))
 	fmt.Printf("  local-endpoint-interfaces = %s [%s]\n", mask("local-endpoint-interfaces", localEndpointInterfacesStr), getSource("local-endpoint-interfaces"))

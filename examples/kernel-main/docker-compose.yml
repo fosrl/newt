@@ -1,0 +1,35 @@
+services:
+  newt:
+    image: newt:kernel-main
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        VERSION: kernel-main
+    restart: unless-stopped
+    stop_grace_period: 30s
+    cap_add:
+      - NET_ADMIN
+    environment:
+      PANGOLIN_ENDPOINT: ${PANGOLIN_ENDPOINT:?Set PANGOLIN_ENDPOINT in .env}
+      NEWT_ID: ${NEWT_ID:?Set NEWT_ID in .env}
+      NEWT_SECRET: ${NEWT_SECRET:?Set NEWT_SECRET in .env}
+      USE_KERNEL_MAIN_INTERFACE: "true"
+      INTERFACE_MAIN: newt-main
+      MTU: ${NEWT_MTU:-1280}
+      HEALTH_FILE: /run/newt/healthy
+      LOG_LEVEL: INFO
+    tmpfs:
+      - /run/newt
+    healthcheck:
+      test: ["CMD", "test", "-f", "/run/newt/healthy"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 60s
+    networks:
+      - newt
+
+networks:
+  newt:
+    driver: bridge

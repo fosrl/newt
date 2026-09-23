@@ -107,8 +107,16 @@ func ResolveDomainUpstream(domain string, publicDNS []string) (string, error) {
 	return ipAddr, nil
 }
 
-
 func ResolveDomain(domain string) (string, error) {
+	return ResolveDomainContext(context.Background(), domain)
+}
+
+// ResolveDomainContext resolves an endpoint, preferring IPv4, and allows its DNS
+// lookup to be canceled along with the connection attempt that needs it.
+func ResolveDomainContext(ctx context.Context, domain string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	// trim whitespace
 	domain = strings.TrimSpace(domain)
 
@@ -141,9 +149,12 @@ func ResolveDomain(domain string) (string, error) {
 	}
 
 	// Lookup IP addresses
-	ips, err := net.LookupIP(host)
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
 	if err != nil {
-		return "", fmt.Errorf("DNS lookup failed: %v", err)
+		return "", fmt.Errorf("DNS lookup failed: %w", err)
 	}
 
 	if len(ips) == 0 {

@@ -21,8 +21,6 @@ import (
 	"github.com/fosrl/newt/internal/state"
 	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
-	"github.com/fosrl/newt/network"
-	"github.com/fosrl/newt/util"
 	"github.com/fosrl/newt/websocket"
 )
 
@@ -41,14 +39,29 @@ type NewtErrorData struct {
 	Message string `json:"message"`
 }
 
+// pingExitNodes runs under lifecycleMu, so both caller cancellation and Close
+// must interrupt its HTTP requests before shutdown can acquire that mutex.
+func (n *Newt) pingExitNodes(ctx context.Context, nodes []exitnode.ExitNode) ([]exitnode.ExitNodePingResult, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if n.shutdownCtx != nil {
+		stop := context.AfterFunc(n.shutdownCtx, cancel)
+		defer stop()
+	}
+	return exitnode.PingExitNodesContext(ctx, nodes, n.config.PreferEndpoint, n.connected)
+}
+
 func (n *Newt) registerHandlers(ctx context.Context) {
 	//TODO: MOVE MORE OF THESE HANDLERS TO STANDALONE FUNCTIONS IN THE DATA.GO AND CONNECT.GO FILES
+	registerHandler := func(topic string, handler websocket.MessageHandler) {
+		n.client.RegisterHandler(topic, n.withMainLifecycle(handler))
+	}
 
 	n.client.RegisterHandler("newt/wg/connect", func(msg websocket.WSMessage) {
 		n.handleConnect(ctx, msg)
 	})
 
-	n.client.RegisterHandler("newt/error", func(msg websocket.WSMessage) {
+	registerHandler("newt/error", func(msg websocket.WSMessage) {
 		var errorData NewtErrorData
 
 		jsonData, err := json.Marshal(msg.Data)
@@ -65,13 +78,13 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		logger.Warn("Site warning (code: %s): %s", errorData.Code, errorData.Message)
 	})
 
-	n.client.RegisterHandler("newt/wg/reconnect", func(msg websocket.WSMessage) {
+	registerHandler("newt/wg/reconnect", func(msg websocket.WSMessage) {
 		logger.Info("Received reconnect message")
 		if n.wgData.PublicKey != "" {
 			telemetry.IncReconnect(ctx, n.wgData.PublicKey, "server", telemetry.ReasonServerRequest)
 		}
 
-		n.closeWgTunnel()
+		n.closeWgTunnelLocked()
 
 		if n.pm != nil {
 			n.pm.ClearTunnelID()
@@ -97,12 +110,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 
 	n.client.RegisterHandler("newt/wg/restart", func(msg websocket.WSMessage) {
 		logger.Info("Received restart message")
-		n.closeWgTunnel()
-		n.closeClients()
-		if n.healthMonitor != nil {
-			n.healthMonitor.Stop()
-		}
-		n.client.Close()
+		n.Close()
 		if n.config.OnRestart != nil {
 			if err := n.config.OnRestart(); err != nil {
 				logger.Error("Failed to restart: %v", err)
@@ -111,13 +119,13 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 	})
 
-	n.client.RegisterHandler("newt/wg/terminate", func(msg websocket.WSMessage) {
+	registerHandler("newt/wg/terminate", func(msg websocket.WSMessage) {
 		logger.Info("Received termination message")
 		if n.wgData.PublicKey != "" {
 			telemetry.IncReconnect(ctx, n.wgData.PublicKey, "server", telemetry.ReasonServerRequest)
 		}
 
-		n.closeWgTunnel()
+		n.closeWgTunnelLocked()
 		n.closeClients()
 
 		if n.stopFunc != nil {
@@ -130,7 +138,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		logger.Info("Tunnel destroyed")
 	})
 
-	n.client.RegisterHandler("newt/ping/exitNodes", func(msg websocket.WSMessage) {
+	registerHandler("newt/ping/exitNodes", func(msg websocket.WSMessage) {
 		logger.Debug("Received ping message")
 
 		if n.stopFunc != nil {
@@ -164,7 +172,11 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 			return
 		}
 
-		pingResults := exitnode.PingExitNodes(exitNodes, n.config.PreferEndpoint, n.connected)
+		pingResults, err := n.pingExitNodes(ctx, exitNodes)
+		if err != nil {
+			logger.Debug("Exit node selection canceled: %v", err)
+			return
+		}
 
 		chainId := generateChainId()
 		n.pendingRegisterChainId = chainId
@@ -180,9 +192,9 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		logger.Debug("Sent exit node ping results to cloud for selection: pingResults=%+v", pingResults)
 	})
 
-	n.client.RegisterHandler("newt/sync", n.handleSync)
+	registerHandler("newt/sync", n.handleSync)
 
-	n.client.RegisterHandler("newt/tcp/add", func(msg websocket.WSMessage) {
+	registerHandler("newt/tcp/add", func(msg websocket.WSMessage) {
 		logger.Debug(fmtReceivedMsg, msg)
 
 		if n.wgData.TunnelIP == "" || n.pm == nil {
@@ -201,7 +213,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 	})
 
-	n.client.RegisterHandler("newt/udp/add", func(msg websocket.WSMessage) {
+	registerHandler("newt/udp/add", func(msg websocket.WSMessage) {
 		logger.Info(fmtReceivedMsg, msg)
 
 		if n.wgData.TunnelIP == "" || n.pm == nil {
@@ -220,7 +232,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 	})
 
-	n.client.RegisterHandler("newt/udp/remove", func(msg websocket.WSMessage) {
+	registerHandler("newt/udp/remove", func(msg websocket.WSMessage) {
 		logger.Info(fmtReceivedMsg, msg)
 
 		if n.wgData.TunnelIP == "" || n.pm == nil {
@@ -239,7 +251,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 	})
 
-	n.client.RegisterHandler("newt/tcp/remove", func(msg websocket.WSMessage) {
+	registerHandler("newt/tcp/remove", func(msg websocket.WSMessage) {
 		logger.Info(fmtReceivedMsg, msg)
 
 		if n.wgData.TunnelIP == "" || n.pm == nil {
@@ -258,7 +270,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 	})
 
-	n.client.RegisterHandler("newt/wg/subnets/add", func(msg websocket.WSMessage) {
+	registerHandler("newt/wg/subnets/add", func(msg websocket.WSMessage) {
 		logger.Debug("Received subnet add message")
 
 		var data struct {
@@ -273,26 +285,19 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 			logger.Error("Error unmarshaling subnet add data: %v", err)
 			return
 		}
-		if len(data.Subnets) == 0 || n.dev == nil {
+		if len(data.Subnets) == 0 || !n.hasMainTunnel() {
 			return
 		}
 
-		for _, subnet := range data.Subnets {
-			subnetCfg := fmt.Sprintf("public_key=%s\nallowed_ip=%s", util.FixKey(n.wgData.PublicKey), subnet)
-			if err := n.dev.IpcSet(subnetCfg); err != nil {
-				logger.Warn("Failed to add AllowedIP %s to main tunnel: %v", subnet, err)
-			}
+		subnets := append([]string(nil), n.activeRemoteSubnets...)
+		subnets = append(subnets, data.Subnets...)
+		if err := n.updateRemoteExitNodeSubnetsLocked(subnets); err != nil {
+			return
 		}
-		if n.config.UseNativeMainInterface {
-			if err := network.AddRoutes(data.Subnets, n.config.NativeMainInterfaceName); err != nil {
-				logger.Warn("Failed to add routes for subnets: %v", err)
-			}
-		}
-		n.activeRemoteSubnets = append(n.activeRemoteSubnets, data.Subnets...)
 		logger.Info("Added %d remote exit node subnets", len(data.Subnets))
 	})
 
-	n.client.RegisterHandler("newt/wg/subnets/update", func(msg websocket.WSMessage) {
+	registerHandler("newt/wg/subnets/update", func(msg websocket.WSMessage) {
 		logger.Debug("Received subnet update message")
 
 		var data struct {
@@ -307,14 +312,14 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 			logger.Error("Error unmarshaling subnet update data: %v", err)
 			return
 		}
-		if n.dev == nil {
+		if !n.hasMainTunnel() {
 			return
 		}
 
-		n.updateRemoteExitNodeSubnets(data.Subnets)
+		n.updateRemoteExitNodeSubnetsLocked(data.Subnets)
 	})
 
-	n.client.RegisterHandler("newt/wg/subnets/remove", func(msg websocket.WSMessage) {
+	registerHandler("newt/wg/subnets/remove", func(msg websocket.WSMessage) {
 		logger.Debug("Received subnet remove message")
 
 		var data struct {
@@ -329,42 +334,27 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 			logger.Error("Error unmarshaling subnet remove data: %v", err)
 			return
 		}
-		if len(data.Subnets) == 0 {
+		if len(data.Subnets) == 0 || !n.hasMainTunnel() {
 			return
-		}
-
-		if n.config.UseNativeMainInterface {
-			if err := network.RemoveRoutes(data.Subnets, n.config.NativeMainInterfaceName); err != nil {
-				logger.Warn("Failed to remove routes for subnets: %v", err)
-			}
 		}
 
 		toRemove := make(map[string]bool, len(data.Subnets))
 		for _, s := range data.Subnets {
 			toRemove[s] = true
 		}
-		remaining := n.activeRemoteSubnets[:0]
+		remaining := make([]string, 0, len(n.activeRemoteSubnets))
 		for _, s := range n.activeRemoteSubnets {
 			if !toRemove[s] {
 				remaining = append(remaining, s)
 			}
 		}
-		n.activeRemoteSubnets = remaining
-
-		if n.dev != nil && n.wgData.PublicKey != "" {
-			lines := fmt.Sprintf("public_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s/32",
-				util.FixKey(n.wgData.PublicKey), n.wgData.ServerIP)
-			for _, s := range remaining {
-				lines += "\nallowed_ip=" + s
-			}
-			if err := n.dev.IpcSet(lines); err != nil {
-				logger.Warn("Failed to update WireGuard AllowedIPs after subnet removal: %v", err)
-			}
+		if err := n.updateRemoteExitNodeSubnetsLocked(remaining); err != nil {
+			return
 		}
 		logger.Info("Removed %d remote exit node subnets", len(data.Subnets))
 	})
 
-	n.client.RegisterHandler("newt/socket/check", func(msg websocket.WSMessage) {
+	registerHandler("newt/socket/check", func(msg websocket.WSMessage) {
 		logger.Debug("Received Docker socket check request")
 
 		if n.config.DockerSocket == "" {
@@ -390,7 +380,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 	})
 
-	n.client.RegisterHandler("newt/socket/fetch", func(msg websocket.WSMessage) {
+	registerHandler("newt/socket/fetch", func(msg websocket.WSMessage) {
 		logger.Debug("Received Docker container fetch request")
 
 		if n.config.DockerSocket == "" {
@@ -413,7 +403,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 	})
 
-	n.client.RegisterHandler("newt/healthcheck/add", func(msg websocket.WSMessage) {
+	registerHandler("newt/healthcheck/add", func(msg websocket.WSMessage) {
 		logger.Debug("Received health check add request: %+v", msg)
 
 		type HealthCheckConfig struct {
@@ -441,7 +431,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		logger.Debug("Health check targets added: %+v", config.Targets)
 	})
 
-	n.client.RegisterHandler("newt/healthcheck/remove", func(msg websocket.WSMessage) {
+	registerHandler("newt/healthcheck/remove", func(msg websocket.WSMessage) {
 		logger.Debug("Received health check remove request: %+v", msg)
 
 		type HealthCheckConfig struct {
@@ -467,7 +457,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 	})
 
-	n.client.RegisterHandler("newt/healthcheck/enable", func(msg websocket.WSMessage) {
+	registerHandler("newt/healthcheck/enable", func(msg websocket.WSMessage) {
 		logger.Debug("Received health check enable request: %+v", msg)
 
 		var requestData struct {
@@ -491,7 +481,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 	})
 
-	n.client.RegisterHandler("newt/healthcheck/disable", func(msg websocket.WSMessage) {
+	registerHandler("newt/healthcheck/disable", func(msg websocket.WSMessage) {
 		logger.Debug("Received health check disable request: %+v", msg)
 
 		var requestData struct {
@@ -515,7 +505,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 	})
 
-	n.client.RegisterHandler("newt/healthcheck/status/request", func(msg websocket.WSMessage) {
+	registerHandler("newt/healthcheck/status/request", func(msg websocket.WSMessage) {
 		logger.Debug("Received health check status request")
 
 		targets := n.healthMonitor.GetTargets()
@@ -537,7 +527,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 	})
 
-	n.client.RegisterHandler("newt/blueprint/results", func(msg websocket.WSMessage) {
+	registerHandler("newt/blueprint/results", func(msg websocket.WSMessage) {
 		logger.Debug("Received blueprint results message")
 
 		var blueprintResult BlueprintResult
@@ -559,7 +549,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 	})
 
-	n.client.RegisterHandler("newt/pam/connection", func(msg websocket.WSMessage) {
+	registerHandler("newt/pam/connection", func(msg websocket.WSMessage) {
 		logger.Debug("Received SSH certificate issued message")
 
 		type SSHCertData struct {
@@ -772,7 +762,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 	})
 
-	n.client.RegisterHandler("newt/browsergateway/add", func(msg websocket.WSMessage) {
+	registerHandler("newt/browsergateway/add", func(msg websocket.WSMessage) {
 		logger.Debug("Received browser gateway add message")
 
 		type BrowserGatewayAddData struct {
@@ -794,11 +784,11 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 			return
 		}
 
-		if n.browserGateway == nil && (n.tnet != nil || n.config.UseNativeMainInterface) {
+		if n.browserGateway == nil && (n.tnet != nil || n.config.UsesHostMainInterface()) {
 			n.browserGateway = browsergateway.New(browsergateway.Config{SSHCredentials: n.sshCredStore})
 			var ln net.Listener
 			var bgErr error
-			if n.config.UseNativeMainInterface {
+			if n.config.UsesHostMainInterface() {
 				ln, bgErr = net.Listen("tcp", fmt.Sprintf("%s:%d", n.wgData.TunnelIP, browsergateway.ListenPort))
 			} else {
 				ln, bgErr = n.tnet.ListenTCP(&net.TCPAddr{Port: browsergateway.ListenPort})
@@ -834,7 +824,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 	})
 
-	n.client.RegisterHandler("newt/browsergateway/remove", func(msg websocket.WSMessage) {
+	registerHandler("newt/browsergateway/remove", func(msg websocket.WSMessage) {
 		logger.Debug("Received browser gateway remove message")
 
 		type BrowserGatewayRemoveData struct {
@@ -864,6 +854,11 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 	})
 
 	n.client.OnConnect(func() error {
+		n.lifecycleMu.Lock()
+		defer n.lifecycleMu.Unlock()
+		if n.stopping.Load() {
+			return nil
+		}
 		n.publicKey = n.privateKey.PublicKey()
 		logger.Debug("Public key: %s", n.publicKey)
 		logger.Info("Websocket connected")
@@ -955,18 +950,19 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 				oldCfg := n.client.GetConfig()
 				if newCfg.Endpoint != oldCfg.Endpoint || newCfg.ID != oldCfg.ID || newCfg.Secret != oldCfg.Secret {
 					logger.Info("Config credentials changed (endpoint/id/secret), restarting...")
-					n.closeWgTunnel()
-					n.closeClients()
-					if n.healthMonitor != nil {
-						n.healthMonitor.Stop()
-					}
-					n.client.Close()
+					n.Close()
 					if n.config.OnRestart != nil {
 						if err := n.config.OnRestart(); err != nil {
 							logger.Error("Failed to restart: %v", err)
 							os.Exit(1)
 						}
 					}
+					continue
+				}
+				n.lifecycleMu.Lock()
+				if n.stopping.Load() {
+					n.lifecycleMu.Unlock()
+					return
 				}
 				if newCfg.Blocked != n.connectionBlocked.Load() {
 					n.connectionBlocked.Store(newCfg.Blocked)
@@ -982,6 +978,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 				} else {
 					logger.Debug("Config reload: no relevant changes detected")
 				}
+				n.lifecycleMu.Unlock()
 			case <-ctx.Done():
 				return
 			}
