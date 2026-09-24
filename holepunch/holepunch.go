@@ -39,6 +39,13 @@ type Manager struct {
 	updateChan chan struct{}       // signals the goroutine to refresh exit nodes
 	publicDNS  []string
 
+	// disabled, when true, makes Start/StartMultipleExitNodes/TriggerHolePunch
+	// no-ops so no UDP hole punch packet is ever sent - e.g. a user-configured
+	// "disable hole punching" setting must fully suppress outbound hole punch
+	// traffic, not just change what's reported to the server (which is all it
+	// did before - see https://github.com/fosrl/olm/issues/134).
+	disabled bool
+
 	sendHolepunchInterval    time.Duration
 	sendHolepunchIntervalMin time.Duration
 	sendHolepunchIntervalMax time.Duration
@@ -63,6 +70,21 @@ func NewManager(sharedBind *bind.SharedBind, ID string, clientType string, publi
 		sendHolepunchIntervalMax: defaultSendHolepunchIntervalMax,
 		defaultIntervalMin:       defaultSendHolepunchIntervalMin,
 		defaultIntervalMax:       defaultSendHolepunchIntervalMax,
+	}
+}
+
+// SetEnabled controls whether this manager may send UDP hole punch packets.
+// When disabled, Start/StartMultipleExitNodes/TriggerHolePunch are no-ops.
+// Safe to call before or after Start; disabling an already-running manager
+// stops it immediately.
+func (m *Manager) SetEnabled(enabled bool) {
+	m.mu.Lock()
+	m.disabled = !enabled
+	running := m.running
+	m.mu.Unlock()
+
+	if m.disabled && running {
+		m.Stop()
 	}
 }
 
@@ -269,10 +291,50 @@ func (m *Manager) ResetServerHolepunchInterval() {
 	}
 }
 
+// resolveExitNodeAddrs resolves exitNode.Endpoint to every candidate UDP
+// address (all address families) it currently has, rather than collapsing to
+// a single IPv4-preferred address. Hole punch sends are cheap, best-effort
+// UDP packets, so trying every candidate costs little and means whichever
+// address family the local network path actually has a route for gets used -
+// e.g. on an IPv6-only/NAT64 network where an IPv4 candidate exists in DNS
+// but has no route at all. See https://github.com/fosrl/olm/issues/108.
+func (m *Manager) resolveExitNodeAddrs(exitNode ExitNode) ([]*net.UDPAddr, error) {
+	var hosts []string
+	var err error
+	if len(m.publicDNS) > 0 {
+		hosts, err = util.ResolveDomainAllUpstream(exitNode.Endpoint, m.publicDNS)
+	} else {
+		hosts, err = util.ResolveDomainAll(exitNode.Endpoint)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var addrs []*net.UDPAddr
+	for _, host := range hosts {
+		serverAddr := net.JoinHostPort(host, strconv.Itoa(int(exitNode.RelayPort)))
+		remoteAddr, err := net.ResolveUDPAddr("udp", serverAddr)
+		if err != nil {
+			logger.Error("Failed to resolve UDP address %s: %v", serverAddr, err)
+			continue
+		}
+		addrs = append(addrs, remoteAddr)
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("no usable addresses resolved for endpoint %s", exitNode.Endpoint)
+	}
+	return addrs, nil
+}
+
 // TriggerHolePunch sends an immediate hole punch packet to all configured exit nodes
 // This is useful for triggering hole punching on demand without waiting for the interval
 func (m *Manager) TriggerHolePunch() error {
 	m.mu.Lock()
+
+	if m.disabled {
+		m.mu.Unlock()
+		return fmt.Errorf("hole punching is disabled")
+	}
 
 	if len(m.exitNodes) == 0 {
 		m.mu.Unlock()
@@ -291,32 +353,25 @@ func (m *Manager) TriggerHolePunch() error {
 	// Send hole punch to all exit nodes
 	successCount := 0
 	for _, exitNode := range currentExitNodes {
-		var host string
-		var err error
-		if len(m.publicDNS) > 0 {
-			host, err = util.ResolveDomainUpstream(exitNode.Endpoint, m.publicDNS)
-		} else {
-			host, err = util.ResolveDomain(exitNode.Endpoint)
-		}
+		remoteAddrs, err := m.resolveExitNodeAddrs(exitNode)
 		if err != nil {
 			logger.Warn("Failed to resolve endpoint %s: %v", exitNode.Endpoint, err)
 			continue
 		}
 
-		serverAddr := net.JoinHostPort(host, strconv.Itoa(int(exitNode.RelayPort)))
-		remoteAddr, err := net.ResolveUDPAddr("udp", serverAddr)
-		if err != nil {
-			logger.Error("Failed to resolve UDP address %s: %v", serverAddr, err)
-			continue
+		sentAny := false
+		for _, remoteAddr := range remoteAddrs {
+			if err := m.sendHolePunch(remoteAddr, exitNode.PublicKey); err != nil {
+				logger.Warn("Failed to send on-demand hole punch to %s: %v", remoteAddr, err)
+				continue
+			}
+			sentAny = true
 		}
 
-		if err := m.sendHolePunch(remoteAddr, exitNode.PublicKey); err != nil {
-			logger.Warn("Failed to send on-demand hole punch to %s: %v", exitNode.Endpoint, err)
-			continue
+		if sentAny {
+			logger.Debug("Sent on-demand hole punch to %s", exitNode.Endpoint)
+			successCount++
 		}
-
-		logger.Debug("Sent on-demand hole punch to %s", exitNode.Endpoint)
-		successCount++
 	}
 
 	if successCount == 0 {
@@ -330,6 +385,12 @@ func (m *Manager) TriggerHolePunch() error {
 // StartMultipleExitNodes starts hole punching to multiple exit nodes
 func (m *Manager) StartMultipleExitNodes(exitNodes []ExitNode) error {
 	m.mu.Lock()
+
+	if m.disabled {
+		m.mu.Unlock()
+		logger.Debug("Hole punching is disabled, ignoring start request")
+		return fmt.Errorf("hole punching is disabled")
+	}
 
 	if m.running {
 		m.mu.Unlock()
@@ -358,6 +419,12 @@ func (m *Manager) StartMultipleExitNodes(exitNodes []ExitNode) error {
 // Start starts hole punching with the current set of exit nodes
 func (m *Manager) Start() error {
 	m.mu.Lock()
+
+	if m.disabled {
+		m.mu.Unlock()
+		logger.Debug("Hole punching is disabled, ignoring start request")
+		return fmt.Errorf("hole punching is disabled")
+	}
 
 	if m.running {
 		m.mu.Unlock()
@@ -408,31 +475,20 @@ func (m *Manager) runMultipleExitNodes() {
 
 		var resolvedNodes []resolvedExitNode
 		for _, exitNode := range currentExitNodes {
-			var host string
-			var err error
-			if len(m.publicDNS) > 0 {
-				host, err = util.ResolveDomainUpstream(exitNode.Endpoint, m.publicDNS)
-			} else {
-				host, err = util.ResolveDomain(exitNode.Endpoint)
-			}
+			remoteAddrs, err := m.resolveExitNodeAddrs(exitNode)
 			if err != nil {
 				logger.Warn("Failed to resolve endpoint %s: %v", exitNode.Endpoint, err)
 				continue
 			}
 
-			serverAddr := net.JoinHostPort(host, strconv.Itoa(int(exitNode.RelayPort)))
-			remoteAddr, err := net.ResolveUDPAddr("udp", serverAddr)
-			if err != nil {
-				logger.Error("Failed to resolve UDP address %s: %v", serverAddr, err)
-				continue
+			for _, remoteAddr := range remoteAddrs {
+				resolvedNodes = append(resolvedNodes, resolvedExitNode{
+					remoteAddr:   remoteAddr,
+					publicKey:    exitNode.PublicKey,
+					endpointName: exitNode.Endpoint,
+				})
+				logger.Debug("Resolved exit node: %s -> %s", exitNode.Endpoint, remoteAddr.String())
 			}
-
-			resolvedNodes = append(resolvedNodes, resolvedExitNode{
-				remoteAddr:   remoteAddr,
-				publicKey:    exitNode.PublicKey,
-				endpointName: exitNode.Endpoint,
-			})
-			logger.Debug("Resolved exit node: %s -> %s", exitNode.Endpoint, remoteAddr.String())
 		}
 		return resolvedNodes
 	}
