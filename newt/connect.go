@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"runtime"
 	"time"
 
@@ -71,6 +72,27 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 
 	logger.Debug(fmtReceivedMsg, msg)
 
+	// Resolve the endpoint before building the tunnel, so a failed lookup leaves
+	// no device behind. The ping check that normally recovers a lost tunnel only
+	// starts once the tunnel is up, so a failed lookup has to retry on its own.
+	host, _, err := net.SplitHostPort(n.wgData.Endpoint)
+	if err != nil {
+		logger.Error("Failed to split endpoint: %v", err)
+		regResult = "failure"
+		return
+	}
+
+	logger.Info("Connecting to endpoint: %s", host)
+
+	resolvedEndpoint, err := util.ResolveDomain(n.wgData.Endpoint)
+	if err != nil {
+		logger.Error("Failed to resolve endpoint: %v", err)
+		regResult = "failure"
+		n.retryRegistrationAfterResolveFailure()
+		return
+	}
+	n.resolveFailures = 0
+
 	if n.config.UseNativeMainInterface {
 		mainIfName := n.config.NativeMainInterfaceName
 		if runtime.GOOS == "darwin" {
@@ -109,22 +131,6 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 		util.MapToWireGuardLogLevel(n.loggerLevel),
 		"gerbil-wireguard: ",
 	))
-
-	host, _, err := net.SplitHostPort(n.wgData.Endpoint)
-	if err != nil {
-		logger.Error("Failed to split endpoint: %v", err)
-		regResult = "failure"
-		return
-	}
-
-	logger.Info("Connecting to endpoint: %s", host)
-
-	resolvedEndpoint, err := util.ResolveDomain(n.wgData.Endpoint)
-	if err != nil {
-		logger.Error("Failed to resolve endpoint: %v", err)
-		regResult = "failure"
-		return
-	}
 
 	relayPort := n.wgData.RelayPort
 	if relayPort == 0 {
@@ -348,4 +354,44 @@ func toBrowserGatewayTargets(targets []BrowserGatewayTarget) []browsergateway.Ta
 		})
 	}
 	return bgTargets
+}
+
+const (
+	registrationRetryInitialDelay = 2 * time.Second
+	registrationRetryMaxDelay     = 60 * time.Second
+)
+
+// registrationRetryDelay is how long to wait before asking for registration
+// again after the given number of consecutive endpoint lookup failures.
+func registrationRetryDelay(failures int) time.Duration {
+	delay := registrationRetryInitialDelay
+	for i := 1; i < failures && delay < registrationRetryMaxDelay; i++ {
+		delay *= 2
+	}
+	return min(delay, registrationRetryMaxDelay)
+}
+
+// retryRegistrationAfterResolveFailure re-enters the newt/ping/request ->
+// newt/wg/register flow after a backoff. The pending timer is held in stopFunc,
+// so a later connect, reconnect or terminate message cancels it.
+func (n *Newt) retryRegistrationAfterResolveFailure() {
+	if n.config.HealthFile != "" {
+		if err := os.Remove(n.config.HealthFile); err != nil && !os.IsNotExist(err) {
+			logger.Error("Failed to remove health file: %v", err)
+		}
+	}
+
+	n.resolveFailures++
+	delay := registrationRetryDelay(n.resolveFailures)
+	logger.Info("Retrying registration in %v", delay)
+
+	timer := time.AfterFunc(delay, func() {
+		pingChainId := generateChainId()
+		n.pendingPingChainId = pingChainId
+		n.stopFunc = n.client.SendMessageInterval("newt/ping/request", map[string]interface{}{
+			"noCloud": n.config.NoCloud,
+			"chainId": pingChainId,
+		}, 3*time.Second)
+	})
+	n.stopFunc = func() { timer.Stop() }
 }
