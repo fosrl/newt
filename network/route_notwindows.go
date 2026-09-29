@@ -9,3 +9,11 @@ func WindowsAddRoute(destination string, gateway string, interfaceName string) e
 func WindowsRemoveRoute(destination string, interfaceName string) error {
 	return nil
 }
+
+func WindowsAddBypassRoute(destIP string) error {
+	return nil
+}
+
+func WindowsRemoveBypassRoute(destIP string) error {
+	return nil
+}

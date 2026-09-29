@@ -136,6 +136,13 @@ type ProxyHandler struct {
 	accessLogger      *AccessLogger        // Access logger for tracking sessions
 	httpRequestLogger *HTTPRequestLogger   // HTTP request logger for proxied HTTP/HTTPS requests
 	blocked           atomic.Bool          // when true, all new connections are dropped
+
+	// localAddrs are the addresses owned by the main netstack (the tunnel IP).
+	// Traffic addressed to them terminates on the main stack (wgtester, SSH,
+	// ...) and must never be proxied out to the host network, even when a
+	// catch-all rule such as an exit node's 0.0.0.0/0 would otherwise match it.
+	// Written once during setup, before any packet is processed.
+	localAddrs map[netip.Addr]struct{}
 }
 
 // ProxyHandlerOptions configures the proxy handler
@@ -494,6 +501,19 @@ func (p *ProxyHandler) Initialize(notifiable channel.Notification) error {
 	return nil
 }
 
+// SetLocalAddresses registers the addresses owned by the main netstack so
+// packets destined to them are left for the main stack instead of being proxied.
+// Must be called before the device starts processing packets.
+func (p *ProxyHandler) SetLocalAddresses(addrs []netip.Addr) {
+	if p == nil {
+		return
+	}
+	p.localAddrs = make(map[netip.Addr]struct{}, len(addrs))
+	for _, addr := range addrs {
+		p.localAddrs[addr.Unmap()] = struct{}{}
+	}
+}
+
 // HandleIncomingPacket processes incoming packets and determines if they should
 // be injected into the proxy stack
 func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
@@ -521,6 +541,13 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 	srcAddr := netip.AddrFrom4(srcBytes)
 	dstBytes := dstIP.As4()
 	dstAddr := netip.AddrFrom4(dstBytes)
+
+	// Traffic for our own tunnel IP (e.g. the olm connection-status probe to the
+	// wgtester, or SSH) is served by the main stack. Without this, an exit node's
+	// 0.0.0.0/0 rule matches it and forwards it out to the host network instead.
+	if _, isLocal := p.localAddrs[dstAddr]; isLocal {
+		return false
+	}
 
 	// Parse transport layer to get destination port
 	var dstPort uint16

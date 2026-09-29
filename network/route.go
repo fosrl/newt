@@ -209,6 +209,193 @@ func LinuxRemoveRoute(destination string, interfaceName string) error {
 	return nil
 }
 
+// LinuxAddBypassRoute adds an explicit /32 host route for destIP via
+// whatever gateway/interface the kernel currently uses to reach it, so a
+// broader route added afterward (e.g. a gateway/full-tunnel default route)
+// can never capture this destination - see AddBypassRouteForDestination.
+func LinuxAddBypassRoute(destIP string) error {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+
+	ip := net.ParseIP(destIP)
+	if ip == nil {
+		return fmt.Errorf("invalid destination address: %s", destIP)
+	}
+
+	routes, err := netlink.RouteGet(ip)
+	if err != nil {
+		return fmt.Errorf("failed to look up current route to %s: %v", destIP, err)
+	}
+	if len(routes) == 0 {
+		return fmt.Errorf("no route found to %s", destIP)
+	}
+	current := routes[0]
+
+	link, err := netlink.LinkByIndex(current.LinkIndex)
+	if err != nil {
+		return fmt.Errorf("failed to resolve interface for route to %s: %v", destIP, err)
+	}
+
+	route := &netlink.Route{
+		Dst:       &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)},
+		Gw:        current.Gw,
+		LinkIndex: link.Attrs().Index,
+	}
+
+	logger.Info("Adding bypass route to %s via %s (interface %s)", destIP, current.Gw, link.Attrs().Name)
+
+	if err := netlink.RouteAdd(route); err != nil {
+		return fmt.Errorf("failed to add bypass route to %s: %v", destIP, err)
+	}
+
+	return nil
+}
+
+// LinuxRemoveBypassRoute removes a route previously added by
+// LinuxAddBypassRoute. It deliberately does not re-derive the route via
+// RouteGet - by the time this runs, our own /32 bypass route is the most
+// specific match for destIP and RouteGet would just find itself - so it
+// instead deletes by destination alone.
+func LinuxRemoveBypassRoute(destIP string) error {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+
+	ip := net.ParseIP(destIP)
+	if ip == nil {
+		return fmt.Errorf("invalid destination address: %s", destIP)
+	}
+
+	route := &netlink.Route{
+		Dst: &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)},
+	}
+
+	if err := netlink.RouteDel(route); err != nil {
+		return fmt.Errorf("failed to remove bypass route to %s: %v", destIP, err)
+	}
+
+	return nil
+}
+
+// DarwinAddBypassRoute adds an explicit /32 host route for destIP via
+// whatever gateway/interface the kernel currently uses to reach it (parsed
+// from `route -n get`), so a broader route added afterward can never capture
+// this destination - see AddBypassRouteForDestination.
+func DarwinAddBypassRoute(destIP string) error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	if NativeConfigDisabled {
+		return nil
+	}
+
+	cmd := exec.Command("route", "-n", "get", destIP)
+	logger.Info("Running command: %v", cmd)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("route get command failed: %v, output: %s", err, out)
+	}
+
+	var gateway, iface string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "gateway:"):
+			gateway = strings.TrimSpace(strings.TrimPrefix(line, "gateway:"))
+		case strings.HasPrefix(line, "interface:"):
+			iface = strings.TrimSpace(strings.TrimPrefix(line, "interface:"))
+		}
+	}
+	if gateway == "" && iface == "" {
+		return fmt.Errorf("could not determine current route to %s from `route get` output: %s", destIP, out)
+	}
+
+	return DarwinAddRouteWithSource(destIP+"/32", gateway, iface, "")
+}
+
+// DarwinRemoveBypassRoute removes a route previously added by
+// DarwinAddBypassRoute.
+func DarwinRemoveBypassRoute(destIP string) error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	return DarwinRemoveRoute(destIP + "/32")
+}
+
+// AddGatewayDefaultRoute installs the OS-level "route everything" equivalent
+// for a full-tunnel/gateway peer. NetworkSettings is always populated first
+// (regardless of GOOS - mobile packet-tunnel providers read it independent
+// of platform, see AddRouteForServerIPWithSource), via an IsDefault included
+// route. On desktop platforms, where olm manages the OS routing table
+// directly, this then also installs the standard wg-quick split-default-route
+// technique (0.0.0.0/1 + 128.0.0.0/1) instead of a literal 0.0.0.0/0, so the
+// host's real default route is never replaced or raced with - it is only
+// outranked by two strictly more-specific halves. PreferLocalRoutes (if set)
+// still applies to these routes exactly as it does to any other tunnel
+// route, so an overlapping local/LAN route continues to win even in gateway
+// mode.
+func AddGatewayDefaultRoute(interfaceName, sourceIP string) error {
+	AddIPv4IncludedRoute(IPv4Route{DestinationAddress: "0.0.0.0", SubnetMask: "0.0.0.0", IsDefault: true})
+
+	if runtime.GOOS == "android" || runtime.GOOS == "ios" {
+		return nil
+	}
+	return AddRoutesWithSource([]string{"0.0.0.0/1", "128.0.0.0/1"}, interfaceName, sourceIP)
+}
+
+// RemoveGatewayDefaultRoute reverses AddGatewayDefaultRoute.
+func RemoveGatewayDefaultRoute(interfaceName string) error {
+	RemoveIPv4IncludedRoute(IPv4Route{DestinationAddress: "0.0.0.0", SubnetMask: "0.0.0.0", IsDefault: true})
+
+	if runtime.GOOS == "android" || runtime.GOOS == "ios" {
+		return nil
+	}
+	return RemoveRoutes([]string{"0.0.0.0/1", "128.0.0.0/1"}, interfaceName)
+}
+
+// AddBypassRouteForDestination installs an explicit /32 host route for destIP
+// using whatever gateway/interface the OS routing table currently uses to
+// reach it - i.e. the physical/original path, not the tunnel. It must be
+// called BEFORE AddGatewayDefaultRoute so the destination's own path is
+// pinned down first and can never be captured by the more general gateway
+// route. This is the same technique wg-quick uses (set_endpoint_direct_route)
+// to keep a WireGuard peer's own UDP traffic from being captured by the
+// gateway route it is itself responsible for installing.
+//
+// NetworkSettings is always populated (an excluded route, for mobile
+// packet-tunnel providers), regardless of GOOS; the OS routing table is only
+// touched on desktop platforms, which have no equivalent of
+// NEIPv4Settings.excludedRoutes/VpnService.Builder.excludeRoute.
+func AddBypassRouteForDestination(destIP string) error {
+	AddIPv4ExcludedRoute(IPv4Route{DestinationAddress: destIP, SubnetMask: "255.255.255.255"})
+
+	switch runtime.GOOS {
+	case "linux":
+		return LinuxAddBypassRoute(destIP)
+	case "darwin":
+		return DarwinAddBypassRoute(destIP)
+	case "windows":
+		return WindowsAddBypassRoute(destIP)
+	}
+	return nil
+}
+
+// RemoveBypassRouteForDestination reverses AddBypassRouteForDestination.
+func RemoveBypassRouteForDestination(destIP string) error {
+	RemoveIPv4ExcludedRoute(IPv4Route{DestinationAddress: destIP, SubnetMask: "255.255.255.255"})
+
+	switch runtime.GOOS {
+	case "linux":
+		return LinuxRemoveBypassRoute(destIP)
+	case "darwin":
+		return DarwinRemoveBypassRoute(destIP)
+	case "windows":
+		return WindowsRemoveBypassRoute(destIP)
+	}
+	return nil
+}
+
 // addRouteForServerIP adds an OS-specific route for the server IP
 func AddRouteForServerIP(serverIP, interfaceName string) error {
 	return AddRouteForServerIPWithSource(serverIP, interfaceName, "")

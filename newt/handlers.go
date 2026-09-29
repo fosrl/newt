@@ -34,11 +34,35 @@ const (
 	fmtErrParsingTargetData = "Error parsing target data: %v"
 )
 
+// NewtErrorData represents a warning/error message sent down from the server,
+// e.g. when it was unable to complete part of the site's registration.
+type NewtErrorData struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 func (n *Newt) registerHandlers(ctx context.Context) {
 	//TODO: MOVE MORE OF THESE HANDLERS TO STANDALONE FUNCTIONS IN THE DATA.GO AND CONNECT.GO FILES
 
 	n.client.RegisterHandler("newt/wg/connect", func(msg websocket.WSMessage) {
 		n.handleConnect(ctx, msg)
+	})
+
+	n.client.RegisterHandler("newt/error", func(msg websocket.WSMessage) {
+		var errorData NewtErrorData
+
+		jsonData, err := json.Marshal(msg.Data)
+		if err != nil {
+			logger.Error(fmtErrMarshaling, err)
+			return
+		}
+
+		if err := json.Unmarshal(jsonData, &errorData); err != nil {
+			logger.Error("Error unmarshaling newt error data: %v", err)
+			return
+		}
+
+		logger.Warn("Site warning (code: %s): %s", errorData.Code, errorData.Message)
 	})
 
 	n.client.RegisterHandler("newt/wg/reconnect", func(msg websocket.WSMessage) {

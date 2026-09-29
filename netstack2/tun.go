@@ -139,6 +139,9 @@ func CreateNetTUNWithOptions(localAddresses, dnsServers []netip.Addr, mtu int, o
 			dev.hasV6 = true
 		}
 	}
+	// Packets to our own addresses belong to the main stack, not the proxy.
+	dev.proxyHandler.SetLocalAddresses(localAddresses)
+
 	if dev.hasV4 {
 		dev.stack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: 1})
 	}
