@@ -6,7 +6,7 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/gaissmai/bart v0.29.0
+	github.com/gaissmai/bart v0.30.0
 	github.com/go-crypt/crypt v0.14.15
 	github.com/go-crypt/x v0.4.17
 	github.com/gorilla/websocket v1.5.3
@@ -29,8 +29,8 @@ require (
 	golang.org/x/sys v0.48.0
 	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
-	golang.zx2c4.com/wireguard/windows v1.0.1
-	google.golang.org/grpc v1.83.2
+	golang.zx2c4.com/wireguard/windows v1.1.1
+	google.golang.org/grpc v1.84.0
 	gopkg.in/yaml.v3 v3.0.1
 	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c
 	software.sslmate.com/src/go-pkcs12 v0.7.3
