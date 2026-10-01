@@ -10,6 +10,10 @@ func WindowsRemoveRoute(destination string, interfaceName string) error {
 	return nil
 }
 
+func windowsEnsureBypassRoute(destIP string, tunnelInterface string) (bool, error) {
+	return false, nil
+}
+
 func WindowsAddBypassRoute(destIP string, tunnelInterface string) error {
 	return nil
 }

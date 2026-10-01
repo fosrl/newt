@@ -1,6 +1,7 @@
 package network
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os/exec"
@@ -218,63 +219,39 @@ func LinuxRemoveRoute(destination string, interfaceName string) error {
 	return nil
 }
 
+// ErrNoPhysicalRoute is returned (wrapped) when a bypass route can't be
+// installed or reconciled because there is currently no route to the
+// destination outside the tunnel - typically because the host is offline or
+// between networks. Callers can treat it as transient: the next reconcile
+// after the network comes back installs the route.
+var ErrNoPhysicalRoute = errors.New("no route outside the tunnel")
+
 // LinuxAddBypassRoute adds an explicit /32 host route for destIP via
 // whatever gateway/interface the kernel currently uses to reach it, so a
 // broader route added afterward (e.g. a gateway/full-tunnel default route)
 // can never capture this destination - see AddBypassRouteForDestination.
 // Routes on tunnelInterface are ignored when picking that path - see
-// linuxBypassNextHop.
+// linuxBypassNextHop. Replaces any existing /32 route to destIP.
 func LinuxAddBypassRoute(destIP string, tunnelInterface string) error {
 	if runtime.GOOS != "linux" {
 		return nil
 	}
-
-	ip := net.ParseIP(destIP)
-	if ip == nil {
-		return fmt.Errorf("invalid destination address: %s", destIP)
-	}
-
-	gw, linkIndex, err := linuxBypassNextHop(ip, tunnelInterface)
-	if err != nil {
-		return err
-	}
-
-	link, err := netlink.LinkByIndex(linkIndex)
-	if err != nil {
-		return fmt.Errorf("failed to resolve interface for route to %s: %v", destIP, err)
-	}
-
-	route := &netlink.Route{
-		Dst:       &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)},
-		Gw:        gw,
-		LinkIndex: link.Attrs().Index,
-	}
-
-	logger.Info("Adding bypass route to %s via %s (interface %s)", destIP, gw, link.Attrs().Name)
-
-	if err := netlink.RouteAdd(route); err != nil {
-		return fmt.Errorf("failed to add bypass route to %s: %v", destIP, err)
-	}
-
-	return nil
+	_, err := linuxEnsureBypassRoute(destIP, tunnelInterface)
+	return err
 }
 
-// linuxBypassNextHop returns the gateway and interface the kernel uses to
-// reach ip, ignoring any route on tunnelInterface. While a gateway route
-// (0.0.0.0/1 + 128.0.0.0/1 on the tunnel) is installed, the kernel's own
-// answer for any public address is the tunnel itself, which would make a
-// bypass route added at that point useless. In that case this falls back to
-// the most specific non-tunnel unicast route in the main table that contains
-// ip - normally the untouched physical 0.0.0.0/0 default route, which the
-// gateway route deliberately leaves in place. tunnelInterface may be "" to
-// just use the kernel's answer.
-func linuxBypassNextHop(ip net.IP, tunnelInterface string) (net.IP, int, error) {
-	routes, err := netlink.RouteGet(ip)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to look up current route to %s: %v", ip, err)
+// linuxEnsureBypassRoute makes the /32 route to destIP match the current
+// physical path (see linuxBypassNextHop), replacing or adding it as needed.
+// Returns whether the routing table was changed.
+func linuxEnsureBypassRoute(destIP string, tunnelInterface string) (bool, error) {
+	ip := net.ParseIP(destIP).To4()
+	if ip == nil {
+		return false, fmt.Errorf("invalid IPv4 destination address: %s", destIP)
 	}
-	if len(routes) == 0 {
-		return nil, 0, fmt.Errorf("no route found to %s", ip)
+
+	routes, err := netlink.RouteList(nil, familyV4)
+	if err != nil {
+		return false, fmt.Errorf("failed to list routes: %v", err)
 	}
 
 	tunnelIndex := -1
@@ -283,20 +260,54 @@ func linuxBypassNextHop(ip net.IP, tunnelInterface string) (net.IP, int, error) 
 			tunnelIndex = link.Attrs().Index
 		}
 	}
-	if routes[0].LinkIndex != tunnelIndex {
-		return routes[0].Gw, routes[0].LinkIndex, nil
-	}
 
-	candidates, err := netlink.RouteList(nil, familyV4)
+	gw, linkIndex, err := linuxBypassNextHop(routes, ip, tunnelIndex)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to list routes: %v", err)
+		return false, err
 	}
 
+	for _, r := range routes {
+		if isHostRouteTo(r.Dst, ip) && r.LinkIndex == linkIndex && r.Gw.Equal(gw) {
+			return false, nil
+		}
+	}
+
+	link, err := netlink.LinkByIndex(linkIndex)
+	if err != nil {
+		return false, fmt.Errorf("failed to resolve interface for route to %s: %v", destIP, err)
+	}
+
+	route := &netlink.Route{
+		Dst:       &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)},
+		Gw:        gw,
+		LinkIndex: linkIndex,
+	}
+
+	logger.Info("Setting bypass route to %s via %s (interface %s)", destIP, gw, link.Attrs().Name)
+
+	if err := netlink.RouteReplace(route); err != nil {
+		return false, fmt.Errorf("failed to set bypass route to %s: %v", destIP, err)
+	}
+
+	return true, nil
+}
+
+// linuxBypassNextHop picks, from the main-table routes, the gateway and
+// interface the kernel would use to reach ip if neither the tunnel nor our
+// own bypass route existed: the most specific unicast route containing ip,
+// lowest metric first, skipping any route on tunnelIndex and any /32 route to
+// ip itself. While a gateway route (0.0.0.0/1 + 128.0.0.0/1 on the tunnel)
+// is installed, that is normally the untouched physical 0.0.0.0/0 default
+// route, which the gateway route deliberately leaves in place. Skipping our
+// own /32 lets the same lookup tell whether an existing bypass route still
+// matches the current physical path (see linuxEnsureBypassRoute). Policy
+// routing rules are not considered.
+func linuxBypassNextHop(routes []netlink.Route, ip net.IP, tunnelIndex int) (net.IP, int, error) {
 	var best *netlink.Route
 	bestBits := -1
-	for i := range candidates {
-		r := &candidates[i]
-		if r.Type != rtnUnicast {
+	for i := range routes {
+		r := &routes[i]
+		if r.Type != rtnUnicast || isHostRouteTo(r.Dst, ip) {
 			continue
 		}
 		bits := 0
@@ -321,9 +332,18 @@ func linuxBypassNextHop(ip net.IP, tunnelInterface string) (net.IP, int, error) 
 		}
 	}
 	if best == nil {
-		return nil, 0, fmt.Errorf("no route to %s outside tunnel interface %s", ip, tunnelInterface)
+		return nil, 0, fmt.Errorf("%w: %s", ErrNoPhysicalRoute, ip)
 	}
 	return best.Gw, best.LinkIndex, nil
+}
+
+// isHostRouteTo reports whether dst is exactly ip/32.
+func isHostRouteTo(dst *net.IPNet, ip net.IP) bool {
+	if dst == nil {
+		return false
+	}
+	ones, bits := dst.Mask.Size()
+	return ones == 32 && bits == 32 && dst.IP.Equal(ip)
 }
 
 // LinuxRemoveBypassRoute removes a route previously added by
@@ -358,7 +378,7 @@ func LinuxRemoveBypassRoute(destIP string) error {
 // this destination - see AddBypassRouteForDestination. If that route is on
 // tunnelInterface - i.e. a gateway route (0.0.0.0/1 + 128.0.0.0/1) is already
 // capturing destIP - the physical default route, which the gateway route
-// deliberately leaves in place, is used instead.
+// deliberately leaves in place, is used instead (see darwinBypassNextHop).
 func DarwinAddBypassRoute(destIP string, tunnelInterface string) error {
 	if runtime.GOOS != "darwin" {
 		return nil
@@ -366,47 +386,151 @@ func DarwinAddBypassRoute(destIP string, tunnelInterface string) error {
 	if NativeConfigDisabled {
 		return nil
 	}
-
-	gateway, iface, err := darwinRouteGet(destIP)
-	if err != nil {
-		return err
-	}
-	if tunnelInterface != "" && iface == tunnelInterface {
-		gateway, iface, err = darwinRouteGet("default")
-		if err != nil {
-			return err
-		}
-		if iface == tunnelInterface {
-			return fmt.Errorf("no route to %s outside tunnel interface %s", destIP, tunnelInterface)
-		}
-	}
-
-	return DarwinAddRouteWithSource(destIP+"/32", gateway, iface, "")
+	_, err := darwinEnsureBypassRoute(destIP, tunnelInterface)
+	return err
 }
 
-// darwinRouteGet returns the gateway and interface `route -n get` reports for
-// destination (an address, or "default").
-func darwinRouteGet(destination string) (gateway, iface string, err error) {
-	cmd := exec.Command("route", "-n", "get", destination)
-	logger.Info("Running command: %v", cmd)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", "", fmt.Errorf("route get command failed: %v, output: %s", err, out)
+// darwinEnsureBypassRoute makes the /32 route to destIP match the current
+// physical path, adding it if missing and replacing it if it points
+// somewhere else. Returns whether the routing table was changed.
+func darwinEnsureBypassRoute(destIP string, tunnelInterface string) (bool, error) {
+	ip := net.ParseIP(destIP).To4()
+	if ip == nil {
+		return false, fmt.Errorf("invalid IPv4 destination address: %s", destIP)
 	}
 
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(line, "gateway:"):
-			gateway = strings.TrimSpace(strings.TrimPrefix(line, "gateway:"))
-		case strings.HasPrefix(line, "interface:"):
-			iface = strings.TrimSpace(strings.TrimPrefix(line, "interface:"))
+	current, err := darwinRouteGet(destIP)
+	if err != nil {
+		return false, err
+	}
+	installed := current.isStaticHostRouteTo(ip)
+
+	var gateway, iface string
+	if installed {
+		// `route get` now just finds our own route, so work the physical
+		// path out without it.
+		gateway, iface, err = darwinBypassNextHop(ip, tunnelInterface)
+		if err != nil {
+			return false, err
+		}
+		if iface == current.iface && (gateway == "" || gateway == current.gateway) {
+			return false, nil
+		}
+		if err := DarwinRemoveRoute(destIP + "/32"); err != nil {
+			return false, err
+		}
+	} else {
+		gateway, iface = current.gateway, current.iface
+		if net.ParseIP(gateway) == nil {
+			// On-link (e.g. an ARP entry's link-layer "gateway"): route
+			// via the interface itself.
+			gateway = ""
+		}
+		if tunnelInterface != "" && iface == tunnelInterface {
+			gateway, iface, err = darwinBypassNextHop(ip, tunnelInterface)
+			if err != nil {
+				return false, err
+			}
 		}
 	}
-	if gateway == "" && iface == "" {
-		return "", "", fmt.Errorf("could not determine current route to %s from `route get` output: %s", destination, out)
+
+	if err := DarwinAddRouteWithSource(destIP+"/32", gateway, iface, ""); err != nil {
+		return false, err
 	}
-	return gateway, iface, nil
+	return true, nil
+}
+
+// darwinBypassNextHop returns the physical path to ip without consulting
+// any more specific route to it (ours, or the tunnel's): directly on-link
+// through a non-tunnel interface whose subnet contains ip, otherwise the
+// unscoped default route - which a gateway route (0.0.0.0/1 + 128.0.0.0/1)
+// deliberately leaves in place. Other, more specific non-default routes are
+// not considered.
+func darwinBypassNextHop(ip net.IP, tunnelInterface string) (gateway, iface string, err error) {
+	if ifaces, err := net.Interfaces(); err == nil {
+		for _, ifc := range ifaces {
+			if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 || ifc.Name == tunnelInterface {
+				continue
+			}
+			addrs, err := ifc.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, addr := range addrs {
+				if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil && ipNet.Contains(ip) {
+					return "", ifc.Name, nil
+				}
+			}
+		}
+	}
+
+	def, err := darwinRouteGet("default")
+	if err != nil {
+		return "", "", err
+	}
+	if def.iface == tunnelInterface {
+		return "", "", fmt.Errorf("%w: %s", ErrNoPhysicalRoute, ip)
+	}
+	return def.gateway, def.iface, nil
+}
+
+// darwinRoute is the relevant part of `route -n get` output.
+type darwinRoute struct {
+	destination, mask, gateway, iface string
+	flags                             []string
+}
+
+// isStaticHostRouteTo reports whether r is a static /32 route to ip - i.e.
+// one we added, as opposed to an ARP-cloned host entry or a broader route.
+func (r darwinRoute) isStaticHostRouteTo(ip net.IP) bool {
+	if !net.ParseIP(r.destination).Equal(ip) {
+		return false
+	}
+	if r.mask != "" && r.mask != "255.255.255.255" {
+		return false
+	}
+	for _, f := range r.flags {
+		if f == "STATIC" {
+			return true
+		}
+	}
+	return false
+}
+
+// darwinRouteGet returns what `route -n get` reports for destination (an
+// address, or "default").
+func darwinRouteGet(destination string) (darwinRoute, error) {
+	cmd := exec.Command("route", "-n", "get", destination)
+	logger.Debug("Running command: %v", cmd)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return darwinRoute{}, fmt.Errorf("%w: route get %s failed: %v, output: %s", ErrNoPhysicalRoute, destination, err, out)
+	}
+
+	var r darwinRoute
+	for _, line := range strings.Split(string(out), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		switch key {
+		case "destination":
+			r.destination = value
+		case "mask":
+			r.mask = value
+		case "gateway":
+			r.gateway = value
+		case "interface":
+			r.iface = value
+		case "flags":
+			r.flags = strings.Split(strings.Trim(value, "<>"), ",")
+		}
+	}
+	if r.gateway == "" && r.iface == "" {
+		return darwinRoute{}, fmt.Errorf("could not determine current route to %s from `route get` output: %s", destination, out)
+	}
+	return r, nil
 }
 
 // DarwinRemoveBypassRoute removes a route previously added by
@@ -480,6 +604,44 @@ func AddBypassRouteForDestination(destIP string, tunnelInterface string) error {
 		return WindowsAddBypassRoute(destIP, tunnelInterface)
 	}
 	return nil
+}
+
+// ReconcileBypassRoute makes sure the host route AddBypassRouteForDestination
+// installed for destIP is still present and still follows the current
+// physical path, re-adding or moving it if not. The OS drops these routes
+// along with the interface or address they were on (e.g. switching Wi-Fi
+// networks, or Wi-Fi to Ethernet), and if the default route moves to a
+// different interface they would otherwise keep using the old one. Routes on
+// tunnelInterface are ignored, as in AddBypassRouteForDestination. Returns
+// whether anything changed; a no-op where ManagesHostRoutes is false.
+// NetworkSettings is not touched - platforms that apply excluded routes from
+// it track the physical network themselves.
+func ReconcileBypassRoute(destIP string, tunnelInterface string) (bool, error) {
+	if !ManagesHostRoutes() {
+		return false, nil
+	}
+	switch runtime.GOOS {
+	case "linux":
+		return linuxEnsureBypassRoute(destIP, tunnelInterface)
+	case "darwin":
+		return darwinEnsureBypassRoute(destIP, tunnelInterface)
+	case "windows":
+		return windowsEnsureBypassRoute(destIP, tunnelInterface)
+	}
+	return false, nil
+}
+
+// ManagesHostRoutes reports whether this package installs routes in the host
+// OS routing table itself (desktop platforms), as opposed to only populating
+// NetworkSettings for a mobile/NetworkExtension host app to apply.
+func ManagesHostRoutes() bool {
+	switch runtime.GOOS {
+	case "linux", "windows":
+		return true
+	case "darwin":
+		return !NativeConfigDisabled
+	}
+	return false
 }
 
 // RemoveBypassRouteForDestination reverses AddBypassRouteForDestination.
