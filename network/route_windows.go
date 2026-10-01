@@ -104,11 +104,24 @@ func WindowsAddRoute(destination string, gateway string, interfaceName string) e
 // whatever gateway/interface the OS routing table currently uses to reach
 // it, so a broader route added afterward (e.g. a gateway/full-tunnel default
 // route) can never capture this destination - see
-// network.AddBypassRouteForDestination.
-func WindowsAddBypassRoute(destIP string) error {
+// network.AddBypassRouteForDestination. Routes on tunnelInterface are ignored
+// when picking that path, so a bypass route added while a gateway route
+// (0.0.0.0/1 + 128.0.0.0/1 on the tunnel) is installed still resolves to the
+// physical default route rather than back into the tunnel.
+func WindowsAddBypassRoute(destIP string, tunnelInterface string) error {
 	addr, err := netip.ParseAddr(destIP)
 	if err != nil {
 		return fmt.Errorf("invalid destination address: %v", err)
+	}
+
+	var tunnelLUID winipcfg.LUID
+	hasTunnelLUID := false
+	if tunnelInterface != "" {
+		if iface, err := net.InterfaceByName(tunnelInterface); err == nil {
+			if luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index)); err == nil {
+				tunnelLUID, hasTunnelLUID = luid, true
+			}
+		}
 	}
 
 	var family winipcfg.AddressFamily
@@ -131,13 +144,16 @@ func WindowsAddBypassRoute(destIP string) error {
 		if !prefix.Contains(addr) {
 			continue
 		}
+		if hasTunnelLUID && route.InterfaceLUID == tunnelLUID {
+			continue
+		}
 		if prefix.Bits() > bestBits || (prefix.Bits() == bestBits && best != nil && route.Metric < best.Metric) {
 			bestBits = prefix.Bits()
 			best = route
 		}
 	}
 	if best == nil {
-		return fmt.Errorf("no route found to %s", destIP)
+		return fmt.Errorf("no route found to %s outside tunnel interface %q", destIP, tunnelInterface)
 	}
 
 	prefix := netip.PrefixFrom(addr, addr.BitLen())
