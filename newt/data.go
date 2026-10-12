@@ -145,7 +145,7 @@ func (n *Newt) handleSync(msg websocket.WSMessage) {
 	// Sync clients WireGuard peers and targets, if clients are set up
 	if n.wgService != nil {
 		n.wgService.SetCerts(syncData.Certs)
-		n.wgService.Sync(syncData.Peers, syncData.ClientTargets)
+		n.wgService.Sync(syncData.Peers, syncData.ClientTargets, syncData.ClientIdentities)
 	}
 
 	// Sync browser gateway targets

@@ -78,6 +78,10 @@ type HTTPHandler struct {
 	// silently dropping every connection.
 	fallbackTLSOnce sync.Once
 	fallbackTLSCfg  *tls.Config
+
+	// identities maps client tunnel IPs to the user or machine behind them,
+	// used to set Remote-* headers on proxied requests.
+	identities clientIdentityStore
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +171,16 @@ func NewHTTPHandler(s *stack.Stack, ph *ProxyHandler) *HTTPHandler {
 		stack:        s,
 		proxyHandler: ph,
 	}
+}
+
+// ReplaceClientIdentities replaces the full set of known client identities.
+func (h *HTTPHandler) ReplaceClientIdentities(ids []ClientIdentity) {
+	h.identities.replace(ids)
+}
+
+// AddClientIdentities adds or overwrites the given client identities.
+func (h *HTTPHandler) AddClientIdentities(ids []ClientIdentity) {
+	h.identities.upsert(ids)
 }
 
 // SetRequestLogger attaches an HTTPRequestLogger so that every proxied request
@@ -387,6 +401,8 @@ func (h *HTTPHandler) getProxy(target HTTPTarget) *httputil.ReverseProxy {
 			if isTLS, _ := pr.In.Context().Value(connTLSKey{}).(bool); isTLS {
 				pr.Out.Header.Set("X-Forwarded-Proto", "https")
 			}
+
+			h.identities.setRemoteHeaders(pr.Out.Header, pr.In.RemoteAddr)
 		},
 		Transport: transport,
 	}

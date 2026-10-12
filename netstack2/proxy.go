@@ -291,6 +291,24 @@ func (p *ProxyHandler) ReplaceAllSubnetRules(rules []SubnetRule) {
 	p.subnetLookup.ReplaceAll(rules)
 }
 
+// ReplaceClientIdentities replaces the full set of client identities used by
+// the HTTP handler to set Remote-* headers.
+func (p *ProxyHandler) ReplaceClientIdentities(ids []ClientIdentity) {
+	if p == nil || !p.enabled || p.httpHandler == nil {
+		return
+	}
+	p.httpHandler.ReplaceClientIdentities(ids)
+}
+
+// AddClientIdentities adds or overwrites client identities used by the HTTP
+// handler to set Remote-* headers.
+func (p *ProxyHandler) AddClientIdentities(ids []ClientIdentity) {
+	if p == nil || !p.enabled || p.httpHandler == nil {
+		return
+	}
+	p.httpHandler.AddClientIdentities(ids)
+}
+
 // GetAllRules returns all subnet rules from the proxy handler
 func (p *ProxyHandler) GetAllRules() []SubnetRule {
 	if p == nil || !p.enabled {

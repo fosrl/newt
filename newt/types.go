@@ -4,6 +4,7 @@ import (
 	wgclients "github.com/fosrl/newt/clients"
 	"github.com/fosrl/newt/exitnode"
 	"github.com/fosrl/newt/healthcheck"
+	"github.com/fosrl/newt/netstack2"
 )
 
 type BrowserGatewayTarget struct {
@@ -52,11 +53,12 @@ type BlueprintResult struct {
 
 // Define the sync data structure
 type SyncData struct {
-	Targets               TargetsByType          `json:"proxyTargets"`
-	HealthCheckTargets    []healthcheck.Config   `json:"healthCheckTargets"`
-	RemoteExitNodeSubnets []string               `json:"remoteExitNodeSubnets"`
-	Peers                 []wgclients.Peer       `json:"peers"`
-	ClientTargets         []wgclients.Target     `json:"clientTargets"`
-	Certs                 []wgclients.CertData   `json:"certs"`
-	BrowserGatewayTargets []BrowserGatewayTarget `json:"browserGatewayTargets"`
+	Targets               TargetsByType              `json:"proxyTargets"`
+	HealthCheckTargets    []healthcheck.Config       `json:"healthCheckTargets"`
+	RemoteExitNodeSubnets []string                   `json:"remoteExitNodeSubnets"`
+	Peers                 []wgclients.Peer           `json:"peers"`
+	ClientTargets         []wgclients.Target         `json:"clientTargets"`
+	Certs                 []wgclients.CertData       `json:"certs"`
+	ClientIdentities      []netstack2.ClientIdentity `json:"clientIdentities"`
+	BrowserGatewayTargets []BrowserGatewayTarget     `json:"browserGatewayTargets"`
 }
