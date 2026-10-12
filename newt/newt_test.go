@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/fosrl/newt/healthcheck"
 )
 
 func TestWatchBlueprintFile_WriteTriggersSend(t *testing.T) {
@@ -350,6 +352,71 @@ func TestPingNilNetstackReturnsError(t *testing.T) {
 	_, err := ping(nil, "127.0.0.1", 100*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected error when tnet is nil, got nil")
+	}
+}
+
+func TestApplyWgDataReplacesPreviousPayload(t *testing.T) {
+	n := &Newt{wgData: WgData{
+		HealthCheckTargets: []healthcheck.Config{
+			{ID: 2, Status: 401, Path: "/api/mcp"},
+			{ID: 1, Status: 200, Path: "/manifest.json"},
+		},
+	}}
+
+	payload := []byte(`{
+		"healthCheckTargets": [
+			{"id": 1, "hcPath": "/manifest.json", "hcStatus": null},
+			{"id": 2, "hcPath": "/api/mcp", "hcStatus": 401}
+		]
+	}`)
+
+	if err := n.applyWgData(payload); err != nil {
+		t.Fatalf("applyWgData returned error: %v", err)
+	}
+
+	got := n.wgData.HealthCheckTargets
+	if len(got) != 2 {
+		t.Fatalf("expected 2 health check targets, got %d", len(got))
+	}
+	if got[0].ID != 1 || got[0].Status != 0 {
+		t.Errorf("target 1 = {ID: %d, Status: %d}, want {ID: 1, Status: 0}", got[0].ID, got[0].Status)
+	}
+	if got[1].ID != 2 || got[1].Status != 401 {
+		t.Errorf("target 2 = {ID: %d, Status: %d}, want {ID: 2, Status: 401}", got[1].ID, got[1].Status)
+	}
+}
+
+func TestApplyWgDataClearsStaleFields(t *testing.T) {
+	n := &Newt{wgData: WgData{
+		TunnelIP:              "10.0.0.2",
+		RemoteExitNodeSubnets: []string{"10.1.0.0/24"},
+		HealthCheckTargets:    []healthcheck.Config{{ID: 1, Status: 200}},
+	}}
+
+	if err := n.applyWgData([]byte(`{"tunnelIP": "10.0.0.3"}`)); err != nil {
+		t.Fatalf("applyWgData returned error: %v", err)
+	}
+
+	if n.wgData.TunnelIP != "10.0.0.3" {
+		t.Errorf("TunnelIP = %q, want %q", n.wgData.TunnelIP, "10.0.0.3")
+	}
+	if len(n.wgData.RemoteExitNodeSubnets) != 0 {
+		t.Errorf("RemoteExitNodeSubnets = %v, want empty", n.wgData.RemoteExitNodeSubnets)
+	}
+	if len(n.wgData.HealthCheckTargets) != 0 {
+		t.Errorf("HealthCheckTargets = %v, want empty", n.wgData.HealthCheckTargets)
+	}
+}
+
+func TestApplyWgDataKeepsExistingDataOnDecodeError(t *testing.T) {
+	n := &Newt{wgData: WgData{TunnelIP: "10.0.0.2"}}
+
+	if err := n.applyWgData([]byte(`{"tunnelIP":`)); err == nil {
+		t.Fatal("expected error for malformed payload, got nil")
+	}
+
+	if n.wgData.TunnelIP != "10.0.0.2" {
+		t.Errorf("TunnelIP = %q, want %q", n.wgData.TunnelIP, "10.0.0.2")
 	}
 }
 
