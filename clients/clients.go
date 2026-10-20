@@ -35,11 +35,12 @@ import (
 )
 
 type WgConfig struct {
-	IpAddress string     `json:"ipAddress"`
-	Peers     []Peer     `json:"peers"`
-	Targets   []Target   `json:"targets"`
-	Certs     []CertData `json:"certs"`
-	ChainId   string     `json:"chainId"`
+	IpAddress        string                     `json:"ipAddress"`
+	Peers            []Peer                     `json:"peers"`
+	Targets          []Target                   `json:"targets"`
+	Certs            []CertData                 `json:"certs"`
+	ClientIdentities []netstack2.ClientIdentity `json:"clientIdentities"`
+	ChainId          string                     `json:"chainId"`
 }
 
 type Target struct {
@@ -223,6 +224,7 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 	wsClient.RegisterHandler("newt/wg/targets/update", service.handleUpdateTarget)
 	wsClient.RegisterHandler("newt/certs/add", service.handleAddCerts)
 	wsClient.RegisterHandler("newt/certs/remove", service.handleRemoveCerts)
+	wsClient.RegisterHandler("newt/wg/client-identities/add", service.handleAddClientIdentities)
 
 	return service, nil
 }
@@ -589,6 +591,10 @@ func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 		logger.Error("Failed to ensure WireGuard peers: %v", err)
 	}
 
+	if s.tnet != nil {
+		s.tnet.ReplaceClientIdentities(config.ClientIdentities)
+	}
+
 	if err := s.ensureTargets(config.Targets); err != nil {
 		logger.Error("Failed to ensure WireGuard targets: %v", err)
 	}
@@ -697,11 +703,41 @@ func (s *WireGuardService) handleRemoveCerts(msg websocket.WSMessage) {
 	logger.Info("Removed %d certs", len(data.IDs))
 }
 
+// handleAddClientIdentities processes a "newt/wg/client-identities/add"
+// message: an array of ClientIdentity to upsert into the HTTP proxy's
+// identity table.
+func (s *WireGuardService) handleAddClientIdentities(msg websocket.WSMessage) {
+	jsonData, err := json.Marshal(msg.Data)
+	if err != nil {
+		logger.Info("Error marshaling client identities data: %v", err)
+		return
+	}
+
+	var identities []netstack2.ClientIdentity
+	if err := json.Unmarshal(jsonData, &identities); err != nil {
+		logger.Warn("Error unmarshaling client identities data: %v", err)
+		return
+	}
+
+	if s.tnet == nil {
+		// Native interface mode - proxy features not available, skip silently
+		logger.Debug("Skipping client identities - using native interface (no proxy support)")
+		return
+	}
+
+	s.tnet.AddClientIdentities(identities)
+	logger.Info("Added %d client identities", len(identities))
+}
+
 // Sync synchronizes the clients WireGuard peers and targets with the desired state
 // received as part of the main newt/sync message.
-func (s *WireGuardService) Sync(peers []Peer, targets []Target) {
+func (s *WireGuardService) Sync(peers []Peer, targets []Target, identities []netstack2.ClientIdentity) {
 	if err := s.syncPeers(peers); err != nil {
 		logger.Error("Failed to sync client peers: %v", err)
+	}
+
+	if s.tnet != nil {
+		s.tnet.ReplaceClientIdentities(identities)
 	}
 
 	if err := s.syncTargets(targets); err != nil {

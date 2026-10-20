@@ -376,6 +376,24 @@ func (net *Net) ReplaceProxySubnetRules(rules []SubnetRule) {
 	}
 }
 
+// ReplaceClientIdentities replaces the full set of client identities used by
+// the HTTP proxy to set Remote-* headers.
+func (net *Net) ReplaceClientIdentities(ids []ClientIdentity) {
+	tun := (*netTun)(net)
+	if tun.proxyHandler != nil {
+		tun.proxyHandler.ReplaceClientIdentities(ids)
+	}
+}
+
+// AddClientIdentities adds or overwrites client identities used by the HTTP
+// proxy to set Remote-* headers.
+func (net *Net) AddClientIdentities(ids []ClientIdentity) {
+	tun := (*netTun)(net)
+	if tun.proxyHandler != nil {
+		tun.proxyHandler.AddClientIdentities(ids)
+	}
+}
+
 // GetProxySubnetRules returns all subnet rules from the proxy handler
 func (net *Net) GetProxySubnetRules() []SubnetRule {
 	tun := (*netTun)(net)
