@@ -23,6 +23,15 @@ import (
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
+func (n *Newt) applyWgData(jsonData []byte) error {
+	var wgData WgData
+	if err := json.Unmarshal(jsonData, &wgData); err != nil {
+		return err
+	}
+	n.wgData = wgData
+	return nil
+}
+
 func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 	logger.Debug("Received registration message")
 	regResult := "success"
@@ -63,7 +72,7 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 		return
 	}
 
-	if err := json.Unmarshal(jsonData, &n.wgData); err != nil {
+	if err := n.applyWgData(jsonData); err != nil {
 		logger.Info("Error unmarshaling target data: %v", err)
 		regResult = "failure"
 		return
