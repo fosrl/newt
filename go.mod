@@ -25,7 +25,7 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.47.0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/exp v0.0.0-20251113190631-e25ba8c21ef6
-	golang.org/x/net v0.60.0
+	golang.org/x/net v0.61.0
 	golang.org/x/sys v0.49.0
 	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
