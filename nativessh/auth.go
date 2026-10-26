@@ -71,7 +71,21 @@ func SystemUserExists(username string) bool {
 //
 // Returns nil on the first method that succeeds, or an error if all fail.
 func Authenticate(username, password, privateKeyPEM string) error {
-	return AuthenticateWithCertificate(nil, username, password, privateKeyPEM, "")
+	_, err := AuthenticateWithCertificate(nil, username, password, privateKeyPEM, "")
+	return err
+}
+
+// certAuthResult describes a successful login with the SSH certificate key.
+func certAuthResult(key ssh.PublicKey) AuthResult {
+	res := AuthResult{
+		Method:         AuthMethodCertificate,
+		KeyFingerprint: ssh.FingerprintSHA256(key),
+	}
+	if cert, ok := key.(*ssh.Certificate); ok {
+		res.CertKeyID = cert.KeyId
+		res.CertPrincipals = append([]string(nil), cert.ValidPrincipals...)
+	}
+	return res
 }
 
 // AuthenticateWithCertificate authenticates a user for a browser-based native
@@ -79,11 +93,13 @@ func Authenticate(username, password, privateKeyPEM string) error {
 //  1. Private key in host ~/.ssh/authorized_keys.
 //  2. SSH certificate signed by the configured CA (when provided).
 //  3. Password via host PAM stack.
-func AuthenticateWithCertificate(store *CredentialStore, username, password, privateKeyPEM, certificate string) error {
+//
+// On success it reports which method was used, for session logging.
+func AuthenticateWithCertificate(store *CredentialStore, username, password, privateKeyPEM, certificate string) (AuthResult, error) {
 	logger.Debug("nativessh: authenticating user %q (hasPassword=%v, hasPrivateKey=%v)", username, password != "", privateKeyPEM != "")
 	if !SystemUserExists(username) {
 		logger.Debug("nativessh: user %q not found on system", username)
-		return fmt.Errorf("user %q does not exist", username)
+		return AuthResult{}, fmt.Errorf("user %q does not exist", username)
 	}
 
 	var signer ssh.Signer
@@ -93,7 +109,10 @@ func AuthenticateWithCertificate(store *CredentialStore, username, password, pri
 			logger.Debug("nativessh: failed to parse private key for %q: %v", username, err)
 		} else if CheckAuthorizedKeys(username, parsedSigner.PublicKey()) {
 			logger.Debug("nativessh: private key auth succeeded for %q", username)
-			return nil
+			return AuthResult{
+				Method:         AuthMethodPublicKey,
+				KeyFingerprint: ssh.FingerprintSHA256(parsedSigner.PublicKey()),
+			}, nil
 		} else {
 			signer = parsedSigner
 			logger.Debug("nativessh: private key not in authorized_keys for %q", username)
@@ -131,7 +150,7 @@ func AuthenticateWithCertificate(store *CredentialStore, username, password, pri
 							_, authErr := checker.Authenticate(staticConnMeta{user: principal}, cert)
 							if authErr == nil {
 								logger.Debug("nativessh: certificate auth succeeded for %q (principal=%q)", username, principal)
-								return nil
+								return certAuthResult(cert), nil
 							}
 							lastErr = authErr
 						}
@@ -149,10 +168,10 @@ func AuthenticateWithCertificate(store *CredentialStore, username, password, pri
 			logger.Debug("nativessh: password auth failed for %q: %v", username, err)
 		} else {
 			logger.Debug("nativessh: password auth succeeded for %q", username)
-			return nil
+			return AuthResult{Method: AuthMethodPassword}, nil
 		}
 	} else {
 		logger.Debug("nativessh: no password provided for %q", username)
 	}
-	return fmt.Errorf("authentication failed for user %q", username)
+	return AuthResult{}, fmt.Errorf("authentication failed for user %q", username)
 }

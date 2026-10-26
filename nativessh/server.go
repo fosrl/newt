@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"os/exec"
 	"os/user"
 	"strconv"
@@ -91,6 +90,26 @@ type ServerConfig struct {
 	// Updates to the store are reflected immediately for new connections.
 	// If nil or the store has no CA key set, all connections are rejected.
 	Credentials *CredentialStore
+	// SessionLog records sessions and the commands run in them. Optional.
+	SessionLog *SessionLogger
+}
+
+// authInfoKey is the ssh.Permissions.ExtraData key holding an AuthResult.
+type authInfoKey struct{}
+
+// withAuthInfo returns a copy of perms carrying info in ExtraData.
+func withAuthInfo(perms *ssh.Permissions, info AuthResult) *ssh.Permissions {
+	out := &ssh.Permissions{}
+	if perms != nil {
+		*out = *perms
+	}
+	extra := make(map[any]any, len(out.ExtraData)+1)
+	for k, v := range out.ExtraData {
+		extra[k] = v
+	}
+	extra[authInfoKey{}] = info
+	out.ExtraData = extra
+	return out
 }
 
 // Server is a simple SSH server that authenticates clients via SSH certificate
@@ -163,6 +182,19 @@ func (s *Server) handleConn(conn net.Conn, cfg *ssh.ServerConfig) {
 	defer sshConn.Close()
 	logger.Debug("nativessh: connection from %s user=%s", conn.RemoteAddr(), sshConn.User())
 
+	var auth AuthResult
+	if sshConn.Permissions != nil {
+		auth, _ = sshConn.Permissions.ExtraData[authInfoKey{}].(AuthResult)
+	}
+	logSess := s.cfg.SessionLog.StartSession(SessionInfo{
+		SourceAddr: sshConn.RemoteAddr().String(),
+		DestAddr:   sshConn.LocalAddr().String(),
+		Username:   sshConn.User(),
+		Transport:  TransportSSH,
+		Auth:       auth,
+	})
+	defer logSess.End()
+
 	go ssh.DiscardRequests(reqs)
 
 	for newChan := range chans {
@@ -175,13 +207,13 @@ func (s *Server) handleConn(conn net.Conn, cfg *ssh.ServerConfig) {
 			logger.Debug("nativessh: channel accept error: %v", err)
 			return
 		}
-		go s.handleSession(ch, requests, sshConn.User())
+		go s.handleSession(ch, requests, sshConn.User(), logSess)
 	}
 }
 
 // handleSession drives a single SSH session channel. It waits for a pty-req
 // followed by a shell request and then bridges the PTY to the channel.
-func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request, username string) {
+func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request, username string, logSess *Session) {
 	defer ch.Close()
 
 	var (
@@ -217,9 +249,20 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request, use
 				continue
 			}
 			started = true
+
+			var (
+				output io.Writer = ch
+				input  io.Reader = ch
+			)
+			if logSess != nil {
+				in, out := logSess.ShellRecorder(sess.InputHidden)
+				output = io.MultiWriter(ch, out)
+				input = io.TeeReader(ch, in)
+			}
+
 			// PTY output → SSH channel.
 			go func() {
-				_, _ = io.Copy(ch, sess)
+				_, _ = io.Copy(output, sess)
 				// Notify the client of the shell's exit status so it can
 				// disconnect cleanly instead of requiring a manual disconnect.
 				exitCode := sess.ExitCode()
@@ -235,7 +278,7 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request, use
 			}()
 			// SSH channel input → PTY stdin.
 			go func() {
-				_, _ = io.Copy(sess, ch)
+				_, _ = io.Copy(sess, input)
 			}()
 
 		case "exec":
@@ -243,9 +286,17 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request, use
 				_ = req.Reply(true, nil)
 			}
 			cmd := parseExecPayload(req.Payload)
-			go s.runExecAs(ch, username, cmd)
-			// Drain remaining requests; the goroutine owns the channel now.
+			logSess.RecordCommand(ChannelExec, cmd, false)
+			// Exec runs without a PTY, so drop any shell a prior pty-req
+			// (ssh -t) started.
+			if sess != nil {
+				sess.Close() //nolint:errcheck
+			}
+			// Drain remaining requests while the command owns the channel.
+			// Run it synchronously so the deferred ch.Close() doesn't cut
+			// the command off before it finishes.
 			go ssh.DiscardRequests(requests)
+			s.runExecAs(ch, username, cmd)
 			return
 
 		case "window-change":
@@ -303,10 +354,7 @@ func (s *Server) runExecAs(ch ssh.Channel, username, command string) {
 		}
 	}
 
-	homeDir := u.HomeDir
-	if _, err := os.Stat(homeDir); err != nil {
-		homeDir = "/"
-	}
+	homeDir := userWorkDir(u.HomeDir, uint32(uid), uint32(gid), groups)
 
 	cmd := exec.Command("/bin/sh", "-c", command)
 	cmd.Env = []string{
@@ -369,7 +417,10 @@ func makePublicKeyCallback(store *CredentialStore) func(ssh.ConnMetadata, ssh.Pu
 		// 1. Host authorized_keys.
 		if CheckAuthorizedKeys(meta.User(), key) {
 			logger.Debug("nativessh: authorized_keys auth for user %q", meta.User())
-			return &ssh.Permissions{}, nil
+			return withAuthInfo(nil, AuthResult{
+				Method:         AuthMethodPublicKey,
+				KeyFingerprint: ssh.FingerprintSHA256(key),
+			}), nil
 		}
 
 		// 2. CA certificate.
@@ -391,7 +442,7 @@ func makePublicKeyCallback(store *CredentialStore) func(ssh.ConnMetadata, ssh.Pu
 					perms, err := checker.Authenticate(connMetaWithUser{ConnMetadata: meta, user: principal}, key)
 					if err == nil {
 						logger.Debug("nativessh: CA cert auth for user %q principal=%q", meta.User(), principal)
-						return perms, nil
+						return withAuthInfo(perms, certAuthResult(key)), nil
 					}
 					lastErr = err
 				}
@@ -417,7 +468,7 @@ func makePasswordCallback() func(ssh.ConnMetadata, []byte) (*ssh.Permissions, er
 			return nil, fmt.Errorf("permission denied")
 		}
 		logger.Debug("nativessh: password auth for user %q", meta.User())
-		return &ssh.Permissions{}, nil
+		return withAuthInfo(nil, AuthResult{Method: AuthMethodPassword}), nil
 	}
 }
 

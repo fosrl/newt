@@ -7,10 +7,12 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/nativessh"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -89,7 +91,16 @@ func (g *Gateway) HandleSSH(w http.ResponseWriter, r *http.Request) {
 	defer ws.CloseNow() //nolint:errcheck
 
 	if nativeSSH {
-		if err := serveNativeSSHSession(ctx, ws, username, g.sshCreds); err != nil {
+		conn := nativeSSHConn{
+			username:   username,
+			sourceAddr: browserSourceAddr(r),
+			creds:      g.sshCreds,
+			sessionLog: g.sessionLog,
+		}
+		if addr, ok := ctx.Value(http.LocalAddrContextKey).(net.Addr); ok {
+			conn.destAddr = addr.String()
+		}
+		if err := serveNativeSSHSession(ctx, ws, conn); err != nil {
 			logger.Debug("SSH native session error: %v", err)
 		}
 	} else {
@@ -97,6 +108,26 @@ func (g *Gateway) HandleSSH(w http.ResponseWriter, r *http.Request) {
 			logger.Debug("SSH session error: %v", err)
 		}
 	}
+}
+
+// nativeSSHConn describes a native SSH browser session request.
+type nativeSSHConn struct {
+	username   string
+	sourceAddr string
+	destAddr   string
+	creds      *nativessh.CredentialStore
+	sessionLog *nativessh.SessionLogger
+}
+
+// browserSourceAddr returns the address of the browser behind the reverse
+// proxy when it reported one, falling back to the proxy's own address. The
+// gateway only listens inside the tunnel, so the header comes from the
+// Pangolin side, not the browser.
+func browserSourceAddr(r *http.Request) string {
+	if ip := strings.TrimSpace(r.Header.Get("X-Real-Ip")); ip != "" && net.ParseIP(ip) != nil {
+		return ip
+	}
+	return r.RemoteAddr
 }
 
 func serveSSHSession(ctx context.Context, ws *websocket.Conn, target, username, _ string) error {

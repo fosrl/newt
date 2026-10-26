@@ -66,6 +66,9 @@ type Newt struct {
 	wgService    *wgclients.WireGuardService
 	ready        bool
 	sshCredStore *nativessh.CredentialStore
+	// sshSessionLog records native SSH and browser SSH sessions and the
+	// commands run in them. Nil when SSH is disabled.
+	sshSessionLog *nativessh.SessionLogger
 
 	// Auth daemon (Linux only)
 	authDaemonServer *authdaemon.Server
@@ -160,6 +163,12 @@ func Init(ctx context.Context, cfg Config) (*Newt, error) {
 
 	if !cfg.DisableSSH {
 		n.sshCredStore = nativessh.NewCredentialStore()
+		// Ship compressed SSH session and command logs via websocket
+		n.sshSessionLog = nativessh.NewSessionLogger(func(data string) error {
+			return client.SendMessageNoLog("newt/ssh-session-log", map[string]interface{}{
+				"compressed": data,
+			})
+		})
 	}
 
 	return n, nil
@@ -255,6 +264,7 @@ func (n *Newt) Start(ctx context.Context) {
 	<-ctx.Done()
 
 	n.closeClients()
+	n.closeSSHSessionLog()
 
 	if n.dockerEventMonitor != nil {
 		n.dockerEventMonitor.Stop()
@@ -285,11 +295,21 @@ func (n *Newt) Start(ctx context.Context) {
 func (n *Newt) Close() {
 	n.closeWgTunnel()
 	n.closeClients()
+	n.closeSSHSessionLog()
 	if n.healthMonitor != nil {
 		n.healthMonitor.Stop()
 	}
 	if n.client != nil {
 		n.client.Close()
+	}
+}
+
+// closeSSHSessionLog ends any open SSH sessions and flushes their logs. It
+// must run before the websocket is closed so the final batch is delivered.
+func (n *Newt) closeSSHSessionLog() {
+	if n.sshSessionLog != nil {
+		n.sshSessionLog.Close()
+		n.sshSessionLog = nil
 	}
 }
 
