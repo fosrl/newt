@@ -674,6 +674,7 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 						Payload: buffer.MakeWithData(packet),
 					})
 					p.proxyEp.InjectInbound(header.IPv4ProtocolNumber, pkb)
+					pkb.DecRef()
 					return true
 				}
 
@@ -733,6 +734,8 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 			Payload: buffer.MakeWithData(packet),
 		})
 		p.proxyEp.InjectInbound(header.IPv4ProtocolNumber, pkb)
+		// The stack clones anything it retains; release our reference.
+		pkb.DecRef()
 		logger.Debug("HandleIncomingPacket: Injected packet into proxy stack (proto=%d)", protocol)
 		return true
 	}
@@ -980,10 +983,9 @@ func (p *ProxyHandler) Close() error {
 		p.httpHandler.Close()
 	}
 
-	// Close ICMP replies channel
-	if p.icmpReplies != nil {
-		close(p.icmpReplies)
-	}
+	// icmpReplies is intentionally left open: proxyPing goroutines may still
+	// call QueueICMPReply after Close, and sending on a closed channel panics.
+	// It is garbage collected with the handler.
 
 	if p.proxyStack != nil {
 		p.proxyStack.RemoveNIC(1)

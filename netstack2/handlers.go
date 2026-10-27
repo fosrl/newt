@@ -414,12 +414,12 @@ func pipeUDP(origin, remote net.PacketConn, serverAddr, clientAddr net.Addr, tim
 func unidirectionalPacketStream(dst, src net.PacketConn, to net.Addr, dir string, wg *sync.WaitGroup, timeout time.Duration) {
 	defer wg.Done()
 
-	logger.Info("UDP %s: Starting packet stream (to=%v)", dir, to)
+	logger.Debug("UDP %s: Starting packet stream (to=%v)", dir, to)
 	err := copyPacketData(dst, src, to, timeout)
 	if err != nil {
-		logger.Info("UDP %s: Stream ended with error: %v", dir, err)
+		logger.Debug("UDP %s: Stream ended with error: %v", dir, err)
 	} else {
-		logger.Info("UDP %s: Stream ended (timeout)", dir)
+		logger.Debug("UDP %s: Stream ended (timeout)", dir)
 	}
 }
 
@@ -438,7 +438,7 @@ func copyPacketData(dst, src net.PacketConn, to net.Addr, timeout time.Duration)
 			return err
 		}
 
-		logger.Info("UDP copyPacketData: Read %d bytes from %v", n, srcAddr)
+		logger.Debug("UDP copyPacketData: Read %d bytes from %v", n, srcAddr)
 
 		// Determine write destination
 		writeAddr := to
@@ -452,7 +452,7 @@ func copyPacketData(dst, src net.PacketConn, to net.Addr, timeout time.Duration)
 			logger.Info("UDP copyPacketData: Write error to %v: %v", writeAddr, err)
 			return err
 		}
-		logger.Info("UDP copyPacketData: Wrote %d bytes to %v", written, writeAddr)
+		logger.Debug("UDP copyPacketData: Wrote %d bytes to %v", written, writeAddr)
 
 		dst.SetReadDeadline(time.Now().Add(timeout))
 	}

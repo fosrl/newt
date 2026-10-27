@@ -56,6 +56,19 @@ type Manager struct {
 const defaultSendHolepunchIntervalMax = 60 * time.Second
 const defaultSendHolepunchIntervalMin = 1 * time.Second
 
+// natKeepaliveInterval is how often a keepalive is sent to each exit node
+// between hole punches once the hole punch interval has backed off past it.
+// It is under the 30s timeout many NATs (e.g. Linux conntrack) give UDP flows
+// that never see a reply, so the NAT mapping - and with it the endpoint the
+// server recorded from the last hole punch - stays the same between punches.
+const natKeepaliveInterval = 20 * time.Second
+
+// natKeepalivePacket only exists to keep the NAT mapping alive, so it is much
+// cheaper for the exit node than a hole punch. Gerbil drops it on sight; older
+// gerbils fail to parse the ephemeral key and drop it silently before doing
+// any crypto.
+var natKeepalivePacket = []byte(`{"ephemeralPublicKey":"keepalive"}`)
+
 // NewManager creates a new hole punch manager
 func NewManager(sharedBind *bind.SharedBind, ID string, clientType string, publicKey string, publicDNS []string) *Manager {
 	return &Manager{
@@ -514,6 +527,9 @@ func (m *Manager) runMultipleExitNodes() {
 	ticker := time.NewTicker(m.sendHolepunchInterval)
 	defer ticker.Stop()
 
+	keepaliveTicker := time.NewTicker(natKeepaliveInterval)
+	defer keepaliveTicker.Stop()
+
 	for {
 		select {
 		case <-m.stopChan:
@@ -537,6 +553,22 @@ func (m *Manager) runMultipleExitNodes() {
 			for _, node := range resolvedNodes {
 				if err := m.sendHolePunch(node.remoteAddr, node.publicKey); err != nil {
 					logger.Debug("Failed to send hole punch to %s: %v", node.endpointName, err)
+				}
+			}
+		case <-keepaliveTicker.C:
+			// Only needed once hole punches are further apart than the
+			// keepalive interval. Custom longer intervals (olm low power mode)
+			// are there to save battery, so let the mapping lapse then.
+			m.mu.Lock()
+			needKeepalive := m.sendHolepunchInterval > natKeepaliveInterval &&
+				m.sendHolepunchIntervalMax <= m.defaultIntervalMax
+			m.mu.Unlock()
+			if !needKeepalive {
+				continue
+			}
+			for _, node := range resolvedNodes {
+				if _, err := m.sharedBind.WriteToUDP(natKeepalivePacket, node.remoteAddr); err != nil {
+					logger.Debug("Failed to send NAT keepalive to %s: %v", node.endpointName, err)
 				}
 			}
 		case <-ticker.C:
