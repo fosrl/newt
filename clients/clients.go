@@ -131,8 +131,9 @@ type WireGuardService struct {
 	holePunchManager   *holepunch.Manager
 	useNativeInterface bool
 	// SSH server running on the clients' netstack
-	sshServer *sshServerHandle
-	credStore *nativessh.CredentialStore
+	sshServer     *sshServerHandle
+	credStore     *nativessh.CredentialStore
+	sshSessionLog *nativessh.SessionLogger
 	// Direct UDP relay from main tunnel to clients' WireGuard
 	directRelayStop    chan struct{}
 	directRelayWg      sync.WaitGroup
@@ -234,6 +235,13 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 // (i.e. before the first newt/wg/receive-config message is processed).
 func (s *WireGuardService) SetCredentialStore(store *nativessh.CredentialStore) {
 	s.credStore = store
+}
+
+// SetSessionLogger sets the logger that records sessions and commands on the
+// native SSH server. Like SetCredentialStore it must be called before the
+// netstack is configured. The caller owns the logger and closes it.
+func (s *WireGuardService) SetSessionLogger(l *nativessh.SessionLogger) {
+	s.sshSessionLog = l
 }
 
 // ReportRTT allows reporting native RTTs to telemetry, rate-limited externally.
@@ -1035,7 +1043,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 	// Start the SSH server on the clients' netstack (port 22).
 	// A nil credStore means SSH is disabled (--disable-ssh), so skip starting the server.
 	if s.credStore != nil {
-		if h, sshErr := startSSHOnNetstack(s.tnet, s.credStore); sshErr != nil {
+		if h, sshErr := startSSHOnNetstack(s.tnet, s.credStore, s.sshSessionLog); sshErr != nil {
 			logger.Warn("nativessh: not starting SSH server on clients netstack: %v", sshErr)
 		} else {
 			s.sshServer = h
@@ -1740,9 +1748,10 @@ func (h *sshServerHandle) stop() {
 // startSSHOnNetstack creates a TCP listener on port 22 of the clients' netstack
 // and starts serving SSH connections on it in the background. The returned
 // handle can be used to stop the server by closing the listener.
-func startSSHOnNetstack(tnet *netstack2.Net, creds *nativessh.CredentialStore) (*sshServerHandle, error) {
+func startSSHOnNetstack(tnet *netstack2.Net, creds *nativessh.CredentialStore, sessionLog *nativessh.SessionLogger) (*sshServerHandle, error) {
 	srv := nativessh.NewServer(nativessh.ServerConfig{
 		Credentials: creds,
+		SessionLog:  sessionLog,
 	})
 	ln, err := tnet.ListenTCP(&net.TCPAddr{Port: 22})
 	if err != nil {

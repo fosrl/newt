@@ -7,10 +7,9 @@ import (
 	"errors"
 
 	"github.com/coder/websocket"
-	"github.com/fosrl/newt/nativessh"
 )
 
 // serveNativeSSHSession is not supported on Windows.
-func serveNativeSSHSession(_ context.Context, _ *websocket.Conn, _ string, _ *nativessh.CredentialStore) error {
+func serveNativeSSHSession(_ context.Context, _ *websocket.Conn, _ nativeSSHConn) error {
 	return errors.New("native SSH is not supported on Windows")
 }

@@ -41,14 +41,18 @@ type Config struct {
 	// SSHCredentials are used by native SSH browser sessions for certificate
 	// validation against the in-memory CA/principal store.
 	SSHCredentials *nativessh.CredentialStore
+	// SessionLog, when set, records native SSH browser sessions and the
+	// commands run in them.
+	SessionLog *nativessh.SessionLogger
 }
 
 // Gateway is a browser-based RDP/SSH/VNC WebSocket proxy.
 // Create one with New and mount it via RegisterHandlers or the individual
 // HandleRDP / HandleSSH / HandleVNC http.HandlerFunc methods.
 type Gateway struct {
-	authToken string
-	sshCreds  *nativessh.CredentialStore
+	authToken  string
+	sshCreds   *nativessh.CredentialStore
+	sessionLog *nativessh.SessionLogger
 
 	mu      sync.RWMutex
 	targets map[int]Target // keyed by Target.ID
@@ -59,9 +63,10 @@ type Gateway struct {
 // New creates a new Gateway from the provided Config.
 func New(cfg Config) *Gateway {
 	return &Gateway{
-		authToken: cfg.AuthToken,
-		sshCreds:  cfg.SSHCredentials,
-		targets:   make(map[int]Target),
+		authToken:  cfg.AuthToken,
+		sshCreds:   cfg.SSHCredentials,
+		sessionLog: cfg.SessionLog,
+		targets:    make(map[int]Target),
 	}
 }
 

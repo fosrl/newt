@@ -49,6 +49,7 @@ func (n *Newt) setupClients() {
 	}
 
 	n.wgService.SetCredentialStore(n.sshCredStore)
+	n.wgService.SetSessionLogger(n.sshSessionLog)
 
 	n.client.OnTokenUpdate(func(token string) {
 		n.wgService.SetToken(token)

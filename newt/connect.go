@@ -297,7 +297,7 @@ func (n *Newt) startBrowserGateway() error {
 		return fmt.Errorf("netstack not ready")
 	}
 
-	gateway := browsergateway.New(browsergateway.Config{SSHCredentials: n.sshCredStore})
+	gateway := browsergateway.New(browsergateway.Config{SSHCredentials: n.sshCredStore, SessionLog: n.sshSessionLog})
 
 	var ln net.Listener
 	var err error
