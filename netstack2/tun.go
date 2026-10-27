@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -40,9 +41,14 @@ type netTun struct {
 	events         chan tun.Event
 	notifyHandle   *channel.NotificationHandle
 	incomingPacket chan *buffer.View
-	mtu            int
-	dnsServers     []netip.Addr
-	hasV4, hasV6   bool
+	// closed is closed by Close. incomingPacket itself is never closed:
+	// WriteNotify sends on it from gVisor goroutines that can still be
+	// running during and after Close, and a send on a closed channel panics.
+	closed       chan struct{}
+	closeOnce    sync.Once
+	mtu          int
+	dnsServers   []netip.Addr
+	hasV4, hasV6 bool
 	// TODO: LETS NOT KEEP THIS ON THE TUN AND MOVE IT BUT WE CAN KEEP IT FOR NOW
 	proxyHandler *ProxyHandler // Handles promiscuous mode packet processing
 }
@@ -77,6 +83,7 @@ func CreateNetTUNWithOptions(localAddresses, dnsServers []netip.Addr, mtu int, o
 		stack:          stack.New(stackOpts),
 		events:         make(chan tun.Event, 10),
 		incomingPacket: make(chan *buffer.View),
+		closed:         make(chan struct{}),
 		dnsServers:     dnsServers,
 		mtu:            mtu,
 	}
@@ -166,8 +173,10 @@ func (tun *netTun) Events() <-chan tun.Event {
 }
 
 func (tun *netTun) Read(buf [][]byte, sizes []int, offset int) (int, error) {
-	view, ok := <-tun.incomingPacket
-	if !ok {
+	var view *buffer.View
+	select {
+	case view = <-tun.incomingPacket:
+	case <-tun.closed:
 		return 0, os.ErrClosed
 	}
 
@@ -201,8 +210,12 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
 		case 6:
 			tun.ep.InjectInbound(header.IPv6ProtocolNumber, pkb)
 		default:
+			pkb.DecRef()
 			return 0, syscall.EAFNOSUPPORT
 		}
+		// The stack clones anything it retains, so release our reference so
+		// the buffer goes back to gVisor's pool instead of leaking per packet.
+		pkb.DecRef()
 	}
 	return len(buf), nil
 }
@@ -213,7 +226,7 @@ func (tun *netTun) WriteNotify() {
 	if pkt != nil {
 		view := pkt.ToView()
 		pkt.DecRef()
-		tun.incomingPacket <- view
+		tun.sendIncoming(view)
 		return
 	}
 
@@ -222,13 +235,32 @@ func (tun *netTun) WriteNotify() {
 	if tun.proxyHandler != nil {
 		view := tun.proxyHandler.ReadOutgoingPacket()
 		if view != nil {
-			tun.incomingPacket <- view
+			tun.sendIncoming(view)
 			return
 		}
 	}
 }
 
+// sendIncoming hands a packet to Read, or drops it once the device is closed
+// so gVisor goroutines never block forever on a reader that has gone away.
+func (tun *netTun) sendIncoming(view *buffer.View) {
+	select {
+	case tun.incomingPacket <- view:
+	case <-tun.closed:
+		view.Release()
+	}
+}
+
 func (tun *netTun) Close() error {
+	tun.closeOnce.Do(tun.close)
+	return nil
+}
+
+func (tun *netTun) close() {
+	// Signal first so WriteNotify calls made while tearing down the stack
+	// below return instead of blocking on Read.
+	close(tun.closed)
+
 	tun.stack.RemoveNIC(1)
 
 	tun.stack.Close()
@@ -243,12 +275,6 @@ func (tun *netTun) Close() error {
 	if tun.events != nil {
 		close(tun.events)
 	}
-
-	if tun.incomingPacket != nil {
-		close(tun.incomingPacket)
-	}
-
-	return nil
 }
 
 func (tun *netTun) MTU() (int, error) {
