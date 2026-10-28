@@ -40,6 +40,12 @@ type SelfUpdateConfig struct {
 
 	// cli or newt depending on where we are
 	Agent string
+
+	// Restart is an optional hook used to start the updated binary once it
+	// has been installed.  When nil the process re-executes itself.  On
+	// Windows services this should restart through the Service Control
+	// Manager rather than spawning a child process.
+	Restart func() error
 }
 
 // versionResponse mirrors the JSON returned by POST /api/v1/auth/newt/version
@@ -115,7 +121,7 @@ func verifySHA256(path, expected string) error {
 //
 // It returns an error when the check or update fails.  On a successful update
 // the function does not return – the process is replaced by the new binary via
-// syscall.Exec.
+// syscall.Exec – unless a Restart hook is configured.
 func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 	logger.Debug("checkAndSelfUpdate: starting update check (currentVersion=%s)", cfg.CurrentVersion)
 
@@ -148,6 +154,9 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 		return fmt.Errorf("failed to resolve symlinks for executable path: %w", err)
 	}
 	logger.Debug("checkAndSelfUpdate: current executable path: %s", exePath)
+
+	// Clean up the binary parked by a previous update, if any.
+	removeStaleBinary(exePath)
 
 	// --- Step 1: Ask the server for the latest version ---
 	plat := cfg.Platform
@@ -283,11 +292,11 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 	}
 
 	// --- Step 3: Replace the running binary ---
-	// On Unix an atomic rename works even while the file is running.
 	logger.Debug("checkAndSelfUpdate: replacing binary at %s", exePath)
-	if err := os.Rename(tmpPath, exePath); err != nil {
-		return fmt.Errorf("failed to replace binary (you may need to run as root): %w", err)
+	if err := replaceBinary(tmpPath, exePath); err != nil {
+		return fmt.Errorf("failed to replace binary: %w", err)
 	}
+	logger.Info("Updated binary at %s from %s to %s", exePath, cfg.CurrentVersion, verResp.Data.LatestVersion)
 
 	systemSubstrate := os.Getenv("NEWT_SYSTEM_SUBSTRATE")
 	logger.Debug("checkAndSelfUpdate: system substrate: %s", systemSubstrate)
@@ -299,6 +308,10 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 	}
 
 	// --- Step 4: Re-exec ---
+	if cfg.Restart != nil {
+		logger.Debug("checkAndSelfUpdate: restarting via configured restart hook")
+		return cfg.Restart()
+	}
 	logger.Debug("checkAndSelfUpdate: re-executing new binary")
 	return reexec(exePath)
 }
