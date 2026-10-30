@@ -27,12 +27,12 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.47.0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/exp v0.0.0-20251113190631-e25ba8c21ef6
-	golang.org/x/net v0.60.0
+	golang.org/x/net v0.61.0
 	golang.org/x/sys v0.49.0
 	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
 	golang.zx2c4.com/wireguard/windows v1.1.1
-	google.golang.org/grpc v1.84.0
+	google.golang.org/grpc v1.85.0
 	gopkg.in/yaml.v3 v3.0.1
 	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c
 	software.sslmate.com/src/go-pkcs12 v0.7.4
