@@ -260,6 +260,9 @@ func CheckAndSelfUpdate(cfg SelfUpdateConfig) error {
 	// Write to a temp file in the same directory as the current binary so that
 	// an atomic rename works even across filesystem boundaries.
 	tmpFile, err := os.CreateTemp(exeDir, ".newt-update-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file in %s: %w", exeDir, err)
+	}
 	tmpPath := tmpFile.Name()
 
 	// Ensure the temp file is cleaned up on any error path.

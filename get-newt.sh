@@ -185,6 +185,39 @@ get_sudo_cmd() {
     fi
 }
 
+# Restore the default SELinux context on an installed binary.
+# The binary is downloaded to /tmp, so it carries a temp-file label
+# (e.g. user_tmp_t) that mv preserves; on SELinux-enforcing hosts systemd
+# then refuses to execute it (status=203/EXEC).
+restore_selinux_context() {
+    target="$1"
+    sudo_cmd="$2"
+
+    [ -e /sys/fs/selinux/enforce ] || return 0
+
+    restorecon_bin=$(command -v restorecon 2>/dev/null || true)
+    if [ -z "$restorecon_bin" ]; then
+        for candidate in /usr/sbin/restorecon /sbin/restorecon; do
+            if [ -x "$candidate" ]; then
+                restorecon_bin="$candidate"
+                break
+            fi
+        done
+    fi
+
+    if [ -z "$restorecon_bin" ]; then
+        print_warning "SELinux is enabled but restorecon was not found."
+        print_warning "If the service fails to start, run: restorecon -v ${target}"
+        return 0
+    fi
+
+    print_status "Restoring SELinux context on ${target}"
+    if ! $sudo_cmd "$restorecon_bin" "$target"; then
+        print_warning "Failed to restore SELinux context on ${target}."
+        print_warning "If the service fails to start, run: restorecon -v ${target}"
+    fi
+}
+
 # Download and install newt
 install_newt() {
     platform="$1"
@@ -235,6 +268,8 @@ install_newt() {
         mkdir -p "$install_dir"
         mv "$temp_file" "$final_path"
     fi
+
+    restore_selinux_context "$final_path" "$sudo_cmd"
 
     print_status "newt installed to ${final_path}"
 
