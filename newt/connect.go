@@ -13,6 +13,7 @@ import (
 	newtDevice "github.com/fosrl/newt/device"
 	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/netstack2"
 	"github.com/fosrl/newt/network"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/util"
@@ -20,7 +21,6 @@ import (
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	wtun "golang.zx2c4.com/wireguard/tun"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 func (n *Newt) applyWgData(jsonData []byte) error {
@@ -102,10 +102,13 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 		n.tnet = nil
 		n.config.NativeMainInterfaceName = mainIfName
 	} else {
-		n.tun, n.tnet, err = netstack.CreateNetTUN(
+		// newt's own netstack, without proxying, so that the main tunnel
+		// gets the same TCP settings as the client tunnels.
+		n.tun, n.tnet, err = netstack2.CreateNetTUNWithOptions(
 			[]netip.Addr{netip.MustParseAddr(n.wgData.TunnelIP)},
 			[]netip.Addr{netip.MustParseAddr(n.config.DNS)},
-			n.config.MTU)
+			n.config.MTU,
+			netstack2.NetTunOptions{})
 		if err != nil {
 			logger.Error("Failed to create TUN device: %v", err)
 			regResult = "failure"

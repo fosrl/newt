@@ -62,7 +62,9 @@ type NetTunOptions struct {
 	EnableICMPProxy bool
 }
 
-// CreateNetTUN creates a new TUN device with netstack without proxying
+// CreateNetTUN creates a new TUN device with netstack and TCP, UDP and ICMP
+// proxying. For a netstack without proxying, use CreateNetTUNWithOptions with
+// NetTunOptions{}.
 func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device, *Net, error) {
 	return CreateNetTUNWithOptions(localAddresses, dnsServers, mtu, NetTunOptions{
 		EnableTCPProxy:  true,
@@ -119,8 +121,12 @@ func CreateNetTUNWithOptions(localAddresses, dnsServers []netip.Addr, mtu int, o
 		}
 	}
 
-	if err := dev.stack.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true); err != nil {
-		return nil, nil, fmt.Errorf("set ipv4 forwarding: %s", err)
+	// Forwarding is for the proxy. Without one, as in the main tunnel, it
+	// stays off, as in wireguard-go's netstack.
+	if dev.proxyHandler != nil {
+		if err := dev.stack.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true); err != nil {
+			return nil, nil, fmt.Errorf("set ipv4 forwarding: %s", err)
+		}
 	}
 
 	for _, ip := range localAddresses {
