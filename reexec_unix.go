@@ -19,3 +19,9 @@ func reexec() error {
 	}
 	return syscall.Exec(exe, os.Args, os.Environ())
 }
+
+// updateRestart returns the restart hook used after a self-update. On Unix
+// the updates package execs the new binary itself, so no hook is needed.
+func updateRestart() func() error {
+	return nil
+}

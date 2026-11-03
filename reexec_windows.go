@@ -38,3 +38,15 @@ func reexec() error {
 	os.Exit(0)
 	return nil // unreachable
 }
+
+// updateRestart returns the restart hook used after a self-update. As a
+// Windows service the update must restart through the SCM (see reexec); in
+// that case the replaced binary is picked up when the SCM relaunches it.
+// Outside of service mode nil is returned so the updates package re-executes
+// the new binary itself.
+func updateRestart() func() error {
+	if isWindowsService() {
+		return requestServiceRestart
+	}
+	return nil
+}

@@ -43,6 +43,7 @@ func (s *CredentialStore) get(_ string) (ssh.PublicKey, map[string]struct{}) {
 type ServerConfig struct {
 	ListenAddr  string
 	Credentials *CredentialStore
+	SessionLog  *SessionLogger
 }
 
 // Server is a stub on Windows.
