@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MSI installer for Newt (WiX v4+ schema).
+  Built in CI by the sign-windows job in .github/workflows/cicd.yml:
+    wix build -arch x64 -d Version=X.Y.Z -d BuildDir=bin -o bin/newt_windows_installer.msi newt.wxs
+  Requires bin/newt_windows_amd64.exe and third_party/wintun/amd64/wintun.dll.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="newt"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="Fossorial Inc."
+           UpgradeCode="A5ADF009-222D-4269-B351-86B4C66E7F4E"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!--
+      Migration from the legacy Inno Setup installer (newt.iss, AppId {25A1E3C4-F273-4334-8DF3-47408E83012D}).
+      Both installers use C:\Program Files\newt, so the old install is silently uninstalled
+      (removes its files, Start menu entry, PATH entry and Add/Remove Programs entry)
+      right before this MSI lays down its own files in the same place.
+    -->
+    <Property Id="LEGACYINNOUNINSTALL">
+      <RegistrySearch Id="LegacyInnoUninstallString"
+                      Root="HKLM"
+                      Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{25A1E3C4-F273-4334-8DF3-47408E83012D}_is1"
+                      Name="UninstallString"
+                      Type="raw"
+                      Bitness="always64" />
+    </Property>
+
+    <CustomAction Id="RemoveLegacyInnoInstall"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="[LEGACYINNOUNINSTALL] /VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RemoveLegacyInnoInstall"
+              Before="InstallFiles"
+              Condition="LEGACYINNOUNINSTALL AND NOT REMOVE" />
+    </InstallExecuteSequence>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="newt">
+        <Component Id="Newt" Guid="D851E426-2886-413B-BF6F-10B3E862DB51">
+          <File Id="NewtExe"
+                Source="$(var.BuildDir)/newt_windows_amd64.exe"
+                Name="newt.exe"
+                KeyPath="yes" />
+          <Environment Id="NewtPath"
+                       Name="PATH"
+                       Value="[INSTALLFOLDER]"
+                       Part="last"
+                       Action="set"
+                       System="yes" />
+        </Component>
+        <Component Id="WintunDll" Guid="FAB70272-1657-45AB-A61F-82B1538528DC">
+          <File Id="WintunDll"
+                Source="third_party/wintun/amd64/wintun.dll"
+                Name="wintun.dll"
+                KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="newt">
+        <Component Id="StartMenuShortcut" Guid="51728364-ED85-4D11-8950-0F57E8230B15">
+          <Shortcut Id="StartMenuShortcut"
+                    Name="newt"
+                    Description="Newt"
+                    Target="[INSTALLFOLDER]newt.exe" />
+          <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
+          <RegistryValue Root="HKCU"
+                         Key="Software\Fossorial\Newt"
+                         Name="StartMenuShortcut"
+                         Type="integer"
+                         Value="1"
+                         KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="ProductFeature" Title="newt" Level="1">
+      <ComponentRef Id="Newt" />
+      <ComponentRef Id="WintunDll" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+</Wix>

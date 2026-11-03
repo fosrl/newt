@@ -9,6 +9,12 @@ name: CI/CD Pipeline (AWS Self-Hosted Runners)
 # - DOCKER_HUB_USERNAME / DOCKER_HUB_ACCESS_TOKEN
 # - GITHUB_TOKEN
 # - COSIGN_PRIVATE_KEY / COSIGN_PASSWORD / COSIGN_PUBLIC_KEY
+# - Windows code signing (DigiCert KeyLocker / DigiCert ONE, via jsign):
+#     SM_API_KEY, SM_CLIENT_CERT_FILE_B64 (base64 of Certificate_pkcs12.p12), SM_CLIENT_CERT_PASSWORD
+#     optional repo/org variable SM_KEY_ALIAS: certificate alias or ID (defaults to cert 8657e61d-c2bb-4603-8907-530e879e00bf)
+# - macOS code signing + notarization:
+#     APPLE_CERT_P12_B64 (base64 of Developer ID Application .p12), APPLE_CERT_PASSWORD,
+#     APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD (app-specific password for notarytool)
 
 permissions:
   contents: write          # gh-release
@@ -625,14 +631,17 @@ jobs:
           done
 
   # ---------------------------------------------------------------------------
-  # 6) Sign/attest + build binaries + draft release (x86 runner)
+  # 6) Sign/attest images + build binaries (x86 runner)
   # ---------------------------------------------------------------------------
   sign-and-release:
-    name: Sign, attest, and release
+    name: Sign, attest, and build binaries
     needs: [create-manifest, build-amd]
     if: ${{ needs.create-manifest.result == 'success' && needs.build-amd.result == 'success' }}
     runs-on: [self-hosted, linux, x64] # NOTE: ensure label exists on runner
     timeout-minutes: 120
+    outputs:
+      ghcr_digest: ${{ steps.digests.outputs.ghcr_digest }}
+      dh_digest: ${{ steps.digests.outputs.dh_digest }}
     env:
       DOCKERHUB_IMAGE: docker.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
       GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
@@ -695,6 +704,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Resolve multi-arch digest refs (by TAG)
+        id: digests
         shell: bash
         run: |
           set -euo pipefail
@@ -722,12 +732,14 @@ jobs:
           GHCR_DIGEST="$(get_digest "${GHCR_IMAGE}:${TAG}")"
           echo "GHCR_REF=${GHCR_IMAGE}@${GHCR_DIGEST}" >> "$GITHUB_ENV"
           echo "GHCR_DIGEST=${GHCR_DIGEST}" >> "$GITHUB_ENV"
+          echo "ghcr_digest=${GHCR_DIGEST}" >> "$GITHUB_OUTPUT"
           echo "Resolved GHCR_REF=${GHCR_IMAGE}@${GHCR_DIGEST}"
 
           if [ -n "${{ secrets.DOCKER_HUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" ]; then
             DH_DIGEST="$(get_digest "${DOCKERHUB_IMAGE}:${TAG}")"
             echo "DH_REF=${DOCKERHUB_IMAGE}@${DH_DIGEST}" >> "$GITHUB_ENV"
             echo "DH_DIGEST=${DH_DIGEST}" >> "$GITHUB_ENV"
+            echo "dh_digest=${DH_DIGEST}" >> "$GITHUB_OUTPUT"
             echo "Resolved DH_REF=${DOCKERHUB_IMAGE}@${DH_DIGEST}"
           fi
 
@@ -910,6 +922,311 @@ jobs:
           for platform in v2 v2i v3 v4 v4i; do
             make -C "${ADVANTECH_DIR}" PLATFORM="${platform}"
           done
+
+      - name: Upload unsigned binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binaries
+          path: bin/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Advantech packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: advantech-packages
+          path: packages/advantech/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 6b) Sign + notarize macOS binaries (GitHub-hosted macOS runner)
+  # ---------------------------------------------------------------------------
+  sign-macos:
+    name: Sign + notarize macOS binaries
+    needs: [sign-and-release]
+    if: ${{ needs.sign-and-release.result == 'success' }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      # Developer ID Application certificate (SHA-1) and identifier used for codesign
+      SIGN_ID: 84F39F4BE29E7F96DFBE13431010525C534FBC67
+      BUNDLE_ID: io.fossorial
+    steps:
+      - name: Download unsigned binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binaries
+          path: bin
+
+      - name: Import Developer ID certificate into a temporary keychain
+        shell: bash
+        env:
+          APPLE_CERT_P12_B64: ${{ secrets.APPLE_CERT_P12_B64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="${RUNNER_TEMP}/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          P12="${RUNNER_TEMP}/developer-id.p12"
+
+          printf '%s' "$APPLE_CERT_P12_B64" | base64 --decode > "$P12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$P12" -k "$KEYCHAIN" -P "$APPLE_CERT_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # Prepend to the user search list so codesign can find the identity + chain
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$P12"
+
+          security find-identity -v -p codesigning "$KEYCHAIN"
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
+      - name: Codesign darwin binaries (hardened runtime + timestamp)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(bin/*_darwin_*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No darwin binaries found in bin/" >&2
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            echo "Signing $f"
+            chmod +x "$f"
+            codesign --sign "$SIGN_ID" --keychain "$KEYCHAIN" --force --timestamp \
+              --options runtime --identifier "$BUNDLE_ID" "$f"
+            codesign --verify --strict --verbose=2 "$f"
+          done
+
+      - name: Notarize with Apple Notary Service
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          ZIP="${RUNNER_TEMP}/notarize.zip"
+          /usr/bin/zip -j "$ZIP" bin/*_darwin_*
+
+          AUTH=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD")
+          OUT="$(xcrun notarytool submit "$ZIP" "${AUTH[@]}" --wait --timeout 45m --output-format json)" || {
+            echo "$OUT"; exit 1;
+          }
+          echo "$OUT"
+
+          ID="$(jq -r '.id // empty' <<<"$OUT")"
+          STATUS="$(jq -r '.status // empty' <<<"$OUT")"
+          if [ -n "$ID" ]; then
+            xcrun notarytool log "$ID" "${AUTH[@]}" || true
+          fi
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "Notarization failed (status: ${STATUS:-unknown})" >&2
+            exit 1
+          fi
+          # Note: Apple does not support stapling tickets to bare Mach-O binaries;
+          # Gatekeeper fetches the notarization ticket online on first launch.
+
+      - name: Upload signed macOS binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed-macos
+          path: bin/*_darwin_*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove temporary keychain
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          if [ -n "${KEYCHAIN:-}" ]; then security delete-keychain "$KEYCHAIN" || true; fi
+
+  # ---------------------------------------------------------------------------
+  # 6c) Sign Windows binary, build MSI, sign MSI (GitHub-hosted Windows runner)
+  # ---------------------------------------------------------------------------
+  sign-windows:
+    name: Sign Windows binary + build/sign MSI
+    needs: [build-amd, sign-and-release]
+    if: ${{ needs.sign-and-release.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TAG: ${{ needs.build-amd.outputs.tag }}
+      EXE: bin/newt_windows_amd64.exe
+      MSI: bin/newt_windows_installer.msi
+      WXS: newt.wxs
+      PRODUCT_NAME: Newt
+      PRODUCT_URL: https://pangolin.net
+      JSIGN_VERSION: "7.6"
+      JSIGN_SHA256: 6cf58aa080e7ff82656f320cff8d4a3bff30408df8766806dcba3740dd839fa5
+      WIX_VERSION: "5.0.2"
+      WINTUN_VERSION: "0.14.1"
+      WINTUN_SHA256: 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
+      TSA_URL: http://timestamp.digicert.com
+      SM_KEY_ALIAS: ${{ vars.SM_KEY_ALIAS || '8657e61d-c2bb-4603-8907-530e879e00bf' }}  # DigiCert ONE certificate ID (not the keypair alias)
+    steps:
+      - name: Checkout tagged commit (for newt.wxs)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.build-amd.outputs.tag }}
+
+      - name: Download unsigned binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binaries
+          path: bin
+
+      - name: Install jsign, WiX and Wintun
+        run: |
+          $jar = Join-Path $env:RUNNER_TEMP "jsign.jar"
+          Invoke-WebRequest -Uri "https://github.com/ebourg/jsign/releases/download/$env:JSIGN_VERSION/jsign-$env:JSIGN_VERSION.jar" -OutFile $jar
+          $hash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:JSIGN_SHA256) { throw "jsign checksum mismatch: $hash" }
+          "JSIGN_JAR=$jar" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          $zip = Join-Path $env:RUNNER_TEMP "wintun.zip"
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:WINTUN_SHA256) { throw "wintun checksum mismatch: $hash" }
+          $wt = Join-Path $env:RUNNER_TEMP "wintun"
+          Expand-Archive -Path $zip -DestinationPath $wt -Force
+          New-Item -ItemType Directory -Force -Path third_party/wintun/amd64 | Out-Null
+          Copy-Item (Join-Path $wt "wintun/bin/amd64/wintun.dll") third_party/wintun/amd64/wintun.dll
+
+          dotnet tool install --global wix --version $env:WIX_VERSION
+          if ($LASTEXITCODE -ne 0) { throw "failed to install wix" }
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+          java -version
+
+      - name: Write DigiCert client certificate
+        env:
+          SM_CLIENT_CERT_FILE_B64: ${{ secrets.SM_CLIENT_CERT_FILE_B64 }}
+        run: |
+          $p12 = Join-Path $env:RUNNER_TEMP "digicert-client.p12"
+          [IO.File]::WriteAllBytes($p12, [Convert]::FromBase64String($env:SM_CLIENT_CERT_FILE_B64))
+          "SM_CLIENT_CERT_FILE=$p12" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Sign Windows binary
+        env:
+          SM_API_KEY: ${{ secrets.SM_API_KEY }}
+          SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
+        run: |
+          java -jar $env:JSIGN_JAR --storetype DIGICERTONE `
+            --storepass "$env:SM_API_KEY|$env:SM_CLIENT_CERT_FILE|$env:SM_CLIENT_CERT_PASSWORD" `
+            --alias $env:SM_KEY_ALIAS --alg SHA-256 --tsaurl $env:TSA_URL `
+            --name "$env:PRODUCT_NAME" --url $env:PRODUCT_URL $env:EXE
+          if ($LASTEXITCODE -ne 0) { throw "jsign failed for $env:EXE" }
+
+      - name: Build MSI (with signed binary)
+        run: |
+          # MSI ProductVersion must be numeric (X.Y.Z); drop any -rc.N suffix
+          $msiVersion = $env:TAG -replace '-.*$', ''
+          wix build -arch x64 -d "Version=$msiVersion" -d "BuildDir=bin" -o $env:MSI $env:WXS
+          if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
+
+      - name: Sign MSI
+        env:
+          SM_API_KEY: ${{ secrets.SM_API_KEY }}
+          SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
+        run: |
+          java -jar $env:JSIGN_JAR --storetype DIGICERTONE `
+            --storepass "$env:SM_API_KEY|$env:SM_CLIENT_CERT_FILE|$env:SM_CLIENT_CERT_PASSWORD" `
+            --alias $env:SM_KEY_ALIAS --alg SHA-256 --tsaurl $env:TSA_URL `
+            --name "$env:PRODUCT_NAME" --url $env:PRODUCT_URL $env:MSI
+          if ($LASTEXITCODE -ne 0) { throw "jsign failed for $env:MSI" }
+
+      - name: Verify Authenticode signatures
+        run: |
+          foreach ($f in @($env:EXE, $env:MSI)) {
+            $sig = Get-AuthenticodeSignature -FilePath $f
+            Write-Host "$f -> $($sig.Status) | signer: $($sig.SignerCertificate.Subject) | timestamp: $($sig.TimeStamperCertificate.Subject)"
+            if ($sig.Status -ne 'Valid') { throw "Invalid signature on $f ($($sig.StatusMessage))" }
+            if (-not $sig.TimeStamperCertificate) { throw "Missing timestamp on $f" }
+          }
+
+      - name: Upload signed Windows artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed-windows
+          path: |
+            ${{ env.EXE }}
+            ${{ env.MSI }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove DigiCert client certificate
+        if: ${{ always() }}
+        run: |
+          if ($env:SM_CLIENT_CERT_FILE) { Remove-Item -Force -ErrorAction SilentlyContinue $env:SM_CLIENT_CERT_FILE }
+
+  # ---------------------------------------------------------------------------
+  # 6d) Assemble signed artifacts and create the draft release
+  # ---------------------------------------------------------------------------
+  release:
+    name: Create GitHub release (draft)
+    needs: [build-amd, sign-and-release, sign-macos, sign-windows]
+    if: ${{ needs.sign-and-release.result == 'success' && needs.sign-macos.result == 'success' && needs.sign-windows.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.build-amd.outputs.tag }}
+      IS_RC: ${{ needs.build-amd.outputs.is_rc }}
+    steps:
+      - name: Download unsigned binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binaries
+          path: bin
+
+      - name: Download signed macOS binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed-macos
+          path: signed/macos
+
+      - name: Download signed Windows artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed-windows
+          path: signed/windows
+
+      - name: Download Advantech packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: advantech-packages
+          path: packages/advantech
+
+      - name: Replace unsigned binaries with signed ones
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -fv signed/macos/* signed/windows/* bin/
+          chmod +x bin/* || true
+          ls -l bin
+
+      - name: Resolve image refs for release notes
+        shell: bash
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          GHCR_DIGEST: ${{ needs.sign-and-release.outputs.ghcr_digest }}
+          DH_DIGEST: ${{ needs.sign-and-release.outputs.dh_digest }}
+        run: |
+          set -euo pipefail
+          OWNER="${OWNER,,}"
+          REPO="${REPO,,}"
+          {
+            echo "GHCR_REF=ghcr.io/${OWNER}/${REPO}@${GHCR_DIGEST}"
+            if [ -n "${DH_DIGEST}" ]; then echo "DH_REF=docker.io/${OWNER}/${REPO}@${DH_DIGEST}"; fi
+          } >> "$GITHUB_ENV"
 
       - name: Create GitHub Release (draft)
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
