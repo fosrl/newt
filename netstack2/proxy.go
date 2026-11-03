@@ -182,6 +182,9 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 			},
 		}),
 	}
+	if err := configureTCP(handler.proxyStack); err != nil {
+		return nil, err
+	}
 
 	// Initialize TCP handler if enabled. The HTTP handler piggybacks on the
 	// TCP forwarder — TCPHandler.handleTCPConn checks the subnet rule for

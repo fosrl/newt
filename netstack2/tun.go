@@ -102,14 +102,12 @@ func CreateNetTUNWithOptions(localAddresses, dnsServers []netip.Addr, mtu int, o
 		}
 	}
 
-	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is enabled by default
-	tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
-	if tcpipErr != nil {
-		return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
+	if err := configureTCP(dev.stack); err != nil {
+		return nil, nil, err
 	}
 	// Create NIC 1 (main interface, no promiscuous mode)
 	dev.notifyHandle = dev.ep.AddNotify(dev)
-	tcpipErr = dev.stack.CreateNIC(1, dev.ep)
+	tcpipErr := dev.stack.CreateNIC(1, dev.ep)
 	if tcpipErr != nil {
 		return nil, nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
 	}
