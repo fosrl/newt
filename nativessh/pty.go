@@ -94,6 +94,20 @@ func (p *PTYSession) Write(b []byte) (int, error) {
 	return p.ptmx.Write(b)
 }
 
+// InputHidden reports whether the terminal is reading input in canonical
+// mode with echo off, which is how sudo, passwd, ssh and similar programs
+// prompt for passwords. Shell line editors and full-screen programs also turn
+// echo off but run in non-canonical mode, so they are not reported. If the
+// mode can't be read, input is treated as hidden so nothing sensitive is
+// recorded.
+func (p *PTYSession) InputHidden() bool {
+	echo, canonical, err := ptyLocalModes(p.ptmx)
+	if err != nil {
+		return true
+	}
+	return !echo && canonical
+}
+
 // Resize changes the PTY window size.
 func (p *PTYSession) Resize(cols, rows uint16) error {
 	return pty.Setsize(p.ptmx, &pty.Winsize{Cols: cols, Rows: rows})

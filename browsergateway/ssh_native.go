@@ -19,7 +19,9 @@ import (
 // The auth frame from the browser must be a JSON sshClientMsg with type="auth"
 // carrying the same password/privateKey fields used by the proxy SSH path.
 // The target username is passed in from the HTTP layer (query param).
-func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, username string, creds *nativessh.CredentialStore) error {
+func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, conn nativeSSHConn) error {
+	username := conn.username
+
 	// Read the auth frame.
 	_, authBytes, err := ws.Read(ctx)
 	if err != nil {
@@ -31,10 +33,20 @@ func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, username str
 	}
 
 	// Authenticate using host authorized_keys or PAM password.
-	if err := nativessh.AuthenticateWithCertificate(creds, username, authMsg.Password, authMsg.PrivateKey, authMsg.Certificate); err != nil {
+	auth, err := nativessh.AuthenticateWithCertificate(conn.creds, username, authMsg.Password, authMsg.PrivateKey, authMsg.Certificate)
+	if err != nil {
 		sendSSHError(ctx, ws, "Authentication failed")
 		return fmt.Errorf("auth for user %q: %w", username, err)
 	}
+
+	logSess := conn.sessionLog.StartSession(nativessh.SessionInfo{
+		SourceAddr: conn.sourceAddr,
+		DestAddr:   conn.destAddr,
+		Username:   username,
+		Transport:  nativessh.TransportBrowser,
+		Auth:       auth,
+	})
+	defer logSess.End()
 
 	logger.Debug("SSH native: spawning shell as user %q", username)
 
@@ -44,6 +56,8 @@ func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, username str
 		return fmt.Errorf("pty session as %q: %w", username, err)
 	}
 	defer sess.Close()
+
+	recIn, recOut := logSess.ShellRecorder(sess.InputHidden)
 
 	// Cancel context to unblock the WebSocket read loop when the shell exits.
 	sessCtx, cancelSess := context.WithCancel(ctx)
@@ -56,6 +70,7 @@ func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, username str
 		for {
 			n, readErr := sess.Read(buf)
 			if n > 0 {
+				_, _ = recOut.Write(buf[:n])
 				msg := sshServerMsg{Type: "data", Data: string(buf[:n])}
 				b, _ := json.Marshal(msg)
 				if writeErr := ws.Write(sessCtx, websocket.MessageText, b); writeErr != nil {
@@ -80,6 +95,7 @@ func serveNativeSSHSession(ctx context.Context, ws *websocket.Conn, username str
 		}
 		switch msg.Type {
 		case "data":
+			_, _ = recIn.Write([]byte(msg.Data))
 			if _, writeErr := sess.Write([]byte(msg.Data)); writeErr != nil {
 				return fmt.Errorf("write pty: %w", writeErr)
 			}

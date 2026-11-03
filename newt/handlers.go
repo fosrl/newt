@@ -99,6 +99,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		logger.Info("Received restart message")
 		n.closeWgTunnel()
 		n.closeClients()
+		n.closeSSHSessionLog()
 		if n.healthMonitor != nil {
 			n.healthMonitor.Stop()
 		}
@@ -795,7 +796,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 
 		if n.browserGateway == nil && (n.tnet != nil || n.config.UseNativeMainInterface) {
-			n.browserGateway = browsergateway.New(browsergateway.Config{SSHCredentials: n.sshCredStore})
+			n.browserGateway = browsergateway.New(browsergateway.Config{SSHCredentials: n.sshCredStore, SessionLog: n.sshSessionLog})
 			var ln net.Listener
 			var bgErr error
 			if n.config.UseNativeMainInterface {
@@ -957,6 +958,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 					logger.Info("Config credentials changed (endpoint/id/secret), restarting...")
 					n.closeWgTunnel()
 					n.closeClients()
+					n.closeSSHSessionLog()
 					if n.healthMonitor != nil {
 						n.healthMonitor.Stop()
 					}
