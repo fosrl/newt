@@ -17,7 +17,7 @@ endif
 
 BINARY   := newt_linux_$(NEWT_ARCH)
 BINDIR   := bin
-OUTFILE  := $(MODNAME).$(PLATFORM).tgz
+OUTFILE  := router_app_advantech_$(MODNAME).$(PLATFORM).tgz
 STAGEDIR := .build/$(MODNAME)
 
 .PHONY: all clean
@@ -50,5 +50,5 @@ $(OUTFILE): $(BINDIR)/$(BINARY) $(shell find merge -type f 2>/dev/null)
 	@echo "Created: $@"
 
 clean:
-	rm -rf .build $(MODNAME).*.tgz
+	rm -rf .build $(MODNAME).*.tgz router_app_advantech_$(MODNAME).*.tgz
 	@echo "Cleaned."
