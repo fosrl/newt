@@ -43,6 +43,39 @@ func TestNetstacksUseSACKWithoutRACK(t *testing.T) {
 	}
 }
 
+// With EnableTCPRACK, both stacks keep gVisor's default, RACK on, and SACK
+// stays on.
+func TestNetstacksKeepRACKWhenEnabled(t *testing.T) {
+	dev, _, err := CreateNetTUNWithOptions([]netip.Addr{netip.MustParseAddr("100.90.0.1")}, nil, 1280, NetTunOptions{
+		EnableTCPProxy:  true,
+		EnableUDPProxy:  true,
+		EnableICMPProxy: true,
+		EnableTCPRACK:   true,
+	})
+	if err != nil {
+		t.Fatalf("CreateNetTUNWithOptions: %v", err)
+	}
+	tn := dev.(*netTun)
+	defer tn.Close()
+
+	for name, s := range map[string]*stack.Stack{"main": tn.stack, "proxy": tn.proxyHandler.proxyStack} {
+		var sack tcpip.TCPSACKEnabled
+		if err := s.TransportProtocolOption(tcp.ProtocolNumber, &sack); err != nil {
+			t.Fatalf("%s stack: read SACK option: %v", name, err)
+		}
+		if !sack {
+			t.Errorf("%s stack: SACK is off, want on", name)
+		}
+		var recovery tcpip.TCPRecovery
+		if err := s.TransportProtocolOption(tcp.ProtocolNumber, &recovery); err != nil {
+			t.Fatalf("%s stack: read recovery option: %v", name, err)
+		}
+		if recovery != tcpip.TCPRACKLossDetection {
+			t.Errorf("%s stack: TCPRecovery is %#x, want %#x (RACK on)", name, recovery, tcpip.TCPRACKLossDetection)
+		}
+	}
+}
+
 // A burst of losses that takes out everything in flight must cost about one
 // retransmission timeout. With gVisor's RACK on, the sender here recovers
 // only a few segments per timeout: the transfer needs about 50 timeouts and

@@ -49,6 +49,7 @@ func (n *Newt) setupClients() {
 	}
 
 	n.wgService.SetCredentialStore(n.sshCredStore)
+	n.wgService.SetEnableTCPRACK(n.config.EnableTCPRACK)
 	n.wgService.SetSessionLogger(n.sshSessionLog)
 
 	n.client.OnTokenUpdate(func(token string) {

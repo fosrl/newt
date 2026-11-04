@@ -123,6 +123,9 @@ type WireGuardService struct {
 	// Callback for when netstack is closed
 	onNetstackClose func()
 	othertnet       *netstack2.Net
+	// enableTCPRACK turns gVisor's RACK loss detection back on in the
+	// client tunnel's netstack (--enable-tcp-rack).
+	enableTCPRACK bool
 	// Proxy manager for tunnel
 	TunnelIP string
 	// Shared bind and holepunch manager
@@ -253,6 +256,13 @@ func (s *WireGuardService) ReportRTT(seconds float64) {
 
 func (s *WireGuardService) SetOthertnet(tnet *netstack2.Net) {
 	s.othertnet = tnet
+}
+
+// SetEnableTCPRACK sets whether the client tunnel's netstack keeps gVisor's
+// RACK loss detection on. Like SetCredentialStore it must be called before
+// the netstack is configured.
+func (s *WireGuardService) SetEnableTCPRACK(enable bool) {
+	s.enableTCPRACK = enable
 }
 
 func (s *WireGuardService) Close() {
@@ -983,6 +993,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 			EnableTCPProxy:  true,
 			EnableUDPProxy:  true,
 			EnableICMPProxy: true,
+			EnableTCPRACK:   s.enableTCPRACK,
 		},
 	)
 	if err != nil {

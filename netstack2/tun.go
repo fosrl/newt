@@ -60,6 +60,9 @@ type NetTunOptions struct {
 	EnableTCPProxy  bool
 	EnableUDPProxy  bool
 	EnableICMPProxy bool
+	// EnableTCPRACK turns gVisor's RACK loss detection back on. It is off by
+	// default; see configureTCP.
+	EnableTCPRACK bool
 }
 
 // CreateNetTUN creates a new TUN device with netstack and TCP, UDP and ICMP
@@ -98,13 +101,14 @@ func CreateNetTUNWithOptions(localAddresses, dnsServers []netip.Addr, mtu int, o
 			EnableUDP:  options.EnableUDPProxy,
 			EnableICMP: options.EnableICMPProxy,
 			MTU:        mtu,
+			EnableRACK: options.EnableTCPRACK,
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create proxy handler: %v", err)
 		}
 	}
 
-	if err := configureTCP(dev.stack); err != nil {
+	if err := configureTCP(dev.stack, options.EnableTCPRACK); err != nil {
 		return nil, nil, err
 	}
 	// Create NIC 1 (main interface, no promiscuous mode)

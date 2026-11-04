@@ -108,7 +108,7 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 			[]netip.Addr{netip.MustParseAddr(n.wgData.TunnelIP)},
 			[]netip.Addr{netip.MustParseAddr(n.config.DNS)},
 			n.config.MTU,
-			netstack2.NetTunOptions{})
+			netstack2.NetTunOptions{EnableTCPRACK: n.config.EnableTCPRACK})
 		if err != nil {
 			logger.Error("Failed to create TUN device: %v", err)
 			regResult = "failure"
