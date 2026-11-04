@@ -72,6 +72,7 @@ type fileSettings struct {
 
 	DisableClients            *bool   `json:"disableClients"`
 	DisableSSH                *bool   `json:"disableSsh"`
+	EnableTCPRACK             *bool   `json:"enableTcpRack"`
 	EnforceHealthcheckCert    *bool   `json:"enforceHcCert"`
 	HealthFile                *string `json:"healthFile"`
 	BlueprintFile             *string `json:"blueprintFile"`
@@ -380,6 +381,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 
 		applyBool(&cfg.DisableClients, fileCfg.DisableClients, "disable-clients", sources, sourceFile)
 		applyBool(&cfg.DisableSSH, fileCfg.DisableSSH, "disable-ssh", sources, sourceFile)
+		applyBool(&cfg.EnableTCPRACK, fileCfg.EnableTCPRACK, "enable-tcp-rack", sources, sourceFile)
 		applyBool(&cfg.EnforceHealthcheckCert, fileCfg.EnforceHealthcheckCert, "enforce-hc-cert", sources, sourceFile)
 		applyStr(&cfg.HealthFile, fileCfg.HealthFile, "health-file", sources, sourceFile)
 		applyStr(&cfg.BlueprintFile, fileCfg.BlueprintFile, "blueprint-file", sources, sourceFile)
@@ -451,6 +453,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 
 	applyEnvBool(&cfg.DisableClients, "DISABLE_CLIENTS", "disable-clients", sources)
 	applyEnvBool(&cfg.DisableSSH, "DISABLE_SSH", "disable-ssh", sources)
+	applyEnvBool(&cfg.EnableTCPRACK, "ENABLE_TCP_RACK", "enable-tcp-rack", sources)
 	applyEnvBool(&cfg.EnforceHealthcheckCert, "ENFORCE_HC_CERT", "enforce-hc-cert", sources)
 	applyEnvStr(&cfg.HealthFile, "HEALTH_FILE", "health-file", sources)
 	applyEnvStr(&cfg.BlueprintFile, "BLUEPRINT_FILE", "blueprint-file", sources)
@@ -512,7 +515,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 	origUDPIdle, origProvisioningKey, origName := udpProxyIdleTimeoutStr, cfg.ProvisioningKey, cfg.NewtName
 	origTLSCert, origTLSKey, origDockerEnforce := cfg.TLSClientCert, cfg.TLSClientKey, dockerEnforceStr
 	origHealthFile, origBlueprintFile, origProvBlueprintFile := cfg.HealthFile, cfg.BlueprintFile, cfg.ProvisioningBlueprintFile
-	origNoCloud, origTLSPrivateKey := cfg.NoCloud, cfg.TLSPrivateKey
+	origNoCloud, origTLSPrivateKey, origEnableTCPRACK := cfg.NoCloud, cfg.TLSPrivateKey, cfg.EnableTCPRACK
 	localEndpointInterfacesStr := strings.Join(cfg.LocalEndpointInterfaces, ",")
 	origLocalEndpointInterfaces := localEndpointInterfacesStr
 	origMetrics, origOTLP, origAdminAddr := cfg.MetricsEnabled, cfg.OTLPEnabled, cfg.AdminAddr
@@ -537,6 +540,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 	fs.StringVar(&cfg.NativeMainInterfaceName, "interface-main", cfg.NativeMainInterfaceName, "Name of the native main tunnel WireGuard interface (used with --native-main)")
 	fs.BoolVar(&cfg.DisableClients, "disable-clients", cfg.DisableClients, "Disable clients on the WireGuard interface")
 	fs.BoolVar(&cfg.DisableSSH, "disable-ssh", cfg.DisableSSH, "Disable SSH auth daemon and native SSH mode (remote auth daemon still works)")
+	fs.BoolVar(&cfg.EnableTCPRACK, "enable-tcp-rack", cfg.EnableTCPRACK, "Turn gVisor's TCP RACK loss detection back on in the netstack tunnels (default: false)")
 	fs.BoolVar(&cfg.EnforceHealthcheckCert, "enforce-hc-cert", cfg.EnforceHealthcheckCert, "Enforce certificate validation for health checks (default: false, accepts any cert)")
 	fs.StringVar(&cfg.DockerSocket, "docker-socket", cfg.DockerSocket, "Path or address to Docker socket (typically unix:///var/run/docker.sock)")
 	fs.StringVar(&pingIntervalStr, "ping-interval", pingIntervalStr, "Interval for pinging the server (default 15s)")
@@ -604,6 +608,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 	markCLI("interface-main", cfg.NativeMainInterfaceName != origInterfaceMain)
 	markCLI("disable-clients", cfg.DisableClients != origDisableClients)
 	markCLI("disable-ssh", cfg.DisableSSH != origDisableSSH)
+	markCLI("enable-tcp-rack", cfg.EnableTCPRACK != origEnableTCPRACK)
 	markCLI("enforce-hc-cert", cfg.EnforceHealthcheckCert != origEnforceHC)
 	markCLI("docker-socket", cfg.DockerSocket != origDockerSocket)
 	markCLI("ping-interval", pingIntervalStr != origPingInterval)
@@ -760,6 +765,7 @@ func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, 
 	fmt.Println("\nFeatures:")
 	fmt.Printf("  disable-clients             = %v [%s]\n", cfg.DisableClients, getSource("disable-clients"))
 	fmt.Printf("  disable-ssh                 = %v [%s]\n", cfg.DisableSSH, getSource("disable-ssh"))
+	fmt.Printf("  enable-tcp-rack             = %v [%s]\n", cfg.EnableTCPRACK, getSource("enable-tcp-rack"))
 	fmt.Printf("  enforce-hc-cert             = %v [%s]\n", cfg.EnforceHealthcheckCert, getSource("enforce-hc-cert"))
 	fmt.Printf("  health-file                 = %s [%s]\n", mask("health-file", cfg.HealthFile), getSource("health-file"))
 	fmt.Printf("  blueprint-file              = %s [%s]\n", mask("blueprint-file", cfg.BlueprintFile), getSource("blueprint-file"))

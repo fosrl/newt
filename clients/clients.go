@@ -28,7 +28,6 @@ import (
 	"github.com/fosrl/newt/wgtester"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/fosrl/newt/internal/telemetry"
@@ -123,7 +122,10 @@ type WireGuardService struct {
 	onNetstackReady func(*netstack2.Net)
 	// Callback for when netstack is closed
 	onNetstackClose func()
-	othertnet       *netstack.Net
+	othertnet       *netstack2.Net
+	// enableTCPRACK turns gVisor's RACK loss detection back on in the
+	// client tunnel's netstack (--enable-tcp-rack).
+	enableTCPRACK bool
 	// Proxy manager for tunnel
 	TunnelIP string
 	// Shared bind and holepunch manager
@@ -252,8 +254,15 @@ func (s *WireGuardService) ReportRTT(seconds float64) {
 	telemetry.ObserveTunnelLatency(context.Background(), s.serverPubKey, "wireguard", seconds)
 }
 
-func (s *WireGuardService) SetOthertnet(tnet *netstack.Net) {
+func (s *WireGuardService) SetOthertnet(tnet *netstack2.Net) {
 	s.othertnet = tnet
+}
+
+// SetEnableTCPRACK sets whether the client tunnel's netstack keeps gVisor's
+// RACK loss detection on. Like SetCredentialStore it must be called before
+// the netstack is configured.
+func (s *WireGuardService) SetEnableTCPRACK(enable bool) {
+	s.enableTCPRACK = enable
 }
 
 func (s *WireGuardService) Close() {
@@ -984,6 +993,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 			EnableTCPProxy:  true,
 			EnableUDPProxy:  true,
 			EnableICMPProxy: true,
+			EnableTCPRACK:   s.enableTCPRACK,
 		},
 	)
 	if err != nil {

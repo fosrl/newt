@@ -151,6 +151,9 @@ type ProxyHandlerOptions struct {
 	EnableUDP  bool
 	EnableICMP bool
 	MTU        int
+	// EnableRACK turns gVisor's RACK loss detection back on in the proxy's
+	// stack; see configureTCP.
+	EnableRACK bool
 }
 
 // NewProxyHandler creates a new proxy handler for promiscuous mode
@@ -181,6 +184,9 @@ func NewProxyHandler(options ProxyHandlerOptions) (*ProxyHandler, error) {
 				icmp.NewProtocol6,
 			},
 		}),
+	}
+	if err := configureTCP(handler.proxyStack, options.EnableRACK); err != nil {
+		return nil, err
 	}
 
 	// Initialize TCP handler if enabled. The HTTP handler piggybacks on the

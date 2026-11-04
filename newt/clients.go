@@ -6,7 +6,7 @@ import (
 	wgnetstack "github.com/fosrl/newt/clients"
 	"github.com/fosrl/newt/clients/permissions"
 	"github.com/fosrl/newt/logger"
-	"golang.zx2c4.com/wireguard/tun/netstack"
+	"github.com/fosrl/newt/netstack2"
 )
 
 func checkNativeMainPermissions() error {
@@ -49,6 +49,7 @@ func (n *Newt) setupClients() {
 	}
 
 	n.wgService.SetCredentialStore(n.sshCredStore)
+	n.wgService.SetEnableTCPRACK(n.config.EnableTCPRACK)
 	n.wgService.SetSessionLogger(n.sshSessionLog)
 
 	n.client.OnTokenUpdate(func(token string) {
@@ -58,7 +59,7 @@ func (n *Newt) setupClients() {
 	n.ready = true
 }
 
-func (n *Newt) setDownstreamTNetstack(tnet *netstack.Net) {
+func (n *Newt) setDownstreamTNetstack(tnet *netstack2.Net) {
 	if n.wgService != nil {
 		n.wgService.SetOthertnet(tnet)
 	}

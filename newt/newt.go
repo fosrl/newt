@@ -16,12 +16,12 @@ import (
 	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/nativessh"
+	"github.com/fosrl/newt/netstack2"
 	"github.com/fosrl/newt/proxy"
 	"github.com/fosrl/newt/util"
 	"github.com/fosrl/newt/websocket"
 	"golang.zx2c4.com/wireguard/device"
 	wtun "golang.zx2c4.com/wireguard/tun"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -36,7 +36,7 @@ type Newt struct {
 
 	// WireGuard tunnel state
 	tun  wtun.Device
-	tnet *netstack.Net
+	tnet *netstack2.Net
 	dev  *device.Device
 
 	// Proxy / networking

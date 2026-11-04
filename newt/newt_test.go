@@ -345,7 +345,7 @@ func TestParseTargetStringNetDialCompatibility(t *testing.T) {
 }
 
 // TestPingNilNetstackReturnsError is the regression guard for fosrl/newt#439:
-// a still-running ping goroutine calling ping() with a nil *netstack.Net
+// a still-running ping goroutine calling ping() with a nil *netstack2.Net
 // (after closeWgTunnel clears it during teardown/reconnect) must return an
 // error instead of panicking with a nil pointer dereference.
 func TestPingNilNetstackReturnsError(t *testing.T) {
