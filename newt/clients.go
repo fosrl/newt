@@ -104,6 +104,15 @@ func (n *Newt) clientsOnConnect() {
 	}
 }
 
+func (n *Newt) clientsOnReconnect() {
+	if !n.ready {
+		return
+	}
+	if n.wgService != nil {
+		n.wgService.ResendPendingConfig()
+	}
+}
+
 func (n *Newt) clientsStartDirectRelay(tunnelIP string) {
 	if !n.ready {
 		return
