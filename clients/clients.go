@@ -553,6 +553,29 @@ func (s *WireGuardService) LoadRemoteConfig() error {
 	return nil
 }
 
+// ResendPendingConfig re-sends the outstanding newt/wg/get-config request, if
+// any, reusing its chain ID. SendMessageInterval gives up after a fixed number
+// of attempts, so a request started on a half-open websocket can be abandoned
+// while the response is still pending; calling this on reconnect lets the
+// config be fetched over the new connection. Unlike LoadRemoteConfig it does
+// not generate a new chain ID nor start another bandwidth check.
+func (s *WireGuardService) ResendPendingConfig() {
+	if s.pendingConfigChainId == "" || s.client == nil {
+		return
+	}
+	if s.stopGetConfig != nil {
+		s.stopGetConfig()
+		s.stopGetConfig = nil
+	}
+	s.stopGetConfig = s.client.SendMessageInterval("newt/wg/get-config", map[string]interface{}{
+		"publicKey":      s.key.PublicKey().String(),
+		"port":           s.Port,
+		"chainId":        s.pendingConfigChainId,
+		"localEndpoints": network.GetLocalEndpoints(s.Port, s.interfaceName, s.localEndpointInterfaces),
+	}, 2*time.Second)
+	logger.Debug("Re-requesting pending WireGuard configuration after reconnect")
+}
+
 func (s *WireGuardService) handleConfig(msg websocket.WSMessage) {
 	var config WgConfig
 
