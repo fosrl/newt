@@ -4,7 +4,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/fosrl/newt)](https://goreportcard.com/report/github.com/fosrl/newt)
 
 > [!NOTE]
-> Newt is being phased out in favor of the [Pangolin CLI](https://github.com/fosrl/cli). Use `pangolin site up`
+> Newt is being phased out in favor of the [Pangolin CLI](https://github.com/fosrl/cli). Use `pangolin up site`
 
 Newt is a fully user space [WireGuard](https://www.wireguard.com/) tunnel client and TCP/UDP proxy, designed to securely expose private resources controlled by Pangolin. By using Newt, you don't need to manage complex WireGuard tunnels and NATing.
 

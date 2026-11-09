@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/fosrl/newt/logger"
 	"golang.org/x/net/ipv4"
@@ -272,6 +273,12 @@ func (b *SharedBind) closeConnection() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	// Wake receive goroutines parked in rebindingCond.Wait (a CloseSocket
+	// whose Rebind never came): they re-check b.closed and return
+	// net.ErrClosed, so wireguard-go's Close does not hang on stopping.Wait.
+	b.rebinding = false
+	b.rebindingCond.Broadcast()
+
 	var err error
 	if b.udpConn != nil {
 		err = b.udpConn.Close()
@@ -501,6 +508,13 @@ func (b *SharedBind) Open(uport uint16) ([]wgConn.ReceiveFunc, uint16, error) {
 
 // makeReceiveSocket creates a receive function for physical UDP socket packets
 func (b *SharedBind) makeReceiveSocket() wgConn.ReceiveFunc {
+	// Retry state for transient read errors. wireguard-go calls a ReceiveFunc
+	// from a single goroutine, so this closure state needs no locking.
+	var (
+		backoff    time.Duration
+		errCount   int
+		lastErrLog time.Time
+	)
 	return func(bufs [][]byte, sizes []int, eps []wgConn.Endpoint) (n int, err error) {
 		for {
 			if b.closed.Load() {
@@ -545,9 +559,14 @@ func (b *SharedBind) makeReceiveSocket() wgConn.ReceiveFunc {
 			}
 
 			if err != nil {
+				if b.closed.Load() {
+					return 0, net.ErrClosed
+				}
+
 				// Check if this error is due to rebinding
 				b.mu.RLock()
 				rebinding := b.rebinding
+				current := b.udpConn
 				b.mu.RUnlock()
 
 				if rebinding {
@@ -567,10 +586,50 @@ func (b *SharedBind) makeReceiveSocket() wgConn.ReceiveFunc {
 					continue
 				}
 
-				// Not rebinding, return the error
-				return 0, err
+				// The socket was replaced while we were blocked on the old one:
+				// CloseSocket+Rebind (or a bare Rebind) can finish before this
+				// goroutine wakes up from the closed fd, so it sees
+				// rebinding=false and, before this patch, returned the
+				// net.ErrClosed of the OLD socket. wireguard-go treats that as
+				// "bind closed" and stops this receive routine for good, so
+				// nothing ever read the new socket again.
+				if current != conn {
+					logger.Debug("Receive error on a replaced socket, retrying on the new one: %v", err)
+					backoff = 0
+					continue
+				}
+
+				// Same socket and the bind is still open. Never hand the error
+				// to wireguard-go: RoutineReceiveIncoming returns permanently on
+				// net.ErrClosed, on any non-temporary net.Error (ECONNREFUSED,
+				// EHOSTUNREACH, ENETUNREACH, ENOBUFS, EADDRNOTAVAIL, ...) and
+				// after 10 consecutive temporary ones, and nothing restarts it
+				// (only BindUpdate does). The netstack receive routine keeps
+				// running, so the device looks alive while the physical socket
+				// is never read again. Log, back off, and retry instead.
+				if backoff == 0 {
+					backoff = 5 * time.Millisecond
+				} else if backoff < time.Second {
+					backoff *= 2
+					if backoff > time.Second {
+						backoff = time.Second
+					}
+				}
+				errCount++
+				if now := time.Now(); now.Sub(lastErrLog) >= 10*time.Second {
+					logger.Warn("SharedBind: UDP receive error (%d since last report), retrying in %v: %v", errCount, backoff, err)
+					lastErrLog = now
+					errCount = 0
+				}
+				select {
+				case <-b.closeChan:
+					return 0, net.ErrClosed
+				case <-time.After(backoff):
+				}
+				continue
 			}
 
+			backoff = 0
 			return n, nil
 		}
 	}
