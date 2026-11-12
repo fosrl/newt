@@ -1,0 +1,8 @@
+dist/
+*.pkg
+__pycache__/
+*.pyc
+/config.json
+/newt-config.json
+.env
+work/
