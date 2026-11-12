@@ -101,6 +101,7 @@ type PeerReading struct {
 type WireGuardService struct {
 	interfaceName           string
 	localEndpointInterfaces []string
+	extraLocalEndpoints     []string
 	mtu                     int
 	client                  *websocket.Client
 	config                  WgConfig
@@ -157,7 +158,7 @@ func generateChainId() string {
 	return hex.EncodeToString(b)
 }
 
-func NewWireGuardService(interfaceName string, port uint16, mtu int, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool, localEndpointInterfaces []string) (*WireGuardService, error) {
+func NewWireGuardService(interfaceName string, port uint16, mtu int, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool, localEndpointInterfaces []string, extraLocalEndpoints []string) (*WireGuardService, error) {
 	key, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %v", err)
@@ -200,6 +201,7 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 	service := &WireGuardService{
 		interfaceName:           interfaceName,
 		localEndpointInterfaces: localEndpointInterfaces,
+		extraLocalEndpoints:     extraLocalEndpoints,
 		mtu:                     mtu,
 		client:                  wsClient,
 		key:                     key,
@@ -541,10 +543,14 @@ func (s *WireGuardService) LoadRemoteConfig() error {
 	chainId := generateChainId()
 	s.pendingConfigChainId = chainId
 	s.stopGetConfig = s.client.SendMessageInterval("newt/wg/get-config", map[string]interface{}{
-		"publicKey":      s.key.PublicKey().String(),
-		"port":           s.Port,
-		"chainId":        chainId,
-		"localEndpoints": network.GetLocalEndpoints(s.Port, s.interfaceName, s.localEndpointInterfaces),
+		"publicKey": s.key.PublicKey().String(),
+		"port":      s.Port,
+		"chainId":   chainId,
+		"localEndpoints": network.MergeLocalEndpoints(
+			network.GetLocalEndpoints(s.Port, s.interfaceName, s.localEndpointInterfaces),
+			s.extraLocalEndpoints,
+			s.Port,
+		),
 	}, 2*time.Second)
 
 	logger.Debug("Requesting WireGuard configuration from remote server")

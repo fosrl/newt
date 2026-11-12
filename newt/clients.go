@@ -43,6 +43,7 @@ func (n *Newt) setupClients() {
 		n.config.DNS,
 		n.config.UseNativeInterface,
 		n.config.LocalEndpointInterfaces,
+		n.config.LocalEndpoints,
 	)
 	if err != nil {
 		logger.Fatal("Failed to create WireGuard service: %v", err)

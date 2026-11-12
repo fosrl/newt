@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/network"
 	newtpkg "github.com/fosrl/newt/newt"
 )
 
@@ -65,6 +66,7 @@ type fileSettings struct {
 	NoCloud                 *bool    `json:"noCloud"`
 	PreferEndpoint          *string  `json:"preferEndpoint"`
 	LocalEndpointInterfaces []string `json:"localEndpointInterfaces"`
+	LocalEndpoints          []string `json:"localEndpoints"`
 
 	PingInterval        *string `json:"pingInterval"`
 	PingTimeout         *string `json:"pingTimeout"`
@@ -230,6 +232,18 @@ func applyEnvBoolAlias(dst *bool, envName, aliasEnvName, key string, sources map
 	}
 }
 
+// splitCSV splits a comma-separated list, trimming whitespace and dropping
+// empty entries. Returns nil for an empty result.
+func splitCSV(s string) []string {
+	var out []string
+	for _, n := range strings.Split(s, ",") {
+		if t := strings.TrimSpace(n); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // validateTLSConfig validates that TLS config fields are consistent and that
 // referenced files exist.
 func validateTLSConfig(cfg newtpkg.Config) error {
@@ -373,6 +387,10 @@ func Load(opts Options) (newtpkg.Config, error) {
 			cfg.LocalEndpointInterfaces = fileCfg.LocalEndpointInterfaces
 			sources["local-endpoint-interfaces"] = string(sourceFile)
 		}
+		if len(fileCfg.LocalEndpoints) > 0 {
+			cfg.LocalEndpoints = fileCfg.LocalEndpoints
+			sources["local-endpoints"] = string(sourceFile)
+		}
 
 		applyStr(&pingIntervalStr, fileCfg.PingInterval, "ping-interval", sources, sourceFile)
 		applyStr(&pingTimeoutStr, fileCfg.PingTimeout, "ping-timeout", sources, sourceFile)
@@ -435,14 +453,12 @@ func Load(opts Options) (newtpkg.Config, error) {
 	applyEnvStr(&cfg.NativeMainInterfaceName, "INTERFACE_MAIN", "interface-main", sources)
 	applyEnvBool(&cfg.NoCloud, "NO_CLOUD", "no-cloud", sources)
 	if v := os.Getenv("LOCAL_ENDPOINT_INTERFACES"); v != "" {
-		var names []string
-		for _, n := range strings.Split(v, ",") {
-			if t := strings.TrimSpace(n); t != "" {
-				names = append(names, t)
-			}
-		}
-		cfg.LocalEndpointInterfaces = names
+		cfg.LocalEndpointInterfaces = splitCSV(v)
 		sources["local-endpoint-interfaces"] = string(sourceEnv)
+	}
+	if v := os.Getenv("LOCAL_ENDPOINTS"); v != "" {
+		cfg.LocalEndpoints = splitCSV(v)
+		sources["local-endpoints"] = string(sourceEnv)
 	}
 
 	applyEnvStr(&pingIntervalStr, "PING_INTERVAL", "ping-interval", sources)
@@ -515,6 +531,8 @@ func Load(opts Options) (newtpkg.Config, error) {
 	origNoCloud, origTLSPrivateKey := cfg.NoCloud, cfg.TLSPrivateKey
 	localEndpointInterfacesStr := strings.Join(cfg.LocalEndpointInterfaces, ",")
 	origLocalEndpointInterfaces := localEndpointInterfacesStr
+	localEndpointsStr := strings.Join(cfg.LocalEndpoints, ",")
+	origLocalEndpoints := localEndpointsStr
 	origMetrics, origOTLP, origAdminAddr := cfg.MetricsEnabled, cfg.OTLPEnabled, cfg.AdminAddr
 	origMetricsAsync, origPprof, origRegion := cfg.MetricsAsyncBytes, cfg.PprofEnabled, cfg.Region
 	origADKey, origADPrincipals, origADCACert := cfg.AuthDaemonKey, cfg.AuthDaemonPrincipalsFile, cfg.AuthDaemonCACertPath
@@ -544,6 +562,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 	fs.StringVar(&udpProxyIdleTimeoutStr, "udp-proxy-idle-timeout", udpProxyIdleTimeoutStr, "Idle timeout for UDP proxied client flows before cleanup")
 	fs.StringVar(&cfg.PreferEndpoint, "prefer-endpoint", cfg.PreferEndpoint, "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
 	fs.StringVar(&localEndpointInterfacesStr, "local-endpoint-interfaces", localEndpointInterfacesStr, "Comma-separated list of network interface names to restrict reported local endpoints to (default: report all interfaces)")
+	fs.StringVar(&localEndpointsStr, "local-endpoints", localEndpointsStr, "Comma-separated list of extra IP addresses (or IP:port) where this site can be reached, reported alongside the auto-detected local endpoints (a bare IP uses the WireGuard port)")
 	fs.StringVar(&cfg.ProvisioningKey, "provisioning-key", cfg.ProvisioningKey, "One-time provisioning key used to obtain a newt ID and secret from the server")
 	fs.StringVar(&cfg.NewtName, "name", cfg.NewtName, "Name for the site created during provisioning (supports {{env.VAR}} interpolation)")
 	fs.StringVar(&cfg.ConfigFile, "config-file", configPath, "Path to config file (overrides CONFIG_FILE env var and default location)")
@@ -620,6 +639,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 	markCLI("provisioning-blueprint-file", cfg.ProvisioningBlueprintFile != origProvBlueprintFile)
 	markCLI("no-cloud", cfg.NoCloud != origNoCloud)
 	markCLI("local-endpoint-interfaces", localEndpointInterfacesStr != origLocalEndpointInterfaces)
+	markCLI("local-endpoints", localEndpointsStr != origLocalEndpoints)
 	markCLI("metrics", cfg.MetricsEnabled != origMetrics)
 	markCLI("otlp", cfg.OTLPEnabled != origOTLP)
 	markCLI("metrics-admin-addr", cfg.AdminAddr != origAdminAddr)
@@ -641,7 +661,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 	}
 
 	if *showConfig {
-		printShowConfig(cfg, sources, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr, dockerEnforceStr, localEndpointInterfacesStr)
+		printShowConfig(cfg, sources, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr, dockerEnforceStr, localEndpointInterfacesStr, localEndpointsStr)
 		os.Exit(0)
 	}
 
@@ -656,16 +676,16 @@ func Load(opts Options) (newtpkg.Config, error) {
 	}
 
 	// Parse local endpoint interface allowlist (after flag parsing so CLI takes effect)
-	if localEndpointInterfacesStr != "" {
-		var names []string
-		for _, n := range strings.Split(localEndpointInterfacesStr, ",") {
-			if t := strings.TrimSpace(n); t != "" {
-				names = append(names, t)
-			}
+	cfg.LocalEndpointInterfaces = splitCSV(localEndpointInterfacesStr)
+
+	// Parse and validate extra local endpoints. The port isn't known yet
+	// (it may be chosen at random later), so bare IPs are kept as-is and
+	// resolved against the WireGuard port when they're reported.
+	cfg.LocalEndpoints = splitCSV(localEndpointsStr)
+	for _, ep := range cfg.LocalEndpoints {
+		if _, err := network.ParseLocalEndpoint(ep, 0); err != nil {
+			return newtpkg.Config{}, fmt.Errorf("invalid local-endpoints entry: %w", err)
 		}
-		cfg.LocalEndpointInterfaces = names
-	} else {
-		cfg.LocalEndpointInterfaces = nil
 	}
 
 	// Parse MTU
@@ -699,7 +719,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 }
 
 // printShowConfig prints the resolved configuration and the source of each value
-func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr, dockerEnforceStr, localEndpointInterfacesStr string) {
+func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr, dockerEnforceStr, localEndpointInterfacesStr, localEndpointsStr string) {
 	getSource := func(key string) string {
 		if s, ok := sources[key]; ok && s != "" {
 			return s
@@ -748,6 +768,7 @@ func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, 
 	fmt.Printf("  interface-main   = %s [%s]\n", cfg.NativeMainInterfaceName, getSource("interface-main"))
 	fmt.Printf("  no-cloud         = %v [%s]\n", cfg.NoCloud, getSource("no-cloud"))
 	fmt.Printf("  local-endpoint-interfaces = %s [%s]\n", mask("local-endpoint-interfaces", localEndpointInterfacesStr), getSource("local-endpoint-interfaces"))
+	fmt.Printf("  local-endpoints  = %s [%s]\n", mask("local-endpoints", localEndpointsStr), getSource("local-endpoints"))
 
 	fmt.Println("\nLogging:")
 	fmt.Printf("  log-level        = %s [%s]\n", cfg.LogLevel, getSource("log-level"))
