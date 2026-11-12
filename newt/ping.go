@@ -12,9 +12,9 @@ import (
 
 	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/netstack2"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 type pingFunc func(dst string, timeout time.Duration) (time.Duration, error)
@@ -46,7 +46,7 @@ func pingNative(dst string, timeout time.Duration) (time.Duration, error) {
 	return time.Since(start), nil
 }
 
-func ping(tnet *netstack.Net, dst string, timeout time.Duration) (time.Duration, error) {
+func ping(tnet *netstack2.Net, dst string, timeout time.Duration) (time.Duration, error) {
 	if tnet == nil {
 		return 0, fmt.Errorf("netstack not initialized")
 	}

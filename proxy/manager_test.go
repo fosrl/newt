@@ -10,7 +10,7 @@ import (
 
 	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
-	"golang.zx2c4.com/wireguard/tun/netstack"
+	"github.com/fosrl/newt/netstack2"
 )
 
 // TestRemoveTargetStopsAcceptLoop verifies that removing a TCP target on a
@@ -30,13 +30,14 @@ func TestRemoveTargetStopsAcceptLoop(t *testing.T) {
 	logger.SetOutput(logFile)
 	defer logger.SetOutput(os.Stdout)
 
-	_, tnet, err := netstack.CreateNetTUN(
+	_, tnet, err := netstack2.CreateNetTUNWithOptions(
 		[]netip.Addr{netip.MustParseAddr("100.64.0.1")},
 		[]netip.Addr{},
 		1420,
+		netstack2.NetTunOptions{},
 	)
 	if err != nil {
-		t.Fatalf("CreateNetTUN: %v", err)
+		t.Fatalf("CreateNetTUNWithOptions: %v", err)
 	}
 
 	pm := NewProxyManager(tnet)

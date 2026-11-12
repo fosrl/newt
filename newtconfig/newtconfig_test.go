@@ -12,6 +12,7 @@ func clearNewtEnv(t *testing.T) {
 		"PANGOLIN_ENDPOINT", "NEWT_ID", "NEWT_SECRET", "DNS", "LOG_LEVEL",
 		"MTU", "CONFIG_FILE", "NEWT_PROVISIONING_KEY", "NEWT_NAME",
 		"DISABLE_SSH", "DISABLE_CLIENTS", "SITE_ID", "SITE_SECRET",
+		"ENABLE_TCP_RACK",
 	} {
 		t.Setenv(k, "")
 	}
@@ -133,6 +134,40 @@ func TestLoadNewtConfig_CLIOverridesEnv(t *testing.T) {
 
 	if cfg.DNS != "4.2.2.2" {
 		t.Errorf("expected cli to override env dns, got %q", cfg.DNS)
+	}
+}
+
+func TestLoadNewtConfig_EnableTCPRACK(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.json")
+	withFile := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(withFile, []byte(`{"enableTcpRack":true}`), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		env  string
+		args []string
+		want bool
+	}{
+		{"default", "", []string{"--config-file", missing}, false},
+		{"file", "", []string{"--config-file", withFile}, true},
+		{"env", "true", []string{"--config-file", missing}, true},
+		{"env overrides file", "false", []string{"--config-file", withFile}, false},
+		{"cli", "", []string{"--config-file", missing, "--enable-tcp-rack"}, true},
+		{"cli overrides env", "true", []string{"--config-file", missing, "--enable-tcp-rack=false"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearNewtEnv(t)
+			t.Setenv("ENABLE_TCP_RACK", tc.env)
+
+			cfg, err := Load(Options{Args: tc.args})
+			if err != nil {
+				t.Fatalf("Load returned error: %v", err)
+			}
+			if cfg.EnableTCPRACK != tc.want {
+				t.Errorf("EnableTCPRACK = %v, want %v", cfg.EnableTCPRACK, tc.want)
+			}
+		})
 	}
 }
 

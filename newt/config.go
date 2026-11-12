@@ -45,6 +45,7 @@ type Config struct {
 	// Features
 	DisableClients            bool
 	DisableSSH                bool
+	EnableTCPRACK             bool
 	EnforceHealthcheckCert    bool
 	HealthFile                string
 	BlueprintFile             string
