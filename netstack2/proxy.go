@@ -718,14 +718,22 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 			// Check if target is loopback - if so, don't rewrite packet destination
 			// as gVisor will drop martian packets. Instead, the handlers will use
 			// destRewriteTable to find the actual target address.
-			if !newDst.IsLoopback() {
-				// Rewrite the packet only for non-loopback destinations
+			//
+			// ICMP is left unrewritten as well: echo requests are terminated by
+			// the ICMP handler, which builds the echo reply itself and never
+			// passes through the reverse NAT in ReadOutgoingPacket. It has to
+			// see the original destination so the reply is sent from the
+			// address the client actually pinged, not from the DNAT target.
+			if newDst.IsLoopback() {
+				logger.Debug("Target is loopback, not rewriting packet - handlers will use rewrite table")
+			} else if protocol == header.ICMPv4ProtocolNumber {
+				logger.Debug("ICMP packet, not rewriting packet - ICMP handler will use rewrite table")
+			} else {
+				// Rewrite the packet only for non-loopback TCP/UDP destinations
 				packet = p.rewritePacketDestination(packet, newDst)
 				if packet == nil {
 					return false
 				}
-			} else {
-				logger.Debug("Target is loopback, not rewriting packet - handlers will use rewrite table")
 			}
 		}
 
