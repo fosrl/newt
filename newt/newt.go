@@ -54,6 +54,7 @@ type Newt struct {
 	stopFunc               func()
 	pendingRegisterChainId string
 	pendingPingChainId     string
+	resolveFailures        int
 
 	// Browser gateway
 	browserGateway     *browsergateway.Gateway
