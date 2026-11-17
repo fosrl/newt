@@ -394,20 +394,18 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 	n.client.RegisterHandler("newt/socket/fetch", func(msg websocket.WSMessage) {
 		logger.Debug("Received Docker container fetch request")
 
-		if n.config.DockerSocket == "" {
-			logger.Debug("Docker socket path is not set")
+		if !n.containerSourcesEnabled() {
+			logger.Debug("Neither the Docker socket nor Kubernetes is configured")
 			return
 		}
 
-		containers, err := docker.ListContainers(n.config.DockerSocket, n.config.DockerEnforceNetworkValidation)
+		containers, err := n.collectContainers()
 		if err != nil {
-			logger.Error("Failed to list Docker containers: %v", err)
+			logger.Error("Failed to list containers: %v", err)
 			return
 		}
 
-		if err := n.client.SendMessage("newt/socket/containers", map[string]interface{}{
-			"containers": containers,
-		}); err != nil {
+		if err := n.sendContainers(containers); err != nil {
 			logger.Error("Failed to send Docker container list: %v", err)
 		} else {
 			logger.Debug("Docker container list sent, count: %d", len(containers))

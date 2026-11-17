@@ -83,6 +83,10 @@ type fileSettings struct {
 	DockerSocket                   *string `json:"dockerSocket"`
 	DockerEnforceNetworkValidation *bool   `json:"dockerEnforceNetworkValidation"`
 
+	Kubernetes          *bool   `json:"kubernetes"`
+	KubernetesNamespace *string `json:"kubernetesNamespace"`
+	Kubeconfig          *string `json:"kubeconfig"`
+
 	AuthDaemonKey                    *string `json:"adPreSharedKey"`
 	AuthDaemonPrincipalsFile         *string `json:"adPrincipalsFile"`
 	AuthDaemonCACertPath             *string `json:"adCaCertPath"`
@@ -411,6 +415,10 @@ func Load(opts Options) (newtpkg.Config, error) {
 			sources["docker-enforce-network-validation"] = string(sourceFile)
 		}
 
+		applyBool(&cfg.Kubernetes, fileCfg.Kubernetes, "kubernetes", sources, sourceFile)
+		applyStr(&cfg.KubernetesNamespace, fileCfg.KubernetesNamespace, "kubernetes-namespace", sources, sourceFile)
+		applyStr(&cfg.Kubeconfig, fileCfg.Kubeconfig, "kubeconfig", sources, sourceFile)
+
 		applyStr(&cfg.AuthDaemonKey, fileCfg.AuthDaemonKey, "ad-pre-shared-key", sources, sourceFile)
 		applyStr(&cfg.AuthDaemonPrincipalsFile, fileCfg.AuthDaemonPrincipalsFile, "ad-principals-file", sources, sourceFile)
 		applyStr(&cfg.AuthDaemonCACertPath, fileCfg.AuthDaemonCACertPath, "ad-ca-cert-path", sources, sourceFile)
@@ -478,6 +486,10 @@ func Load(opts Options) (newtpkg.Config, error) {
 	applyEnvStr(&cfg.DockerSocket, "DOCKER_SOCKET", "docker-socket", sources)
 	applyEnvStr(&dockerEnforceStr, "DOCKER_ENFORCE_NETWORK_VALIDATION", "docker-enforce-network-validation", sources)
 
+	applyEnvBool(&cfg.Kubernetes, "KUBERNETES_ENABLED", "kubernetes", sources)
+	applyEnvStr(&cfg.KubernetesNamespace, "KUBERNETES_NAMESPACE", "kubernetes-namespace", sources)
+	applyEnvStr(&cfg.Kubeconfig, "KUBERNETES_KUBECONFIG", "kubeconfig", sources)
+
 	applyEnvStr(&cfg.AuthDaemonKey, "AD_KEY", "ad-pre-shared-key", sources)
 	applyEnvStr(&cfg.AuthDaemonPrincipalsFile, "AD_PRINCIPALS_FILE", "ad-principals-file", sources)
 	applyEnvStr(&cfg.AuthDaemonCACertPath, "AD_CA_CERT_PATH", "ad-ca-cert-path", sources)
@@ -527,6 +539,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 	origUpdown, origInterface, origPort := cfg.UpdownScript, cfg.InterfaceName, portStr
 	origNative, origNativeMain, origInterfaceMain := cfg.UseNativeInterface, cfg.UseNativeMainInterface, cfg.NativeMainInterfaceName
 	origDisableClients, origDisableSSH, origEnforceHC := cfg.DisableClients, cfg.DisableSSH, cfg.EnforceHealthcheckCert
+	origKubernetes, origKubernetesNamespace, origKubeconfig := cfg.Kubernetes, cfg.KubernetesNamespace, cfg.Kubeconfig
 	origDockerSocket, origPingInterval, origPingTimeout := cfg.DockerSocket, pingIntervalStr, pingTimeoutStr
 	origUDPIdle, origProvisioningKey, origName := udpProxyIdleTimeoutStr, cfg.ProvisioningKey, cfg.NewtName
 	origTLSCert, origTLSKey, origDockerEnforce := cfg.TLSClientCert, cfg.TLSClientKey, dockerEnforceStr
@@ -561,6 +574,9 @@ func Load(opts Options) (newtpkg.Config, error) {
 	fs.BoolVar(&cfg.EnableTCPRACK, "enable-tcp-rack", cfg.EnableTCPRACK, "Turn gVisor's TCP RACK loss detection back on in the netstack tunnels (default: false)")
 	fs.BoolVar(&cfg.EnforceHealthcheckCert, "enforce-hc-cert", cfg.EnforceHealthcheckCert, "Enforce certificate validation for health checks (default: false, accepts any cert)")
 	fs.StringVar(&cfg.DockerSocket, "docker-socket", cfg.DockerSocket, "Path or address to Docker socket (typically unix:///var/run/docker.sock)")
+	fs.BoolVar(&cfg.Kubernetes, "kubernetes", cfg.Kubernetes, "Watch Kubernetes Services annotated with pangolin.* and create resources from them")
+	fs.StringVar(&cfg.KubernetesNamespace, "kubernetes-namespace", cfg.KubernetesNamespace, "Only watch Services in this namespace (default: all namespaces)")
+	fs.StringVar(&cfg.Kubeconfig, "kubeconfig", cfg.Kubeconfig, "Path to a kubeconfig file (default: in-cluster config, then KUBECONFIG / ~/.kube/config)")
 	fs.StringVar(&pingIntervalStr, "ping-interval", pingIntervalStr, "Interval for pinging the server (default 15s)")
 	fs.StringVar(&pingTimeoutStr, "ping-timeout", pingTimeoutStr, "Timeout for each ping (default 7s)")
 	fs.StringVar(&udpProxyIdleTimeoutStr, "udp-proxy-idle-timeout", udpProxyIdleTimeoutStr, "Idle timeout for UDP proxied client flows before cleanup")
@@ -630,6 +646,9 @@ func Load(opts Options) (newtpkg.Config, error) {
 	markCLI("enable-tcp-rack", cfg.EnableTCPRACK != origEnableTCPRACK)
 	markCLI("enforce-hc-cert", cfg.EnforceHealthcheckCert != origEnforceHC)
 	markCLI("docker-socket", cfg.DockerSocket != origDockerSocket)
+	markCLI("kubernetes", cfg.Kubernetes != origKubernetes)
+	markCLI("kubernetes-namespace", cfg.KubernetesNamespace != origKubernetesNamespace)
+	markCLI("kubeconfig", cfg.Kubeconfig != origKubeconfig)
 	markCLI("ping-interval", pingIntervalStr != origPingInterval)
 	markCLI("ping-timeout", pingTimeoutStr != origPingTimeout)
 	markCLI("udp-proxy-idle-timeout", udpProxyIdleTimeoutStr != origUDPIdle)
@@ -796,6 +815,11 @@ func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, 
 	fmt.Println("\nDocker:")
 	fmt.Printf("  docker-socket                     = %s [%s]\n", mask("docker-socket", cfg.DockerSocket), getSource("docker-socket"))
 	fmt.Printf("  docker-enforce-network-validation = %s [%s]\n", dockerEnforceStr, getSource("docker-enforce-network-validation"))
+
+	fmt.Println("\nKubernetes:")
+	fmt.Printf("  kubernetes           = %v [%s]\n", cfg.Kubernetes, getSource("kubernetes"))
+	fmt.Printf("  kubernetes-namespace = %s [%s]\n", cfg.KubernetesNamespace, getSource("kubernetes-namespace"))
+	fmt.Printf("  kubeconfig           = %s [%s]\n", mask("kubeconfig", cfg.Kubeconfig), getSource("kubeconfig"))
 
 	fmt.Println("\nAuth Daemon:")
 	fmt.Printf("  ad-pre-shared-key           = %s [%s]\n", mask("ad-pre-shared-key", cfg.AuthDaemonKey), getSource("ad-pre-shared-key"))

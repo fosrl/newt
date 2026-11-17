@@ -1,0 +1,84 @@
+# Create Pangolin resources from Kubernetes Service annotations.
+#
+# Run newt with --kubernetes (or KUBERNETES_ENABLED=true). Optionally restrict
+# it to one namespace with --kubernetes-namespace (KUBERNETES_NAMESPACE).
+#
+# Newt only needs read access to Services.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: newt
+  namespace: newt
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: newt-service-reader
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: newt-service-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: newt-service-reader
+subjects:
+  - kind: ServiceAccount
+    name: newt
+    namespace: newt
+---
+# Option 1: individual annotations. These are the same keys as the Docker
+# labels, except that array indexes are written as dotted numbers because
+# Kubernetes does not allow [ or ] in annotation keys (targets.0.port, not
+# targets[0].port). The pangolin.net/ prefix form is also accepted, e.g.
+# pangolin.net/public-resources.web.targets.0.port, for resources whose keys
+# are long enough to exceed the 63 character annotation name limit.
+#
+# The target hostname defaults to <service>.<namespace>.svc and the port to the
+# first Service port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: apps
+  annotations:
+    pangolin.public-resources.web.name: Web
+    pangolin.public-resources.web.protocol: http
+    pangolin.public-resources.web.full-domain: web.example.com
+    pangolin.public-resources.web.targets.0.method: http
+spec:
+  selector:
+    app: web
+  ports:
+    - port: 8080
+---
+# Option 2: a YAML blueprint snippet, using the same structure as a blueprint
+# file. Individual annotations override values from the snippet.
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: apps
+  annotations:
+    pangolin.net/blueprint: |
+      public-resources:
+        api:
+          name: API
+          protocol: http
+          full-domain: api.example.com
+          auth:
+            sso-enabled: true
+            sso-roles:
+              - Member
+          targets:
+            - method: http
+spec:
+  selector:
+    app: api
+  ports:
+    - port: 8000

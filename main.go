@@ -100,6 +100,9 @@ func runNewtMain(ctx context.Context) {
 	if cfg.DockerSocket != "" {
 		logger.Debug("Docker Socket: %v", cfg.DockerSocket)
 	}
+	if cfg.Kubernetes {
+		logger.Debug("Kubernetes Service watching enabled (namespace: %q)", cfg.KubernetesNamespace)
+	}
 	if cfg.MTU != 0 {
 		logger.Debug("MTU: %v", cfg.MTU)
 	}

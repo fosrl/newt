@@ -56,6 +56,11 @@ type Config struct {
 	DockerSocket                   string
 	DockerEnforceNetworkValidation bool
 
+	// Kubernetes
+	Kubernetes          bool
+	KubernetesNamespace string
+	Kubeconfig          string
+
 	// Auth daemon
 	AuthDaemonKey                    string
 	AuthDaemonPrincipalsFile         string

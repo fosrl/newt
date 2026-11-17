@@ -14,6 +14,7 @@ import (
 	"github.com/fosrl/newt/docker"
 	"github.com/fosrl/newt/healthcheck"
 	"github.com/fosrl/newt/internal/telemetry"
+	"github.com/fosrl/newt/k8s"
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/nativessh"
 	"github.com/fosrl/newt/netstack2"
@@ -75,6 +76,9 @@ type Newt struct {
 
 	// Docker monitoring
 	dockerEventMonitor *docker.EventMonitor
+
+	// Kubernetes Service monitoring
+	k8sMonitor *k8s.Monitor
 
 	// Current tunnel data
 	wgData WgData
@@ -234,16 +238,7 @@ func (n *Newt) Start(ctx context.Context) {
 		n.dockerEventMonitor, err = docker.NewEventMonitor(
 			n.config.DockerSocket,
 			n.config.DockerEnforceNetworkValidation,
-			func(containers []docker.Container) {
-				logger.Debug("Docker event detected, sending updated container list (%d containers)", len(containers))
-				if err := n.client.SendMessage("newt/socket/containers", map[string]interface{}{
-					"containers": containers,
-				}); err != nil {
-					logger.Error("Failed to send updated container list after Docker event: %v", err)
-				} else {
-					logger.Debug("Updated container list sent successfully")
-				}
-			})
+			n.onDockerContainers)
 		if err != nil {
 			logger.Error("Failed to create Docker event monitor: %v", err)
 		} else {
@@ -252,6 +247,19 @@ func (n *Newt) Start(ctx context.Context) {
 			} else {
 				logger.Debug("Docker event monitoring started successfully")
 			}
+		}
+	}
+
+	if n.config.Kubernetes {
+		monitor, err := k8s.NewMonitor(n.config.Kubeconfig, n.config.KubernetesNamespace, n.onKubernetesServices)
+		if err != nil {
+			logger.Error("Failed to create Kubernetes Service monitor: %v", err)
+		} else if err := monitor.Start(); err != nil {
+			logger.Error("Failed to start Kubernetes Service monitoring: %v", err)
+			monitor.Stop()
+		} else {
+			n.k8sMonitor = monitor
+			logger.Debug("Kubernetes Service monitoring started successfully")
 		}
 	}
 
@@ -268,6 +276,10 @@ func (n *Newt) Start(ctx context.Context) {
 
 	if n.dockerEventMonitor != nil {
 		n.dockerEventMonitor.Stop()
+	}
+
+	if n.k8sMonitor != nil {
+		n.k8sMonitor.Stop()
 	}
 
 	if n.healthMonitor != nil {

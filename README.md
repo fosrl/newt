@@ -28,6 +28,22 @@ When Newt receives WireGuard control messages, it will use the information encod
 
 When Newt receives WireGuard control messages, it will use the information encoded to create a local low level TCP and UDP proxies attached to the virtual tunnel in order to relay traffic to programmed targets.
 
+## Kubernetes Service Annotations
+
+Run Newt with `--kubernetes` (`KUBERNETES_ENABLED=true`) to create Pangolin resources from annotations on Kubernetes Services, the same way Docker labels work. Use `--kubernetes-namespace` (`KUBERNETES_NAMESPACE`) to watch a single namespace instead of all of them, and `--kubeconfig` to run outside the cluster. Newt needs `get`, `list` and `watch` on `services`; see [examples/kubernetes-services.yaml](examples/kubernetes-services.yaml) for RBAC and annotated Services.
+
+Annotations use the Docker label keys, with array indexes written as dotted numbers because Kubernetes does not allow `[` or `]` in annotation keys. A YAML blueprint snippet in `pangolin.net/blueprint` is also supported.
+
+```yaml
+metadata:
+  annotations:
+    pangolin.public-resources.web.full-domain: web.example.com
+    pangolin.public-resources.web.protocol: http
+    pangolin.public-resources.web.targets.0.method: http
+```
+
+Targets default to `<service>.<namespace>.svc` and the first Service port. Docker and Kubernetes can be enabled together.
+
 ## Build
 
 ### Binary
