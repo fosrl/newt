@@ -893,6 +893,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 				sendBlueprint(n.client, n.config.ProvisioningBlueprintFile)
 			}
 		} else {
+			n.clientsOnReconnect()
 			targets := n.healthMonitor.GetTargets()
 			if len(targets) > 0 {
 				healthStatuses := make(map[int]interface{})
