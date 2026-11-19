@@ -28,7 +28,6 @@ import (
 	"github.com/fosrl/newt/wgtester"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/fosrl/newt/internal/telemetry"
@@ -101,6 +100,7 @@ type PeerReading struct {
 type WireGuardService struct {
 	interfaceName           string
 	localEndpointInterfaces []string
+	extraLocalEndpoints     []string
 	mtu                     int
 	client                  *websocket.Client
 	config                  WgConfig
@@ -123,7 +123,10 @@ type WireGuardService struct {
 	onNetstackReady func(*netstack2.Net)
 	// Callback for when netstack is closed
 	onNetstackClose func()
-	othertnet       *netstack.Net
+	othertnet       *netstack2.Net
+	// enableTCPRACK turns gVisor's RACK loss detection back on in the
+	// client tunnel's netstack (--enable-tcp-rack).
+	enableTCPRACK bool
 	// Proxy manager for tunnel
 	TunnelIP string
 	// Shared bind and holepunch manager
@@ -157,7 +160,7 @@ func generateChainId() string {
 	return hex.EncodeToString(b)
 }
 
-func NewWireGuardService(interfaceName string, port uint16, mtu int, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool, localEndpointInterfaces []string) (*WireGuardService, error) {
+func NewWireGuardService(interfaceName string, port uint16, mtu int, host string, newtId string, wsClient *websocket.Client, dns string, useNativeInterface bool, localEndpointInterfaces []string, extraLocalEndpoints []string) (*WireGuardService, error) {
 	key, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %v", err)
@@ -200,6 +203,7 @@ func NewWireGuardService(interfaceName string, port uint16, mtu int, host string
 	service := &WireGuardService{
 		interfaceName:           interfaceName,
 		localEndpointInterfaces: localEndpointInterfaces,
+		extraLocalEndpoints:     extraLocalEndpoints,
 		mtu:                     mtu,
 		client:                  wsClient,
 		key:                     key,
@@ -252,8 +256,15 @@ func (s *WireGuardService) ReportRTT(seconds float64) {
 	telemetry.ObserveTunnelLatency(context.Background(), s.serverPubKey, "wireguard", seconds)
 }
 
-func (s *WireGuardService) SetOthertnet(tnet *netstack.Net) {
+func (s *WireGuardService) SetOthertnet(tnet *netstack2.Net) {
 	s.othertnet = tnet
+}
+
+// SetEnableTCPRACK sets whether the client tunnel's netstack keeps gVisor's
+// RACK loss detection on. Like SetCredentialStore it must be called before
+// the netstack is configured.
+func (s *WireGuardService) SetEnableTCPRACK(enable bool) {
+	s.enableTCPRACK = enable
 }
 
 func (s *WireGuardService) Close() {
@@ -541,10 +552,14 @@ func (s *WireGuardService) LoadRemoteConfig() error {
 	chainId := generateChainId()
 	s.pendingConfigChainId = chainId
 	s.stopGetConfig = s.client.SendMessageInterval("newt/wg/get-config", map[string]interface{}{
-		"publicKey":      s.key.PublicKey().String(),
-		"port":           s.Port,
-		"chainId":        chainId,
-		"localEndpoints": network.GetLocalEndpoints(s.Port, s.interfaceName, s.localEndpointInterfaces),
+		"publicKey": s.key.PublicKey().String(),
+		"port":      s.Port,
+		"chainId":   chainId,
+		"localEndpoints": network.MergeLocalEndpoints(
+			network.GetLocalEndpoints(s.Port, s.interfaceName, s.localEndpointInterfaces),
+			s.extraLocalEndpoints,
+			s.Port,
+		),
 	}, 2*time.Second)
 
 	logger.Debug("Requesting WireGuard configuration from remote server")
@@ -984,6 +999,7 @@ func (s *WireGuardService) ensureWireguardInterface(wgconfig WgConfig) error {
 			EnableTCPProxy:  true,
 			EnableUDPProxy:  true,
 			EnableICMPProxy: true,
+			EnableTCPRACK:   s.enableTCPRACK,
 		},
 	)
 	if err != nil {

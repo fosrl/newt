@@ -3,6 +3,7 @@ package netstack2
 import (
 	"bytes"
 	"io"
+	"net"
 	"net/netip"
 	"os"
 	"strings"
@@ -149,4 +150,138 @@ func TestICMPHandleIncomingPacket_DNATWithoutMirroredDirectRule(t *testing.T) {
 	if !strings.Contains(logs, realAddr.String()) {
 		t.Errorf("expected logs to reference the rewritten destination %s; logs:\n%s", realAddr, logs)
 	}
+}
+
+// With a non-loopback DNAT target the ICMP handler used to see the packet
+// only after its destination had been rewritten, so it had no way to know
+// which address the client actually pinged and answered from the DNAT
+// target. HandleIncomingPacket now leaves ICMP packets unrewritten, so the
+// handler must see the original (alias) destination and resolve the real
+// target via destRewriteTable.
+func TestICMPHandleIncomingPacket_DNATHandlerSeesOriginalDestination(t *testing.T) {
+	ph, err := NewProxyHandler(ProxyHandlerOptions{EnableICMP: true, MTU: 1500})
+	if err != nil {
+		t.Fatalf("NewProxyHandler: %v", err)
+	}
+	if err := ph.Initialize(noopNotification{}); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	defer ph.Close()
+
+	srcAddr := netip.MustParseAddr("10.0.0.5")
+	aliasAddr := netip.MustParseAddr("10.20.20.9")
+	realAddr := netip.MustParseAddr("203.0.113.50")
+
+	ph.AddSubnetRule(SubnetRule{
+		SourcePrefix: netip.MustParsePrefix("10.0.0.0/24"),
+		DestPrefix:   netip.PrefixFrom(aliasAddr, 32),
+		RewriteTo:    realAddr.String() + "/32",
+	})
+
+	pkt := buildICMPEchoRequest(t, srcAddr, aliasAddr)
+
+	var injected bool
+	logs := captureLogOutput(t, func() {
+		injected = ph.HandleIncomingPacket(pkt)
+	})
+
+	if !injected {
+		t.Fatal("expected ICMP echo request to be matched and injected")
+	}
+
+	wantRequest := "Echo Request from " + srcAddr.String() + " to " + aliasAddr.String() + " "
+	if !strings.Contains(logs, wantRequest) {
+		t.Errorf("expected ICMP handler to see the original destination %s; logs:\n%s", aliasAddr, logs)
+	}
+	wantRewrite := "Using rewritten destination " + realAddr.String() + " (original: " + aliasAddr.String() + ")"
+	if !strings.Contains(logs, wantRewrite) {
+		t.Errorf("expected ICMP handler to resolve %s via the rewrite table; logs:\n%s", realAddr, logs)
+	}
+}
+
+// localNonLoopbackIPv4 returns an IPv4 address of this machine that is not a
+// loopback address, i.e. a DNAT target that answers pings but still takes the
+// non-loopback path in HandleIncomingPacket.
+func localNonLoopbackIPv4(t *testing.T) (netip.Addr, bool) {
+	t.Helper()
+
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	for _, a := range addrs {
+		ipNet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip4 := ipNet.IP.To4()
+		if ip4 == nil || !ipNet.IP.IsGlobalUnicast() {
+			continue
+		}
+		return netip.AddrFrom4([4]byte(ip4)), true
+	}
+	return netip.Addr{}, false
+}
+
+// The echo reply for a DNAT'd echo request has to come from the address the
+// client pinged, not from the DNAT target: a client matches replies against
+// the address it sent the request to (ping prints "DIFFERENT ADDRESS",
+// check_icmp drops the reply and reports 100% packet loss).
+func TestICMPEchoReply_DNATSourceIsOriginalDestination(t *testing.T) {
+	realAddr, ok := localNonLoopbackIPv4(t)
+	if !ok {
+		t.Skip("no non-loopback IPv4 address available to ping")
+	}
+
+	ph, err := NewProxyHandler(ProxyHandlerOptions{EnableICMP: true, MTU: 1500})
+	if err != nil {
+		t.Fatalf("NewProxyHandler: %v", err)
+	}
+	if err := ph.Initialize(noopNotification{}); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	defer ph.Close()
+
+	srcAddr := netip.MustParseAddr("10.0.0.5")
+	aliasAddr := netip.MustParseAddr("10.20.20.9")
+
+	ph.AddSubnetRule(SubnetRule{
+		SourcePrefix: netip.MustParsePrefix("10.0.0.0/24"),
+		DestPrefix:   netip.PrefixFrom(aliasAddr, 32),
+		RewriteTo:    realAddr.String() + "/32",
+	})
+
+	if !ph.HandleIncomingPacket(buildICMPEchoRequest(t, srcAddr, aliasAddr)) {
+		t.Fatal("expected ICMP echo request to be matched and injected")
+	}
+
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		view := ph.ReadOutgoingPacket()
+		if view == nil {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		reply := view.AsSlice()
+		if len(reply) < header.IPv4MinimumSize+header.ICMPv4MinimumSize {
+			continue
+		}
+		ip := header.IPv4(reply)
+		if ip.TransportProtocol() != header.ICMPv4ProtocolNumber {
+			continue
+		}
+		if header.ICMPv4(reply[ip.HeaderLength():]).Type() != header.ICMPv4EchoReply {
+			continue
+		}
+
+		if got := netip.AddrFrom4(ip.SourceAddress().As4()); got != aliasAddr {
+			t.Errorf("echo reply source = %s, want the original destination %s (DNAT target is %s)", got, aliasAddr, realAddr)
+		}
+		if got := netip.AddrFrom4(ip.DestinationAddress().As4()); got != srcAddr {
+			t.Errorf("echo reply destination = %s, want %s", got, srcAddr)
+		}
+		return
+	}
+
+	t.Skipf("no echo reply from %s; pinging is not possible in this environment", realAddr)
 }

@@ -1,10 +1,13 @@
 package network
 
 import (
+	"fmt"
 	"net"
+	"net/netip"
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/fosrl/newt/logger"
 )
@@ -178,4 +181,63 @@ func GetLocalEndpoints(port uint16, excludeInterface string, allowedInterfaces [
 		endpoints = append(endpoints, net.JoinHostPort(c.ip, portStr))
 	}
 	return endpoints
+}
+
+// ParseLocalEndpoint validates a user-supplied local endpoint and returns it
+// in canonical "ip:port" form (bracketed for IPv6). It accepts either a bare
+// IP address ("192.168.1.10", "fd00::1", "[fd00::1]") or an IP with a port
+// ("192.168.1.10:51820", "[fd00::1]:51820"); a bare IP gets defaultPort.
+// Hostnames are not accepted since peers need a literal address to dial.
+func ParseLocalEndpoint(s string, defaultPort uint16) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", fmt.Errorf("empty endpoint")
+	}
+
+	if addr, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(s, "["), "]")); err == nil {
+		return netip.AddrPortFrom(addr.Unmap(), defaultPort).String(), nil
+	}
+
+	ap, err := netip.ParseAddrPort(s)
+	if err != nil {
+		return "", fmt.Errorf("invalid endpoint %q: must be an IP address or IP:port", s)
+	}
+	if ap.Port() == 0 {
+		return "", fmt.Errorf("invalid endpoint %q: port must be between 1 and 65535", s)
+	}
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()).String(), nil
+}
+
+// MergeLocalEndpoints prepends the user-supplied extra endpoints (resolved
+// with ParseLocalEndpoint, so bare IPs get port) to the discovered list,
+// dropping duplicates. Explicitly configured endpoints come first since the
+// user has asserted the site is reachable there. Invalid entries are logged
+// and skipped (they are normally rejected earlier, at config load).
+func MergeLocalEndpoints(discovered []string, extra []string, port uint16) []string {
+	if len(extra) == 0 {
+		return discovered
+	}
+
+	merged := make([]string, 0, len(extra)+len(discovered))
+	seen := make(map[string]struct{}, len(extra)+len(discovered))
+	add := func(ep string) {
+		if _, ok := seen[ep]; ok {
+			return
+		}
+		seen[ep] = struct{}{}
+		merged = append(merged, ep)
+	}
+
+	for _, e := range extra {
+		ep, err := ParseLocalEndpoint(e, port)
+		if err != nil {
+			logger.Warn("Ignoring configured local endpoint: %v", err)
+			continue
+		}
+		add(ep)
+	}
+	for _, ep := range discovered {
+		add(ep)
+	}
+	return merged
 }

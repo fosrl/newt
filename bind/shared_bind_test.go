@@ -553,3 +553,86 @@ func TestSocketRouting(t *testing.T) {
 		t.Errorf("Expected response from physical port %d, got %d", physicalAddr.Port, fromAddr.Port)
 	}
 }
+
+// TestSocketReceiveSurvivesRebind checks that the physical-socket receive
+// function keeps working when the socket is replaced while it is blocked in a
+// read. Rebind closes the old socket, so the blocked read fails with
+// net.ErrClosed after Rebind has already cleared the rebinding flag. That
+// error must not reach wireguard-go, which would stop the receive routine for
+// good, so nothing would ever read the new socket.
+func TestSocketReceiveSurvivesRebind(t *testing.T) {
+	oldConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("Failed to create UDP connection: %v", err)
+	}
+
+	sharedBind, err := New(oldConn)
+	if err != nil {
+		t.Fatalf("Failed to create SharedBind: %v", err)
+	}
+	defer sharedBind.Close()
+
+	recvFuncs, _, err := sharedBind.Open(0)
+	if err != nil {
+		t.Fatalf("Failed to open bind: %v", err)
+	}
+	socketRecv := recvFuncs[0]
+
+	type result struct {
+		n    int
+		data []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		bufs := [][]byte{make([]byte, 1500)}
+		sizes := make([]int, 1)
+		eps := make([]wgConn.Endpoint, 1)
+		n, err := socketRecv(bufs, sizes, eps)
+		r := result{n: n, err: err}
+		if err == nil && n > 0 {
+			r.data = append([]byte(nil), bufs[0][:sizes[0]]...)
+		}
+		done <- r
+	}()
+
+	// Let the receive goroutine block in its read on the old socket.
+	time.Sleep(100 * time.Millisecond)
+
+	newConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("Failed to create new UDP connection: %v", err)
+	}
+	if err := sharedBind.Rebind(newConn); err != nil {
+		t.Fatalf("Rebind failed: %v", err)
+	}
+
+	sender, err := net.DialUDP("udp4", nil, newConn.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("Failed to create sender: %v", err)
+	}
+	defer sender.Close()
+
+	payload := []byte("after-rebind")
+	deadline := time.After(3 * time.Second)
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case r := <-done:
+			if r.err != nil {
+				t.Fatalf("receive function returned %v after Rebind; wireguard-go would stop reading for good", r.err)
+			}
+			if string(r.data) != string(payload) {
+				t.Fatalf("got %q, want %q", r.data, payload)
+			}
+			return
+		case <-tick.C:
+			if _, err := sender.Write(payload); err != nil {
+				t.Fatalf("Failed to send: %v", err)
+			}
+		case <-deadline:
+			t.Fatal("receive function did not return a packet from the new socket within 3s")
+		}
+	}
+}

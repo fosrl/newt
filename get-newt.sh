@@ -2,6 +2,11 @@
 
 # Get Newt - Cross-platform installation script
 # Usage: curl -fsSL https://raw.githubusercontent.com/fosrl/newt/refs/heads/main/get-newt.sh | sh
+#
+# Options (pass after `sh -s --`, e.g. `... | sh -s -- --version 1.19.0`):
+#   --version <version>  Install a specific release instead of the latest.
+#                        Can also be set with NEWT_VERSION.
+#   --path <file>        Install to this exact path.
 
 set -e
 
@@ -13,48 +18,104 @@ NC='\033[0m' # No Color
 
 # GitHub repository info
 REPO="fosrl/newt"
-GITHUB_API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+RELEASE_API_URL="https://api.fossorial.io/api/v1/versions/newt"
 
 # Function to print colored output
 print_status() {
     printf '%b[INFO]%b %s\n' "${GREEN}" "${NC}" "$1"
 }
 
+# Warnings and errors go to stderr so they still show up when printed from
+# inside a $(...) command substitution.
 print_warning() {
-    printf '%b[WARN]%b %s\n' "${YELLOW}" "${NC}" "$1"
+    printf '%b[WARN]%b %s\n' "${YELLOW}" "${NC}" "$1" >&2
 }
 
 print_error() {
-    printf '%b[ERROR]%b %s\n' "${RED}" "${NC}" "$1"
+    printf '%b[ERROR]%b %s\n' "${RED}" "${NC}" "$1" >&2
 }
 
-# Function to get latest version from GitHub API
-get_latest_version() {
-    latest_info=""
+# Temporary download directory, removed on exit. A fresh mktemp directory
+# avoids clobbering (or following a symlink planted at) a fixed /tmp path.
+TMP_DIR=""
+cleanup() {
+    if [ -n "$TMP_DIR" ]; then
+        rm -rf "$TMP_DIR"
+    fi
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM
 
+# Fetch the latest release info (version and asset checksums) from the
+# Fossorial API into RELEASE_INFO. Returns 1 if it isn't available.
+RELEASE_INFO=""
+fetch_release_info() {
     if command -v curl >/dev/null 2>&1; then
-        latest_info=$(curl -fsSL "$GITHUB_API_URL" 2>/dev/null)
-    elif command -v wget >/dev/null 2>&1; then
-        latest_info=$(wget -qO- "$GITHUB_API_URL" 2>/dev/null)
+        RELEASE_INFO=$(curl -fsSL "$RELEASE_API_URL" 2>/dev/null || true)
     else
-        print_error "Neither curl nor wget is available."
+        RELEASE_INFO=$(wget -qO- "$RELEASE_API_URL" 2>/dev/null || true)
+    fi
+    RELEASE_INFO=$(printf '%s' "$RELEASE_INFO" | tr -d '\n\r')
+    [ -n "$RELEASE_INFO" ]
+}
+
+# latestVersion from RELEASE_INFO, without a leading "v". Parsed without jq.
+release_info_version() {
+    printf '%s' "$RELEASE_INFO" |
+        sed -n 's/.*"latestVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+        sed 's/^v//'
+}
+
+# Published sha256 of a release asset from RELEASE_INFO, or nothing.
+release_info_digest() {
+    asset_re=$(printf '%s' "$1" | sed 's/[][\.*^$/]/\\&/g')
+    printf '%s' "$RELEASE_INFO" |
+        sed -n "s/.*\"${asset_re}\"[[:space:]]*:[[:space:]]*\"\([0-9a-f]\{64\}\)\".*/\1/p"
+}
+
+# sha256 of a file, with whichever tool this system has.
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256 >/dev/null 2>&1; then
+        sha256 -q "$1"
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$1" | awk '{print $NF}'
+    else
+        return 1
+    fi
+}
+
+# Check a downloaded file against the checksum published for its release
+# asset. Exits on a mismatch; warns and carries on when there's no published
+# checksum (pinned older version, or the API was unreachable).
+verify_checksum() {
+    checksum_file="$1"
+    checksum_asset="$2"
+
+    checksum_expected=$(release_info_digest "$checksum_asset")
+    if [ -z "$checksum_expected" ]; then
+        print_warning "No published checksum for ${checksum_asset}; skipping verification."
+        return 0
+    fi
+
+    checksum_actual=$(sha256_of "$checksum_file" || true)
+    if [ -z "$checksum_actual" ]; then
+        print_warning "No sha256 tool found (sha256sum, shasum, sha256 or openssl); skipping verification."
+        return 0
+    fi
+
+    if [ "$checksum_actual" != "$checksum_expected" ]; then
+        print_error "Checksum mismatch for ${checksum_asset}!"
+        print_error "  expected: ${checksum_expected}"
+        print_error "  got:      ${checksum_actual}"
+        print_error "The download may be corrupted or tampered with. Nothing was installed."
         exit 1
     fi
 
-    if [ -z "$latest_info" ]; then
-        print_error "Failed to fetch latest version info"
-        exit 1
-    fi
-
-    version=$(printf '%s' "$latest_info" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
-
-    if [ -z "$version" ]; then
-        print_error "Could not parse version from GitHub API response"
-        exit 1
-    fi
-
-    version=$(printf '%s' "$version" | sed 's/^v//')
-    printf '%s' "$version"
+    print_status "Checksum verified (sha256 ${checksum_expected})"
 }
 
 # Detect OS and architecture
@@ -116,24 +177,86 @@ get_install_dir() {
     esac
 }
 
-# Parse --path argument from args
-# Returns the value after --path, or empty string if not provided
-parse_path_arg() {
+# Parse command line arguments into CUSTOM_PATH and REQUESTED_VERSION.
+parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --path)
-                if [ -n "$2" ]; then
-                    printf '%s' "$2"
-                    return
+                if [ -z "$2" ]; then
+                    print_error "--path requires a value"
+                    exit 1
                 fi
+                CUSTOM_PATH="$2"
+                shift
                 ;;
             --path=*)
-                printf '%s' "${1#--path=}"
-                return
+                CUSTOM_PATH="${1#--path=}"
+                ;;
+            --version)
+                if [ -z "$2" ]; then
+                    print_error "--version requires a value"
+                    exit 1
+                fi
+                REQUESTED_VERSION="$2"
+                shift
+                ;;
+            --version=*)
+                REQUESTED_VERSION="${1#--version=}"
+                ;;
+            *)
+                print_warning "Ignoring unknown argument: $1"
                 ;;
         esac
         shift
     done
+}
+
+# Set VERSION and BASE_URL for the release to install: the requested version,
+# else the latest from the Fossorial API, else GitHub's latest release (which
+# is a plain redirect, not a rate-limited GitHub API call). RELEASE_INFO is
+# cleared unless it describes the chosen version, so its checksums are only
+# ever used for the release they belong to.
+resolve_release() {
+    latest=""
+    if fetch_release_info; then
+        latest=$(release_info_version)
+    fi
+
+    if [ -n "$REQUESTED_VERSION" ]; then
+        VERSION=$(printf '%s' "$REQUESTED_VERSION" | sed 's/^v//')
+        case "$VERSION" in
+            ""|*[!0-9A-Za-z.+-]*)
+                print_error "Invalid version: ${REQUESTED_VERSION}"
+                exit 1
+                ;;
+        esac
+        print_status "Requested version: v${VERSION}"
+        BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+        if [ "$VERSION" != "$latest" ]; then
+            RELEASE_INFO=""
+        fi
+        return
+    fi
+
+    if [ -n "$latest" ]; then
+        VERSION="$latest"
+        print_status "Latest version: v${VERSION}"
+        BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+    else
+        VERSION=""
+        RELEASE_INFO=""
+        print_warning "Could not get the latest version from ${RELEASE_API_URL}"
+        print_warning "Falling back to the latest release on GitHub"
+        BASE_URL="https://github.com/${REPO}/releases/latest/download"
+    fi
+}
+
+# Returns 0 if the directory is an entry in $PATH.
+dir_in_path() {
+    case ":${PATH}:" in
+        *":$1:"*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Detect an existing newt binary location.
@@ -235,7 +358,7 @@ install_newt() {
     esac
 
     download_url="${BASE_URL}/${binary_name}"
-    temp_file="/tmp/${final_name}"
+    temp_file="${TMP_DIR}/${final_name}"
 
     # If a custom path is provided, use it directly; otherwise use install_dir/final_name
     if [ -n "$custom_path" ]; then
@@ -248,13 +371,17 @@ install_newt() {
     print_status "Downloading newt from ${download_url}"
 
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$download_url" -o "$temp_file"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q "$download_url" -O "$temp_file"
+        curl -fsSL "$download_url" -o "$temp_file" || download_failed=1
     else
-        print_error "Neither curl nor wget is available."
+        wget -q "$download_url" -O "$temp_file" || download_failed=1
+    fi
+    if [ -n "${download_failed:-}" ] || [ ! -s "$temp_file" ]; then
+        print_error "Failed to download ${download_url}"
+        print_error "Check that release ${VERSION:-latest} has a ${binary_name} asset."
         exit 1
     fi
+
+    verify_checksum "$temp_file" "$binary_name"
 
     # Make executable before moving
     chmod +x "$temp_file"
@@ -274,7 +401,7 @@ install_newt() {
     print_status "newt installed to ${final_path}"
 
     # Check if install directory is in PATH
-    if ! echo "$PATH" | grep -q "$install_dir"; then
+    if ! dir_in_path "$install_dir"; then
         print_warning "Install directory ${install_dir} is not in your PATH."
         print_warning "Add it with:"
         print_warning "  export PATH=\"${install_dir}:\$PATH\""
@@ -304,20 +431,25 @@ verify_installation() {
 
 # Main installation process
 main() {
+    CUSTOM_PATH=""
+    REQUESTED_VERSION="${NEWT_VERSION:-}"
     # --path explicitly overrides everything
-    CUSTOM_PATH=$(parse_path_arg "$@")
+    parse_args "$@"
 
-    if [ -n "$CUSTOM_PATH" ]; then
-        print_status "Installing latest version of newt to ${CUSTOM_PATH}..."
-    else
-        print_status "Installing latest version of newt..."
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        print_error "Neither curl nor wget is available."
+        exit 1
     fi
 
-    print_status "Fetching latest version..."
-    VERSION=$(get_latest_version)
-    print_status "Latest version: v${VERSION}"
+    if [ -n "$CUSTOM_PATH" ]; then
+        print_status "Installing newt to ${CUSTOM_PATH}..."
+    else
+        print_status "Installing newt..."
+    fi
 
-    BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+    resolve_release
+
+    TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/newt.XXXXXX")
 
     PLATFORM=$(detect_platform)
     print_status "Detected platform: ${PLATFORM}"

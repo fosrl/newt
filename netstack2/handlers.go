@@ -505,15 +505,18 @@ func (h *ICMPHandler) handleICMPPacket(id stack.TransportEndpointID, pkt *stack.
 	// subnet rule during injection (ProxyHandler.HandleIncomingPacket), so
 	// there's no need to re-run subnet matching here for permission - doing
 	// so used to re-derive the DNAT target from a *fresh* rule lookup keyed
-	// on dstIP, but dstIP here is ambiguous: for a loopback rewrite target
-	// it's still the original (unrewritten) destination, while for a
-	// non-loopback rewrite target it's already the post-DNAT address. In
-	// the latter case (and always for a domain-name RewriteTo, which has no
-	// subnet rule of its own for the resolved IP) that re-lookup could find
-	// no rule and silently drop the ping even though the connection is
-	// legitimately allowed. Instead, resolve the same way the TCP/UDP
-	// handlers do: via destRewriteTable, which HandleIncomingPacket already
-	// populated for this exact flow keyed by the original destination.
+	// on dstIP, which could find no rule for a rewrite target that has no
+	// subnet rule of its own (always the case for a domain-name RewriteTo)
+	// and silently drop the ping even though the connection is legitimately
+	// allowed. Instead, resolve the same way the TCP/UDP handlers do: via
+	// destRewriteTable, which HandleIncomingPacket already populated for
+	// this exact flow keyed by the original destination.
+	//
+	// HandleIncomingPacket never rewrites the destination of ICMP packets,
+	// so dstIP is always the original destination the client pinged. It is
+	// kept as the source of the echo reply: a reply from the DNAT target
+	// instead would not match the request on the client (ping reports
+	// "DIFFERENT ADDRESS", stricter tools such as check_icmp discard it).
 	actualDstIP := dstIP
 	if rewrittenAddr, ok := h.proxyHandler.LookupDestinationRewrite(srcIP, dstIP, 0, uint8(header.ICMPv4ProtocolNumber)); ok {
 		actualDstIP = rewrittenAddr.String()

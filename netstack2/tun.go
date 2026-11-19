@@ -60,9 +60,14 @@ type NetTunOptions struct {
 	EnableTCPProxy  bool
 	EnableUDPProxy  bool
 	EnableICMPProxy bool
+	// EnableTCPRACK turns gVisor's RACK loss detection back on. It is off by
+	// default; see configureTCP.
+	EnableTCPRACK bool
 }
 
-// CreateNetTUN creates a new TUN device with netstack without proxying
+// CreateNetTUN creates a new TUN device with netstack and TCP, UDP and ICMP
+// proxying. For a netstack without proxying, use CreateNetTUNWithOptions with
+// NetTunOptions{}.
 func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device, *Net, error) {
 	return CreateNetTUNWithOptions(localAddresses, dnsServers, mtu, NetTunOptions{
 		EnableTCPProxy:  true,
@@ -96,20 +101,19 @@ func CreateNetTUNWithOptions(localAddresses, dnsServers []netip.Addr, mtu int, o
 			EnableUDP:  options.EnableUDPProxy,
 			EnableICMP: options.EnableICMPProxy,
 			MTU:        mtu,
+			EnableRACK: options.EnableTCPRACK,
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create proxy handler: %v", err)
 		}
 	}
 
-	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is enabled by default
-	tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
-	if tcpipErr != nil {
-		return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
+	if err := configureTCP(dev.stack, options.EnableTCPRACK); err != nil {
+		return nil, nil, err
 	}
 	// Create NIC 1 (main interface, no promiscuous mode)
 	dev.notifyHandle = dev.ep.AddNotify(dev)
-	tcpipErr = dev.stack.CreateNIC(1, dev.ep)
+	tcpipErr := dev.stack.CreateNIC(1, dev.ep)
 	if tcpipErr != nil {
 		return nil, nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
 	}
@@ -121,8 +125,12 @@ func CreateNetTUNWithOptions(localAddresses, dnsServers []netip.Addr, mtu int, o
 		}
 	}
 
-	if err := dev.stack.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true); err != nil {
-		return nil, nil, fmt.Errorf("set ipv4 forwarding: %s", err)
+	// Forwarding is for the proxy. Without one, as in the main tunnel, it
+	// stays off, as in wireguard-go's netstack.
+	if dev.proxyHandler != nil {
+		if err := dev.stack.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true); err != nil {
+			return nil, nil, fmt.Errorf("set ipv4 forwarding: %s", err)
+		}
 	}
 
 	for _, ip := range localAddresses {

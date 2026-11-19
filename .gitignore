@@ -8,3 +8,6 @@ newt_arm64
 key
 /.direnv/
 /result*
+
+# Wintun is downloaded in CI (see sign-windows job); place it here for local MSI builds
+third_party/wintun/

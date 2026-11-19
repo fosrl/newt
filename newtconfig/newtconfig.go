@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/network"
 	newtpkg "github.com/fosrl/newt/newt"
 )
 
@@ -65,6 +66,7 @@ type fileSettings struct {
 	NoCloud                 *bool    `json:"noCloud"`
 	PreferEndpoint          *string  `json:"preferEndpoint"`
 	LocalEndpointInterfaces []string `json:"localEndpointInterfaces"`
+	LocalEndpoints          []string `json:"localEndpoints"`
 
 	PingInterval        *string `json:"pingInterval"`
 	PingTimeout         *string `json:"pingTimeout"`
@@ -72,6 +74,7 @@ type fileSettings struct {
 
 	DisableClients            *bool   `json:"disableClients"`
 	DisableSSH                *bool   `json:"disableSsh"`
+	EnableTCPRACK             *bool   `json:"enableTcpRack"`
 	EnforceHealthcheckCert    *bool   `json:"enforceHcCert"`
 	HealthFile                *string `json:"healthFile"`
 	BlueprintFile             *string `json:"blueprintFile"`
@@ -230,6 +233,18 @@ func applyEnvBoolAlias(dst *bool, envName, aliasEnvName, key string, sources map
 	}
 }
 
+// splitCSV splits a comma-separated list, trimming whitespace and dropping
+// empty entries. Returns nil for an empty result.
+func splitCSV(s string) []string {
+	var out []string
+	for _, n := range strings.Split(s, ",") {
+		if t := strings.TrimSpace(n); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // validateTLSConfig validates that TLS config fields are consistent and that
 // referenced files exist.
 func validateTLSConfig(cfg newtpkg.Config) error {
@@ -373,6 +388,10 @@ func Load(opts Options) (newtpkg.Config, error) {
 			cfg.LocalEndpointInterfaces = fileCfg.LocalEndpointInterfaces
 			sources["local-endpoint-interfaces"] = string(sourceFile)
 		}
+		if len(fileCfg.LocalEndpoints) > 0 {
+			cfg.LocalEndpoints = fileCfg.LocalEndpoints
+			sources["local-endpoints"] = string(sourceFile)
+		}
 
 		applyStr(&pingIntervalStr, fileCfg.PingInterval, "ping-interval", sources, sourceFile)
 		applyStr(&pingTimeoutStr, fileCfg.PingTimeout, "ping-timeout", sources, sourceFile)
@@ -380,6 +399,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 
 		applyBool(&cfg.DisableClients, fileCfg.DisableClients, "disable-clients", sources, sourceFile)
 		applyBool(&cfg.DisableSSH, fileCfg.DisableSSH, "disable-ssh", sources, sourceFile)
+		applyBool(&cfg.EnableTCPRACK, fileCfg.EnableTCPRACK, "enable-tcp-rack", sources, sourceFile)
 		applyBool(&cfg.EnforceHealthcheckCert, fileCfg.EnforceHealthcheckCert, "enforce-hc-cert", sources, sourceFile)
 		applyStr(&cfg.HealthFile, fileCfg.HealthFile, "health-file", sources, sourceFile)
 		applyStr(&cfg.BlueprintFile, fileCfg.BlueprintFile, "blueprint-file", sources, sourceFile)
@@ -435,14 +455,12 @@ func Load(opts Options) (newtpkg.Config, error) {
 	applyEnvStr(&cfg.NativeMainInterfaceName, "INTERFACE_MAIN", "interface-main", sources)
 	applyEnvBool(&cfg.NoCloud, "NO_CLOUD", "no-cloud", sources)
 	if v := os.Getenv("LOCAL_ENDPOINT_INTERFACES"); v != "" {
-		var names []string
-		for _, n := range strings.Split(v, ",") {
-			if t := strings.TrimSpace(n); t != "" {
-				names = append(names, t)
-			}
-		}
-		cfg.LocalEndpointInterfaces = names
+		cfg.LocalEndpointInterfaces = splitCSV(v)
 		sources["local-endpoint-interfaces"] = string(sourceEnv)
+	}
+	if v := os.Getenv("LOCAL_ENDPOINTS"); v != "" {
+		cfg.LocalEndpoints = splitCSV(v)
+		sources["local-endpoints"] = string(sourceEnv)
 	}
 
 	applyEnvStr(&pingIntervalStr, "PING_INTERVAL", "ping-interval", sources)
@@ -451,6 +469,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 
 	applyEnvBool(&cfg.DisableClients, "DISABLE_CLIENTS", "disable-clients", sources)
 	applyEnvBool(&cfg.DisableSSH, "DISABLE_SSH", "disable-ssh", sources)
+	applyEnvBool(&cfg.EnableTCPRACK, "ENABLE_TCP_RACK", "enable-tcp-rack", sources)
 	applyEnvBool(&cfg.EnforceHealthcheckCert, "ENFORCE_HC_CERT", "enforce-hc-cert", sources)
 	applyEnvStr(&cfg.HealthFile, "HEALTH_FILE", "health-file", sources)
 	applyEnvStr(&cfg.BlueprintFile, "BLUEPRINT_FILE", "blueprint-file", sources)
@@ -512,9 +531,11 @@ func Load(opts Options) (newtpkg.Config, error) {
 	origUDPIdle, origProvisioningKey, origName := udpProxyIdleTimeoutStr, cfg.ProvisioningKey, cfg.NewtName
 	origTLSCert, origTLSKey, origDockerEnforce := cfg.TLSClientCert, cfg.TLSClientKey, dockerEnforceStr
 	origHealthFile, origBlueprintFile, origProvBlueprintFile := cfg.HealthFile, cfg.BlueprintFile, cfg.ProvisioningBlueprintFile
-	origNoCloud, origTLSPrivateKey := cfg.NoCloud, cfg.TLSPrivateKey
+	origNoCloud, origTLSPrivateKey, origEnableTCPRACK := cfg.NoCloud, cfg.TLSPrivateKey, cfg.EnableTCPRACK
 	localEndpointInterfacesStr := strings.Join(cfg.LocalEndpointInterfaces, ",")
 	origLocalEndpointInterfaces := localEndpointInterfacesStr
+	localEndpointsStr := strings.Join(cfg.LocalEndpoints, ",")
+	origLocalEndpoints := localEndpointsStr
 	origMetrics, origOTLP, origAdminAddr := cfg.MetricsEnabled, cfg.OTLPEnabled, cfg.AdminAddr
 	origMetricsAsync, origPprof, origRegion := cfg.MetricsAsyncBytes, cfg.PprofEnabled, cfg.Region
 	origADKey, origADPrincipals, origADCACert := cfg.AuthDaemonKey, cfg.AuthDaemonPrincipalsFile, cfg.AuthDaemonCACertPath
@@ -537,6 +558,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 	fs.StringVar(&cfg.NativeMainInterfaceName, "interface-main", cfg.NativeMainInterfaceName, "Name of the native main tunnel WireGuard interface (used with --native-main)")
 	fs.BoolVar(&cfg.DisableClients, "disable-clients", cfg.DisableClients, "Disable clients on the WireGuard interface")
 	fs.BoolVar(&cfg.DisableSSH, "disable-ssh", cfg.DisableSSH, "Disable SSH auth daemon and native SSH mode (remote auth daemon still works)")
+	fs.BoolVar(&cfg.EnableTCPRACK, "enable-tcp-rack", cfg.EnableTCPRACK, "Turn gVisor's TCP RACK loss detection back on in the netstack tunnels (default: false)")
 	fs.BoolVar(&cfg.EnforceHealthcheckCert, "enforce-hc-cert", cfg.EnforceHealthcheckCert, "Enforce certificate validation for health checks (default: false, accepts any cert)")
 	fs.StringVar(&cfg.DockerSocket, "docker-socket", cfg.DockerSocket, "Path or address to Docker socket (typically unix:///var/run/docker.sock)")
 	fs.StringVar(&pingIntervalStr, "ping-interval", pingIntervalStr, "Interval for pinging the server (default 15s)")
@@ -544,6 +566,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 	fs.StringVar(&udpProxyIdleTimeoutStr, "udp-proxy-idle-timeout", udpProxyIdleTimeoutStr, "Idle timeout for UDP proxied client flows before cleanup")
 	fs.StringVar(&cfg.PreferEndpoint, "prefer-endpoint", cfg.PreferEndpoint, "Prefer this endpoint for the connection (if set, will override the endpoint from the server)")
 	fs.StringVar(&localEndpointInterfacesStr, "local-endpoint-interfaces", localEndpointInterfacesStr, "Comma-separated list of network interface names to restrict reported local endpoints to (default: report all interfaces)")
+	fs.StringVar(&localEndpointsStr, "local-endpoints", localEndpointsStr, "Comma-separated list of extra IP addresses (or IP:port) where this site can be reached, reported alongside the auto-detected local endpoints (a bare IP uses the WireGuard port)")
 	fs.StringVar(&cfg.ProvisioningKey, "provisioning-key", cfg.ProvisioningKey, "One-time provisioning key used to obtain a newt ID and secret from the server")
 	fs.StringVar(&cfg.NewtName, "name", cfg.NewtName, "Name for the site created during provisioning (supports {{env.VAR}} interpolation)")
 	fs.StringVar(&cfg.ConfigFile, "config-file", configPath, "Path to config file (overrides CONFIG_FILE env var and default location)")
@@ -604,6 +627,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 	markCLI("interface-main", cfg.NativeMainInterfaceName != origInterfaceMain)
 	markCLI("disable-clients", cfg.DisableClients != origDisableClients)
 	markCLI("disable-ssh", cfg.DisableSSH != origDisableSSH)
+	markCLI("enable-tcp-rack", cfg.EnableTCPRACK != origEnableTCPRACK)
 	markCLI("enforce-hc-cert", cfg.EnforceHealthcheckCert != origEnforceHC)
 	markCLI("docker-socket", cfg.DockerSocket != origDockerSocket)
 	markCLI("ping-interval", pingIntervalStr != origPingInterval)
@@ -620,6 +644,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 	markCLI("provisioning-blueprint-file", cfg.ProvisioningBlueprintFile != origProvBlueprintFile)
 	markCLI("no-cloud", cfg.NoCloud != origNoCloud)
 	markCLI("local-endpoint-interfaces", localEndpointInterfacesStr != origLocalEndpointInterfaces)
+	markCLI("local-endpoints", localEndpointsStr != origLocalEndpoints)
 	markCLI("metrics", cfg.MetricsEnabled != origMetrics)
 	markCLI("otlp", cfg.OTLPEnabled != origOTLP)
 	markCLI("metrics-admin-addr", cfg.AdminAddr != origAdminAddr)
@@ -641,7 +666,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 	}
 
 	if *showConfig {
-		printShowConfig(cfg, sources, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr, dockerEnforceStr, localEndpointInterfacesStr)
+		printShowConfig(cfg, sources, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr, dockerEnforceStr, localEndpointInterfacesStr, localEndpointsStr)
 		os.Exit(0)
 	}
 
@@ -656,16 +681,16 @@ func Load(opts Options) (newtpkg.Config, error) {
 	}
 
 	// Parse local endpoint interface allowlist (after flag parsing so CLI takes effect)
-	if localEndpointInterfacesStr != "" {
-		var names []string
-		for _, n := range strings.Split(localEndpointInterfacesStr, ",") {
-			if t := strings.TrimSpace(n); t != "" {
-				names = append(names, t)
-			}
+	cfg.LocalEndpointInterfaces = splitCSV(localEndpointInterfacesStr)
+
+	// Parse and validate extra local endpoints. The port isn't known yet
+	// (it may be chosen at random later), so bare IPs are kept as-is and
+	// resolved against the WireGuard port when they're reported.
+	cfg.LocalEndpoints = splitCSV(localEndpointsStr)
+	for _, ep := range cfg.LocalEndpoints {
+		if _, err := network.ParseLocalEndpoint(ep, 0); err != nil {
+			return newtpkg.Config{}, fmt.Errorf("invalid local-endpoints entry: %w", err)
 		}
-		cfg.LocalEndpointInterfaces = names
-	} else {
-		cfg.LocalEndpointInterfaces = nil
 	}
 
 	// Parse MTU
@@ -699,7 +724,7 @@ func Load(opts Options) (newtpkg.Config, error) {
 }
 
 // printShowConfig prints the resolved configuration and the source of each value
-func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr, dockerEnforceStr, localEndpointInterfacesStr string) {
+func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, mtuStr, portStr, pingIntervalStr, pingTimeoutStr, udpProxyIdleTimeoutStr, dockerEnforceStr, localEndpointInterfacesStr, localEndpointsStr string) {
 	getSource := func(key string) string {
 		if s, ok := sources[key]; ok && s != "" {
 			return s
@@ -748,6 +773,7 @@ func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, 
 	fmt.Printf("  interface-main   = %s [%s]\n", cfg.NativeMainInterfaceName, getSource("interface-main"))
 	fmt.Printf("  no-cloud         = %v [%s]\n", cfg.NoCloud, getSource("no-cloud"))
 	fmt.Printf("  local-endpoint-interfaces = %s [%s]\n", mask("local-endpoint-interfaces", localEndpointInterfacesStr), getSource("local-endpoint-interfaces"))
+	fmt.Printf("  local-endpoints  = %s [%s]\n", mask("local-endpoints", localEndpointsStr), getSource("local-endpoints"))
 
 	fmt.Println("\nLogging:")
 	fmt.Printf("  log-level        = %s [%s]\n", cfg.LogLevel, getSource("log-level"))
@@ -760,6 +786,7 @@ func printShowConfig(cfg newtpkg.Config, sources map[string]string, configPath, 
 	fmt.Println("\nFeatures:")
 	fmt.Printf("  disable-clients             = %v [%s]\n", cfg.DisableClients, getSource("disable-clients"))
 	fmt.Printf("  disable-ssh                 = %v [%s]\n", cfg.DisableSSH, getSource("disable-ssh"))
+	fmt.Printf("  enable-tcp-rack             = %v [%s]\n", cfg.EnableTCPRACK, getSource("enable-tcp-rack"))
 	fmt.Printf("  enforce-hc-cert             = %v [%s]\n", cfg.EnforceHealthcheckCert, getSource("enforce-hc-cert"))
 	fmt.Printf("  health-file                 = %s [%s]\n", mask("health-file", cfg.HealthFile), getSource("health-file"))
 	fmt.Printf("  blueprint-file              = %s [%s]\n", mask("blueprint-file", cfg.BlueprintFile), getSource("blueprint-file"))

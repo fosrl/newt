@@ -15,9 +15,9 @@ import (
 	"github.com/fosrl/newt/internal/state"
 	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/logger"
+	"github.com/fosrl/newt/netstack2"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 const (
@@ -99,7 +99,7 @@ func (m *managedPacketConn) Close() error {
 
 // ProxyManager handles the creation and management of proxy connections
 type ProxyManager struct {
-	tnet           *netstack.Net
+	tnet           *netstack2.Net
 	tcpTargets     map[string]map[int]string // map[listenIP]map[port]targetAddress
 	udpTargets     map[string]map[int]string
 	listeners      []net.Listener
@@ -194,7 +194,7 @@ func classifyProxyError(err error) string {
 }
 
 // NewProxyManager creates a new proxy manager instance backed by a netstack.
-func NewProxyManager(tnet *netstack.Net) *ProxyManager {
+func NewProxyManager(tnet *netstack2.Net) *ProxyManager {
 	return &ProxyManager{
 		tnet:           tnet,
 		tcpTargets:     make(map[string]map[int]string),
@@ -300,7 +300,7 @@ func NewProxyManagerWithoutTNet() *ProxyManager {
 }
 
 // Function to add tnet to existing ProxyManager
-func (pm *ProxyManager) SetTNet(tnet *netstack.Net) {
+func (pm *ProxyManager) SetTNet(tnet *netstack2.Net) {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
 	pm.tnet = tnet

@@ -32,6 +32,10 @@ type Config struct {
 	NoCloud                 bool
 	PreferEndpoint          string
 	LocalEndpointInterfaces []string
+	// LocalEndpoints are extra IPs (or IP:port) where this site can be
+	// reached, advertised alongside the auto-discovered local endpoints.
+	// A bare IP uses the WireGuard listen port.
+	LocalEndpoints []string
 
 	// Timing
 	PingInterval        time.Duration
@@ -41,6 +45,7 @@ type Config struct {
 	// Features
 	DisableClients            bool
 	DisableSSH                bool
+	EnableTCPRACK             bool
 	EnforceHealthcheckCert    bool
 	HealthFile                string
 	BlueprintFile             string
