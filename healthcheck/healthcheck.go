@@ -58,7 +58,13 @@ type Config struct {
 
 // Target represents a health check target with its current status
 type Target struct {
-	Config               Config    `json:"config"`
+	Config Config `json:"config"`
+	// mu guards the mutable status fields below (Status, LastCheck, LastError,
+	// CheckCount, consecutiveSuccesses, consecutiveFailures). They are written by
+	// the target's monitor goroutine and read concurrently when snapshotting for
+	// status reporting. Config and the runtime fields (timer/ctx/cancel/client)
+	// are set once at creation and are not guarded by this mutex.
+	mu                   sync.Mutex
 	Status               Health    `json:"status"`
 	LastCheck            time.Time `json:"lastCheck"`
 	LastError            string    `json:"lastError,omitempty"`
@@ -69,6 +75,22 @@ type Target struct {
 	client               *http.Client
 	consecutiveSuccesses int
 	consecutiveFailures  int
+}
+
+// snapshot returns a copy of the target's reported state taken under the target
+// lock, so status reporting never races with the monitor goroutine's updates.
+// Runtime-only fields (timer/ctx/cancel/client) are intentionally omitted -
+// callers only read the reported status fields.
+func (t *Target) snapshot() *Target {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return &Target{
+		Config:     t.Config,
+		Status:     t.Status,
+		LastCheck:  t.LastCheck,
+		LastError:  t.LastError,
+		CheckCount: t.CheckCount,
+	}
 }
 
 // StatusChangeCallback is called when any target's status changes
@@ -316,9 +338,8 @@ func (m *Monitor) GetTargets() map[int]*Target {
 func (m *Monitor) getAllTargetsUnsafe() map[int]*Target {
 	targets := make(map[int]*Target)
 	for id, target := range m.targets {
-		// Create a copy to avoid race conditions
-		targetCopy := *target
-		targets[id] = &targetCopy
+		// Snapshot under the target lock to avoid racing with its monitor goroutine
+		targets[id] = target.snapshot()
 	}
 	return targets
 }
@@ -389,12 +410,16 @@ func (m *Monitor) monitorTarget(target *Target) {
 
 // performHealthCheck performs a health check on a target and applies threshold logic
 func (m *Monitor) performHealthCheck(target *Target) {
+	target.mu.Lock()
 	target.CheckCount++
 	target.LastCheck = time.Now()
+	target.mu.Unlock()
 
 	var passed bool
 	var checkErr string
 
+	// Perform the check without holding the target lock so status snapshots are
+	// not blocked for the duration of a (potentially slow) network request.
 	switch strings.ToLower(target.Config.Mode) {
 	case "tcp":
 		passed, checkErr = m.performTCPCheck(target)
@@ -402,6 +427,9 @@ func (m *Monitor) performHealthCheck(target *Target) {
 		// "http", "https", or anything else falls through to HTTP
 		passed, checkErr = m.performHTTPCheck(target)
 	}
+
+	target.mu.Lock()
+	defer target.mu.Unlock()
 
 	if passed {
 		target.consecutiveFailures = 0
@@ -588,7 +616,9 @@ func (m *Monitor) DisableTarget(id int) error {
 		logger.Info("Disabling health check monitoring for target %d", id)
 		target.Config.Enabled = false
 		target.cancel()
+		target.mu.Lock()
 		target.Status = StatusUnknown
+		target.mu.Unlock()
 
 		// Notify callback of status change
 		if m.callback != nil {
