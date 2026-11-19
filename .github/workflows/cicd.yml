@@ -1249,25 +1249,25 @@ jobs:
   # 7) Stop AWS EC2 runner instances
   # ---------------------------------------------------------------------------
 
-  post-run:
-    name: Stop AWS EC2 runners
-    needs: [pre-run, prepare, build-amd, build-arm, build-armv7, create-manifest, sign-and-release]
-    if: ${{ always() && needs.pre-run.result == 'success' }}
-    runs-on: ubuntu-latest
-    permissions: write-all
-    steps:
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
-          role-duration-seconds: 3600
-          aws-region: ${{ secrets.AWS_REGION }}
+  # post-run:
+  #   name: Stop AWS EC2 runners
+  #   needs: [pre-run, prepare, build-amd, build-arm, build-armv7, create-manifest, sign-and-release]
+  #   if: ${{ always() && needs.pre-run.result == 'success' }}
+  #   runs-on: ubuntu-latest
+  #   permissions: write-all
+  #   steps:
+  #     - name: Configure AWS credentials (OIDC)
+  #       uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+  #       with:
+  #         role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
+  #         role-duration-seconds: 3600
+  #         aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
+  #     - name: Verify AWS identity
+  #       run: aws sts get-caller-identity
 
-      - name: Stop EC2 instances
-        run: |
-          aws ec2 stop-instances --instance-ids ${{ secrets.EC2_INSTANCE_ID_AMD_RUNNER }}
-          aws ec2 stop-instances --instance-ids ${{ secrets.EC2_INSTANCE_ID_ARM_RUNNER }}
-          echo "EC2 instances stopped"
+  #     - name: Stop EC2 instances
+  #       run: |
+  #         aws ec2 stop-instances --instance-ids ${{ secrets.EC2_INSTANCE_ID_AMD_RUNNER }}
+  #         aws ec2 stop-instances --instance-ids ${{ secrets.EC2_INSTANCE_ID_ARM_RUNNER }}
+  #         echo "EC2 instances stopped"
