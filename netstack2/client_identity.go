@@ -12,19 +12,21 @@ import (
 // Traefik, so downstream services see the same identity headers regardless of
 // whether a request came through Pangolin's public proxy or through newt.
 const (
-	remoteUserIDHeader = "Remote-User-Id"
-	remoteUserHeader   = "Remote-User"
-	remoteEmailHeader  = "Remote-Email"
-	remoteNameHeader   = "Remote-Name"
-	remoteRoleHeader   = "Remote-Role"
+	remoteUserIDHeader   = "Remote-User-Id"
+	remoteUserHeader     = "Remote-User"
+	remoteEmailHeader    = "Remote-Email"
+	remoteNameHeader     = "Remote-Name"
+	remoteRoleHeader     = "Remote-Role"
+	remoteClientIDHeader = "Remote-Client-Id"
 )
 
 // ClientIdentity describes who is behind a client's tunnel IP. The server
 // sends one per client that can reach an HTTP resource; the HTTP handler maps
 // a request's source address to it to set the Remote-* headers. Machine
-// clients have no user, so only Name and Role are set for them.
+// clients have no user, so only ClientID, Name and Role are set for them.
 type ClientIdentity struct {
 	IP       string `json:"ip"`
+	ClientID string `json:"clientId,omitempty"`
 	UserID   string `json:"userId,omitempty"`
 	Username string `json:"username,omitempty"`
 	Email    string `json:"email,omitempty"`
@@ -96,6 +98,7 @@ func (s *clientIdentityStore) setRemoteHeaders(out http.Header, remoteAddr strin
 	out.Del(remoteEmailHeader)
 	out.Del(remoteNameHeader)
 	out.Del(remoteRoleHeader)
+	out.Del(remoteClientIDHeader)
 
 	id, ok := s.lookup(remoteAddr)
 	if !ok {
@@ -112,4 +115,5 @@ func (s *clientIdentityStore) setRemoteHeaders(out http.Header, remoteAddr strin
 	set(remoteEmailHeader, id.Email)
 	set(remoteNameHeader, id.Name)
 	set(remoteRoleHeader, id.Role)
+	set(remoteClientIDHeader, id.ClientID)
 }

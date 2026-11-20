@@ -32,7 +32,7 @@ func TestHTTPHandlerSetsRemoteHeaders(t *testing.T) {
 	handler := NewHTTPHandler(nil, nil)
 	handler.ReplaceClientIdentities([]ClientIdentity{
 		{IP: "100.90.128.5", UserID: "u1", Username: "alice", Email: "alice@example.com", Name: "Alice", Role: "Admin, Member"},
-		{IP: "100.90.128.6", Name: "build-server", Role: "CI"},
+		{IP: "100.90.128.6", ClientID: "build-server-01", Name: "build-server", Role: "CI"},
 	})
 	rule := &SubnetRule{
 		Protocol: "http",
@@ -48,6 +48,7 @@ func TestHTTPHandlerSetsRemoteHeaders(t *testing.T) {
 		// a client must not be able to spoof any of these
 		req.Header.Set("Remote-User", "mallory")
 		req.Header.Set("Remote-Role", "Admin")
+		req.Header.Set("Remote-Client-Id", "spoofed")
 		req = req.WithContext(context.WithValue(req.Context(), connCtxKey{}, rule))
 		handler.handleRequest(httptest.NewRecorder(), req)
 		return <-received
@@ -55,11 +56,12 @@ func TestHTTPHandlerSetsRemoteHeaders(t *testing.T) {
 
 	user := send("100.90.128.5:51234")
 	for name, want := range map[string]string{
-		"Remote-User-Id": "u1",
-		"Remote-User":    "alice",
-		"Remote-Email":   "alice@example.com",
-		"Remote-Name":    "Alice",
-		"Remote-Role":    "Admin, Member",
+		"Remote-User-Id":   "u1",
+		"Remote-User":      "alice",
+		"Remote-Email":     "alice@example.com",
+		"Remote-Name":      "Alice",
+		"Remote-Role":      "Admin, Member",
+		"Remote-Client-Id": "",
 	} {
 		if got := user.Get(name); got != want {
 			t.Errorf("user client: %s = %q, want %q", name, got, want)
@@ -68,11 +70,12 @@ func TestHTTPHandlerSetsRemoteHeaders(t *testing.T) {
 
 	machine := send("100.90.128.6:51234")
 	for name, want := range map[string]string{
-		"Remote-User-Id": "",
-		"Remote-User":    "",
-		"Remote-Email":   "",
-		"Remote-Name":    "build-server",
-		"Remote-Role":    "CI",
+		"Remote-User-Id":   "",
+		"Remote-User":      "",
+		"Remote-Email":     "",
+		"Remote-Name":      "build-server",
+		"Remote-Role":      "CI",
+		"Remote-Client-Id": "build-server-01",
 	} {
 		if got := machine.Get(name); got != want {
 			t.Errorf("machine client: %s = %q, want %q", name, got, want)
@@ -80,7 +83,7 @@ func TestHTTPHandlerSetsRemoteHeaders(t *testing.T) {
 	}
 
 	unknown := send("100.90.128.7:51234")
-	for _, name := range []string{"Remote-User", "Remote-Role"} {
+	for _, name := range []string{"Remote-User", "Remote-Role", "Remote-Client-Id"} {
 		if got := unknown.Get(name); got != "" {
 			t.Errorf("unknown client: %s = %q, want it stripped", name, got)
 		}
