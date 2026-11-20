@@ -120,6 +120,12 @@ func (g *Gateway) serveSession(ctx context.Context, ws *websocket.Conn) error {
 		// Cap at TLS 1.2: Windows RDP servers commonly send a TLS "internal_error"
 		// alert when CredSSP/NLA is layered on top of a TLS 1.3 session.
 		MaxVersion: tls.VersionTLS12,
+		// Send each write as a single TLS record. With dynamic record sizing
+		// the first records of a connection are capped at about 1 KB, which
+		// splits the RDS AAD Authentication Request across several records;
+		// Windows expects it in one record and rejects it as invalid
+		// (SEC_E_INVALID_TOKEN).
+		DynamicRecordSizingDisabled: true,
 	}
 	if net.ParseIP(host) == nil {
 		tlsCfg.ServerName = host
