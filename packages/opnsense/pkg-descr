@@ -1,0 +1,6 @@
+Pangolin Newt site connector for OPNsense.
+
+Includes a VPN configuration page, service controls, log viewer, persistent
+configuration and automatic import of an existing standalone Newt installation.
+Bundles the official Newt 1.18.1 binary for FreeBSD.
+This is a locally maintained plugin, not an official OPNsense or Pangolin release.
