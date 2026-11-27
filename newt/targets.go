@@ -11,6 +11,18 @@ import (
 	"github.com/fosrl/newt/proxy"
 )
 
+// tunnelNotReady reports whether target messages must be dropped because the tunnel
+// isn't up yet. The client has already stored the dropped message's config version,
+// so it is marked stale: the server then sends a full sync once the tunnel is up.
+func (n *Newt) tunnelNotReady() bool {
+	if n.wgData.TunnelIP != "" && n.pm != nil {
+		return false
+	}
+	logger.Info(msgNoTunnelOrProxy)
+	n.client.MarkConfigStale()
+	return true
+}
+
 func parseTargetData(data interface{}) (TargetData, error) {
 	var targetData TargetData
 	jsonData, err := json.Marshal(data)
