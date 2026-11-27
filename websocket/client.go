@@ -61,6 +61,7 @@ type Client struct {
 	serverVersion     string
 	configVersion     int64 // Latest config version received from server
 	configVersionMux  sync.RWMutex
+	configStale       atomic.Bool // A received config message couldn't be applied; pings ask for a sync until cleared
 	processingMessage   bool           // Flag to track if a message is currently being processed
 	processingMux       sync.RWMutex   // Protects processingMessage
 	processingWg        sync.WaitGroup // WaitGroup to wait for message processing to complete
@@ -214,6 +215,26 @@ func (c *Client) setConfigVersion(version int64) {
 	c.configVersionMux.Lock()
 	defer c.configVersionMux.Unlock()
 	c.configVersion = version
+}
+
+// MarkConfigStale records that a config message was received but not applied.
+// The version it carried is already stored, so until ClearConfigStale pings report
+// a version the server can't match, which makes it send a full sync.
+func (c *Client) MarkConfigStale() {
+	c.configStale.Store(true)
+}
+
+// ClearConfigStale ends the forced sync once a sync has been applied.
+func (c *Client) ClearConfigStale() {
+	c.configStale.Store(false)
+}
+
+// pingConfigVersion is the config version to report in a ping.
+func (c *Client) pingConfigVersion() int64 {
+	if c.configStale.Load() {
+		return -1
+	}
+	return c.GetConfigVersion()
 }
 
 // Connect establishes the WebSocket connection
@@ -760,9 +781,7 @@ func (c *Client) sendPing() {
 		return
 	}
 
-	c.configVersionMux.RLock()
-	configVersion := c.configVersion
-	c.configVersionMux.RUnlock()
+	configVersion := c.pingConfigVersion()
 
 	pingMsg := WSMessage{
 		Type:          "newt/ping",

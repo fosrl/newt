@@ -186,8 +186,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 	n.client.RegisterHandler("newt/tcp/add", func(msg websocket.WSMessage) {
 		logger.Debug(fmtReceivedMsg, msg)
 
-		if n.wgData.TunnelIP == "" || n.pm == nil {
-			logger.Info(msgNoTunnelOrProxy)
+		if n.tunnelNotReady() {
 			return
 		}
 
@@ -205,8 +204,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 	n.client.RegisterHandler("newt/udp/add", func(msg websocket.WSMessage) {
 		logger.Info(fmtReceivedMsg, msg)
 
-		if n.wgData.TunnelIP == "" || n.pm == nil {
-			logger.Info(msgNoTunnelOrProxy)
+		if n.tunnelNotReady() {
 			return
 		}
 
@@ -224,8 +222,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 	n.client.RegisterHandler("newt/udp/remove", func(msg websocket.WSMessage) {
 		logger.Info(fmtReceivedMsg, msg)
 
-		if n.wgData.TunnelIP == "" || n.pm == nil {
-			logger.Info(msgNoTunnelOrProxy)
+		if n.tunnelNotReady() {
 			return
 		}
 
@@ -243,8 +240,7 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 	n.client.RegisterHandler("newt/tcp/remove", func(msg websocket.WSMessage) {
 		logger.Info(fmtReceivedMsg, msg)
 
-		if n.wgData.TunnelIP == "" || n.pm == nil {
-			logger.Info(msgNoTunnelOrProxy)
+		if n.tunnelNotReady() {
 			return
 		}
 

@@ -12,9 +12,7 @@ import (
 func (n *Newt) handleSync(msg websocket.WSMessage) {
 	logger.Info("Received sync message")
 
-	// if there is no wgData or pm, we can't sync targets
-	if n.wgData.TunnelIP == "" || n.pm == nil {
-		logger.Info(msgNoTunnelOrProxy)
+	if n.tunnelNotReady() {
 		return
 	}
 
@@ -29,6 +27,7 @@ func (n *Newt) handleSync(msg websocket.WSMessage) {
 		logger.Error("Error unmarshaling sync data: %v", err)
 		return
 	}
+	n.client.ClearConfigStale()
 
 	logger.Debug("Sync data received: TCP targets=%d, UDP targets=%d, health check targets=%d",
 		len(syncData.Targets.TCP), len(syncData.Targets.UDP), len(syncData.HealthCheckTargets))
